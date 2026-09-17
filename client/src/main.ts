@@ -29,6 +29,7 @@ import { SceneManager } from "./engine/SceneManager";
 import { NetworkManager, type RoomSnapshot } from "./net/NetworkManager";
 import { RemoteAvatars } from "./net/RemoteAvatars";
 import { applyAimAssist } from "./net/aimAssist";
+import { beginChargeLevel, pitchRateScale, stepChargeLevel, type ChargeLevel } from "./net/chargeAim";
 import {
   applyExpo,
   buildInputPayload,
@@ -127,6 +128,9 @@ async function boot(): Promise<void> {
   let hasSuperBuff = false;
   let aimYaw = 0;
   let aimPitch = 0.25;
+  // One-shot charge pitch leveling (owner: camera eases to horizon at aim
+  // start, then free aim): armed in startCharge, cleared on any exit below.
+  let chargeLevel: ChargeLevel = { active: false };
   // Floating right-thumb aim (Brawl-Stars-like one-thumb flow): pointerdown on
   // the right half records a floating origin where the thumb landed; drag
   // offsets map to an expo-shaped vector integrated into aimYaw/aimPitch at
@@ -202,6 +206,7 @@ async function boot(): Promise<void> {
       aimYaw = angles.yaw;
       aimPitch = angles.pitch;
       isCharging = false;
+      chargeLevel.active = false;
       isReloading = false;
       reloadUntilMs = 0;
       sceneManager.setCharge01(0);
@@ -225,6 +230,7 @@ async function boot(): Promise<void> {
       // overlay — show the plate again with feedback instead of hanging.
       isPlaying = false;
       isCharging = false;
+      chargeLevel.active = false;
       isReloading = false;
       sceneManager.setCharge01(0);
       sceneManager.setChargeZoom01(0);
@@ -243,6 +249,7 @@ async function boot(): Promise<void> {
       latest = null;
       isPlaying = false;
       isCharging = false;
+      chargeLevel.active = false;
       isReloading = false;
       hasSuperBuff = false;
       sceneManager.setCharge01(0);
@@ -422,6 +429,9 @@ async function boot(): Promise<void> {
     }
     isCharging = true;
     chargeStartMs = nowMs;
+    // One-shot pitch leveling armed: the camera eases toward the horizon
+    // until the first aim-stick deflection takes over (per-frame below).
+    chargeLevel = beginChargeLevel();
     // Stage 4d.2: avatar fades from charge start until the actual shot /
     // cancel; zoom starts at default and eases per-frame below.
     sceneManager.setChargeTranslucent(true);
@@ -435,6 +445,7 @@ async function boot(): Promise<void> {
       return;
     }
     isCharging = false;
+    chargeLevel.active = false;
     sceneManager.setCharge01(0);
     // Stage 4d.2: cancel returns zoom + opacity (eased, never mid-charge).
     sceneManager.setChargeZoom01(0);
@@ -451,6 +462,7 @@ async function boot(): Promise<void> {
     const nowMs = Date.now();
     const chargeMs = nowMs - chargeStartMs;
     isCharging = false;
+    chargeLevel.active = false;
     sceneManager.setCharge01(0);
     // Stage 4d.2: the shot (or tap) returns zoom + opacity — held until here,
     // never reset mid-charge or on aim-stick moves.
@@ -769,6 +781,7 @@ async function boot(): Promise<void> {
       sceneManager.reset();
       input.reset();
       isCharging = false;
+      chargeLevel.active = false;
       isReloading = false;
       reloadUntilMs = 0;
       aimVector = { x: 0, y: 0 };
@@ -893,15 +906,19 @@ async function boot(): Promise<void> {
     // release-moment aim never drifts from what the player sees. While
     // charging the camera copies aimYaw/aimPitch each frame (360-degree one
     // thumb turn). Charge only drives power (charge01), never direction.
+    // Charge leveling: at aim start the pitch eases ONCE toward the horizon
+    // (interrupted by any aim deflection); while charging the vertical rate
+    // is damped (muted wander, full down-aim range kept).
     if (playing) {
+      const pitchScale = pitchRateScale(isCharging);
       if (Math.hypot(aimVector.x, aimVector.y) >= FLOAT_DEADZONE) {
         aimYaw -= aimVector.x * AIM_YAW_RATE * deltaSeconds;
-        const nextPitch = aimPitch + aimVector.y * AIM_PITCH_RATE * deltaSeconds;
+        const nextPitch = aimPitch + aimVector.y * AIM_PITCH_RATE * pitchScale * deltaSeconds;
         aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextPitch));
       }
       if (Math.hypot(floatVector.x, floatVector.y) >= FLOAT_DEADZONE) {
         aimYaw -= floatVector.x * AIM_YAW_RATE * deltaSeconds;
-        const nextFloatPitch = aimPitch + floatVector.y * AIM_PITCH_RATE * deltaSeconds;
+        const nextFloatPitch = aimPitch + floatVector.y * AIM_PITCH_RATE * pitchScale * deltaSeconds;
         aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextFloatPitch));
       }
       if (
@@ -915,6 +932,12 @@ async function boot(): Promise<void> {
         aimPitch = cam.pitch;
       }
       if (isCharging) {
+        // One-shot level: no input → ease toward horizon; any deflection
+        // hands control back to the stick instantly (damped rate above).
+        const deflected =
+          Math.hypot(aimVector.x, aimVector.y) >= FLOAT_DEADZONE ||
+          Math.hypot(floatVector.x, floatVector.y) >= FLOAT_DEADZONE;
+        aimPitch = stepChargeLevel(chargeLevel, aimPitch, deflected, deltaSeconds);
         // Camera follows aim while charging (per-frame, no alloc).
         sceneManager.setCameraAngles(aimYaw, aimPitch);
       }

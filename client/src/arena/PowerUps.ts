@@ -6,6 +6,12 @@ import {
   SPEED_DURATION_S,
   SPEED_MULTIPLIER,
 } from "../config";
+import {
+  BASE_PICKUP,
+  HL_CHARTREUSE,
+  HL_CHARTREUSE_BRIGHT,
+  HL_CHARTREUSE_DEEP,
+} from "../palette";
 
 export type PowerUpKind = "speed" | "shield" | "impulse";
 
@@ -85,10 +91,13 @@ export function getPickupSlots(): PickupSlot[] {
   ];
 }
 
-const KIND_COLORS: Record<PowerUpKind, number> = {
-  speed: 0x22eeff,
-  shield: 0x44ff66,
-  impulse: 0xff8833,
+// Highlight-bucket pickup colors (chartreuse family, slight per-kind
+// brightness variation for distinguishability): speed base, shield brighter,
+// impulse deep. Exported so burst flashes reuse the exact same colors.
+export const KIND_COLORS: Record<PowerUpKind, number> = {
+  speed: HL_CHARTREUSE,
+  shield: HL_CHARTREUSE_BRIGHT,
+  impulse: HL_CHARTREUSE_DEEP,
 };
 
 // Floating pickup visuals (octahedrons, bob + spin, cheap stylized). update()
@@ -106,7 +115,7 @@ export class PowerUpPickups {
     for (const slot of getPickupSlots()) {
       const geometry = new THREE.OctahedronGeometry(0.35);
       const material = new THREE.MeshStandardMaterial({
-        color: 0x111111,
+        color: BASE_PICKUP,
         emissive: KIND_COLORS[slot.kind],
         emissiveIntensity: 1.6,
         roughness: 0.4,

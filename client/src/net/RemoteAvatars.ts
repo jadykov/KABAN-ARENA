@@ -6,6 +6,7 @@
 import * as THREE from "three";
 import { MOVE_SPEED } from "../config";
 import {
+  AirborneGate,
   applyClothing,
   attachAvatarVisuals,
   createHopState,
@@ -18,6 +19,7 @@ import {
 } from "../fx/AvatarVisuals";
 import { RemoteTrack, type RemoteTarget } from "./interpolation";
 import { paletteForSession, type NetPlayerSnapshot } from "./protocol";
+import { NEUTRAL_WHITE, NEUTRAL_WHITE_CSS } from "../palette";
 
 export { paletteForSession as paletteFor };
 
@@ -33,7 +35,7 @@ function makeNameSprite(nick: string): THREE.Sprite {
     context.fillStyle = "rgba(0,0,0,0.55)";
     const textWidth = context.measureText(nick).width;
     context.fillRect(128 - textWidth / 2 - 10, 8, textWidth + 20, 48);
-    context.fillStyle = "#ffffff";
+    context.fillStyle = NEUTRAL_WHITE_CSS;
     context.fillText(nick, 128, 34);
   }
   const texture = new THREE.CanvasTexture(canvas);
@@ -52,7 +54,21 @@ interface RemoteEntry {
   visuals: AvatarVisualsHandle;
   track: RemoteTrack;
   hop: HopState;
+  // Airborne estimator: the eased Y trail's vertical speed, damped so a
+  // single snapshot jitter never flips the flight gate. NOTE: the live
+  // server pins player y (1.1, never tracks elevation), so remote flight is
+  // currently unreachable in production — this path is implemented and
+  // tested for synthetic/elevated snapshots and stays ready for replicated
+  // height. Local flight (Rapier vy) is unaffected.
+  vySmooth: number;
+  prevY: number;
+  // Two-level flight gate (shared AirborneGate): entry trips it, sustained
+  // low vertical speed clears it — same apex-flutter protection as locals.
+  gate: AirborneGate;
 }
+
+// Damping rate (1/s) for the remote vertical-speed estimate.
+const REMOTE_VY_SMOOTH_RATE = 8;
 
 export class RemoteAvatars {
   private readonly scene: THREE.Scene;
@@ -110,13 +126,23 @@ export class RemoteAvatars {
       if (snapshot.alive) {
         // South Park hop from the eased displacement (same shared code path
         // as the local avatar; the rig keeps the tracked root stable).
+        // Climbing/falling remotes glide instead of hopping: vertical speed
+        // estimated from the eased Y trail, damped against jitter.
         const moved = Math.hypot(entry.group.position.x - prevX, entry.group.position.z - prevZ);
         const speed01 = deltaSeconds > 0 ? Math.min(1, moved / (deltaSeconds * MOVE_SPEED)) : 0;
-        updateHopVisual(entry.rig, 0, speed01, entry.hop, deltaSeconds);
+        const rawVy = deltaSeconds > 0 ? (entry.group.position.y - entry.prevY) / deltaSeconds : 0;
+        entry.prevY = entry.group.position.y;
+        const smooth = 1 - Math.exp(-REMOTE_VY_SMOOTH_RATE * Math.max(0, deltaSeconds));
+        entry.vySmooth += (rawVy - entry.vySmooth) * smooth;
+        const airborne = entry.gate.update(Math.abs(entry.vySmooth), deltaSeconds);
+        updateHopVisual(entry.rig, 0, speed01, entry.hop, deltaSeconds, airborne);
       } else {
-        // Dead and hidden: clear any residual bounce for the respawn.
+        // Dead and hidden: clear any residual bounce/glide for the respawn.
         resetHopState(entry.hop);
         resetHopVisual(entry.rig, 0);
+        entry.gate.reset();
+        entry.vySmooth = 0;
+        entry.prevY = entry.group.position.y;
       }
     }
     for (const [sessionId, entry] of this.entries) {
@@ -145,7 +171,7 @@ export class RemoteAvatars {
     // white (identity comes from the vertex colors); disposed with the entry.
     const geometry = this.templateGeometry.clone();
     const shirt = paletteForSession(snapshot.sessionId);
-    const material = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, vertexColors: true });
+    const material = new THREE.MeshStandardMaterial({ color: NEUTRAL_WHITE, roughness: 0.6, vertexColors: true });
     const body = new THREE.Mesh(geometry, material);
     body.castShadow = false;
     // Rig carries every visual (body, ball, face) so the hop bounce never
@@ -172,6 +198,9 @@ export class RemoteAvatars {
       visuals,
       track: new RemoteTrack(snapshot.x, snapshot.y, snapshot.z, snapshot.rotY),
       hop: createHopState(snapshot.sessionId),
+      vySmooth: 0,
+      prevY: snapshot.y,
+      gate: new AirborneGate(),
     };
     return entry;
   }

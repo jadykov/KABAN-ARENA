@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  AIRBORNE_VY_THRESHOLD,
   ARENA_HALF_SIZE,
   AVATAR_CHARGE_OPACITY,
   CAMERA_CHARGE_DISTANCE,
@@ -69,12 +70,12 @@ describe("SceneManager camera clamp + wall fade", () => {
 });
 
 describe("SceneManager death burst (30, palette 10/30/60)", () => {
-  it("spawns 30 pooled particles with the yellow/orange/red split", async () => {
+  it("spawns 30 pooled particles with the white/pale-violet/muted-red split", async () => {
     expect(DEATH_BURST_COUNT).toBe(30);
-    expect(DEATH_BURST_YELLOW).toBe(0xffe14d);
-    expect(DEATH_BURST_ORANGE).toBe(0xff8833);
-    expect(DEATH_BURST_RED).toBe(0xff3344);
-    // 10% yellow / 30% orange / 60% red of the 30-burst.
+    expect(DEATH_BURST_YELLOW).toBe(0xf5f0ff);
+    expect(DEATH_BURST_ORANGE).toBe(0xb9a3e6);
+    expect(DEATH_BURST_RED).toBe(0xa8434e);
+    // 10% white / 30% pale violet / 60% muted red of the 30-burst.
     expect(Math.round(DEATH_BURST_COUNT * 0.1)).toBe(3);
     expect(Math.round(DEATH_BURST_COUNT * 0.3)).toBe(9);
     expect(DEATH_BURST_COUNT - 3 - 9).toBe(18);
@@ -133,8 +134,7 @@ describe("SceneManager charge zoom (4m default, ~3.2m held until shot)", () => {
   });
 });
 
-describe("SceneManager charge translucency (local avatar only)", () => {
-  it("fades body + hand ball to ~0.3 while active, restores to 1 after", async () => {
+describe("SceneManager charge translucency (local avatar only)", () => {  it("fades body + hand ball to ~0.3 while active, restores to 1 after", async () => {
     expect(AVATAR_CHARGE_OPACITY).toBe(0.3);
     const manager = await createManager();
     expect(manager.getAvatarOpacity()).toBe(1);
@@ -157,5 +157,41 @@ describe("SceneManager charge translucency (local avatar only)", () => {
     expect(manager.getAvatarOpacity()).toBeCloseTo(AVATAR_CHARGE_OPACITY, 10);
     manager.setChargeTranslucent(false);
     expect(manager.getAvatarOpacity()).toBe(1);
+  });
+});
+
+describe("SceneManager airborne flight gate (glide, no bounce mid-air)", () => {
+  it("flags airborne from physics vertical speed, clears at rest", async () => {
+    expect(AIRBORNE_VY_THRESHOLD).toBe(2.0);
+    const manager = await createManager();
+    expect(manager.isAirborne()).toBe(false);
+    // Rising fast (trampoline-class vy): airborne from the next tick.
+    manager.debugSetPlayerState({ x: 0, y: 3, z: 0 }, { x: 0, y: 5, z: 0 });
+    manager.update(FRAME, NO_MOVE, NO_LOOK);
+    expect(manager.isAirborne()).toBe(true);
+    // Back to rest on the ground: the exit hold keeps the flag briefly,
+    // then sustained rest clears it (no apex-style flutter on landing).
+    // ~30 frames: the 0.1m spawn drop + Rapier settle consume the first
+    // ~8, the 0.25s hold needs 15 more (probe-verified, gate code untouched).
+    manager.debugSetPlayerState({ x: 0, y: 1.1, z: 0 }, { x: 0, y: 0, z: 0 });
+    manager.update(FRAME, NO_MOVE, NO_LOOK);
+    expect(manager.isAirborne()).toBe(true);
+    for (let i = 0; i < 30; i += 1) {
+      manager.update(FRAME, NO_MOVE, NO_LOOK);
+    }
+    expect(manager.isAirborne()).toBe(false);
+  });
+
+  it("a trampoline launch trips the gate naturally", async () => {
+    const manager = await createManager();
+    // Pad at (0, 4.2): teleporting over it auto-launches (vy = 10).
+    manager.teleportSelf(0, 4.2);
+    expect(manager.isAirborne()).toBe(false);
+    // The gate reads post-step velocity but the launch fires after the
+    // measurement, so the flag trips on the second tick — honest ordering,
+    // one frame of lag, then solidly airborne.
+    manager.update(FRAME, NO_MOVE, NO_LOOK);
+    manager.update(FRAME, NO_MOVE, NO_LOOK);
+    expect(manager.isAirborne()).toBe(true);
   });
 });

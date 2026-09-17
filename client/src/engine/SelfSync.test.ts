@@ -89,4 +89,25 @@ describe("self reconciliation (bounded drift, no jitter)", () => {
     manager.setSpectating(true);
     expect(manager.reconcileSelf(10, 10, FRAME)).toBe("skipped");
   });
+
+  it("converges toward a legal server target near an obstacle (no pass-through)", async () => {
+    // Through-wall fix regression pin: the server now only emits positions
+    // outside geometry, so reconcile must ease onto a legal target — and the
+    // reconcile path itself is untouched (deadband hold + lerp, no clip).
+    // Note the honest contract: inside the 0.7m deadband reconcile HOLDS
+    // (returns "ok", no jitter correction), so convergence stops at the
+    // band edge, not exactly on the target.
+    const manager = await createFighter();
+    manager.teleportSelf(1.0, 4.8);
+    for (let i = 0; i < 120; i += 1) {
+      manager.reconcileSelf(2.5, 4.8, FRAME);
+    }
+    const after = manager.getAvatarPosition();
+    // Eased from 1.0 to the deadband edge (~1.8), never past the target…
+    expect(after.x).toBeGreaterThan(1.7);
+    expect(after.x).toBeLessThanOrEqual(2.5);
+    expect(after.z).toBeCloseTo(4.8, 5);
+    // …and the eased path never ends embedded in the block (3.3 face).
+    expect(after.x).toBeLessThanOrEqual(3.3 + 0.15);
+  });
 });

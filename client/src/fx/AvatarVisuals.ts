@@ -9,6 +9,9 @@
 
 import * as THREE from "three";
 import {
+  AIRBORNE_EXIT_FRACTION,
+  AIRBORNE_EXIT_HOLD_S,
+  AIRBORNE_VY_THRESHOLD,
   AVATAR_CHARGE_OPACITY,
   HANDBALL_OFFSET_X,
   HANDBALL_OFFSET_Y,
@@ -17,6 +20,18 @@ import {
   HANDBALL_THROW_FLICK_S,
   RELOAD_MS,
 } from "../config";
+import {
+  ACCENT_GLOW_BALL,
+  ACCENT_GLOW_BALL_FULL,
+  IDENTITY_LOCAL,
+  NEUTRAL_FACE_STROKE,
+  NEUTRAL_WHITE,
+  PANTS_FALLBACK,
+  PANTS_PALETTE,
+} from "../palette";
+// Re-exported so existing importers keep working (single source of truth
+// stays in palette.ts).
+export { PANTS_PALETTE };
 
 export interface HandBallHandle {
   readonly group: THREE.Group;
@@ -63,10 +78,14 @@ export interface HopState {
   lean: number;
   drift: number;
   yawWob: number;
+  // Flight glide blend (0 grounded .. 1 fully airborne): eased toward the
+  // airborne flag every frame, drives the forward-lean glide pose while the
+  // bounce amount decays to 0 (no hopping mid-air).
+  glide: number;
 }
 
 export function createHopState(seed = ""): HopState {
-  return { phase: 0, amount: 0, rng: hashSeed(seed), lastHop: -1, lean: 0, drift: 0, yawWob: 0 };
+  return { phase: 0, amount: 0, rng: hashSeed(seed), lastHop: -1, lean: 0, drift: 0, yawWob: 0, glide: 0 };
 }
 
 export function seedHopState(state: HopState, seed: string): void {
@@ -75,6 +94,47 @@ export function seedHopState(state: HopState, seed: string): void {
   state.lean = 0;
   state.drift = 0;
   state.yawWob = 0;
+  state.glide = 0;
+}
+
+// Two-level airborne gate with exit hold (one per avatar, mutated in place).
+// Enter the instant |vy| tops AIRBORNE_VY_THRESHOLD (trampoline launch,
+// platform drop); exit only after |vy| sits below THRESHOLD*EXIT_FRACTION
+// for EXIT_HOLD_S — the hold rides out the ~0.16s sub-exit dip at a jump
+// apex so the glide never flutters mid-flight. Mid-band (|vy| between the
+// two levels) holds the previous state and restarts the exit clock.
+// Scalar only, no allocations; feed it the absolute vertical speed.
+export class AirborneGate {
+  private airborne = false;
+  private lowTime = 0;
+
+  public update(absVy: number, deltaSeconds: number): boolean {
+    if (!(deltaSeconds > 0)) {
+      return this.airborne;
+    }
+    const v = Number.isFinite(absVy) ? absVy : 0;
+    if (v > AIRBORNE_VY_THRESHOLD) {
+      this.airborne = true;
+      this.lowTime = 0;
+    } else if (v < AIRBORNE_VY_THRESHOLD * AIRBORNE_EXIT_FRACTION) {
+      this.lowTime += deltaSeconds;
+      if (this.lowTime >= AIRBORNE_EXIT_HOLD_S) {
+        this.airborne = false;
+      }
+    } else {
+      this.lowTime = 0;
+    }
+    return this.airborne;
+  }
+
+  public reset(): void {
+    this.airborne = false;
+    this.lowTime = 0;
+  }
+
+  public get isAirborne(): boolean {
+    return this.airborne;
+  }
 }
 
 function hashSeed(seed: string): number {
@@ -111,7 +171,7 @@ const faceMaterials: THREE.MeshBasicMaterial[] = [];
 // gameplay distance. Single dark color, no noses, no eyebrows, no hair.
 export const FACE_VARIANT_COUNT = 7;
 export const FACE_CANVAS_SIZE = 128;
-export const FACE_STROKE = "#1a1a1a";
+export const FACE_STROKE = NEUTRAL_FACE_STROKE;
 // Curved decal patch hugging the 0.5m capsule front (+Z): radius sits 8mm
 // proud so it reads painted-on (no z-fight, no floating), arc ~97° wide,
 // upper-front band centered at face height. Rotates with the body (child of
@@ -136,10 +196,10 @@ export function faceVariantForSession(sessionId: string): number {
 }
 
 function ballMaterialFor(color: number): THREE.MeshStandardMaterial {
-  const key = Number.isFinite(color) ? Math.floor(color) : 0xff9f43;
+  const key = Number.isFinite(color) ? Math.floor(color) : IDENTITY_LOCAL;
   return new THREE.MeshStandardMaterial({
     color: key,
-    emissive: 0xff8800,
+    emissive: ACCENT_GLOW_BALL,
     emissiveIntensity: 0,
     roughness: 0.45,
     metalness: 0.1,
@@ -367,7 +427,8 @@ export function attachFace(parent: THREE.Object3D, sessionId = ""): THREE.Group 
 // the face/palette hash*31) mod a small dark pants palette — stable per
 // player, varied across the room. Shirt is always the identity color
 // (LOCAL_AVATAR_COLOR / paletteForSession), matching the hand ball.
-export const PANTS_PALETTE = [0x2b3a4a, 0x5b3a29, 0x3a3a3a, 0x1f4d2e, 0x4a2440, 0x274060] as const;
+// (PANTS_PALETTE itself lives in palette.ts and is re-exported at the top
+// of this file so existing importers keep working.)
 export const CLOTHING_BOUNDARY_Y = 0;
 export const CLOTHING_BLEND = 0.05;
 
@@ -376,7 +437,7 @@ export function pantsColorForSession(sessionId: string): number {
   for (let i = 0; i < sessionId.length; i += 1) {
     hash = (hash * 31 + sessionId.charCodeAt(i)) >>> 0;
   }
-  return PANTS_PALETTE[hash % PANTS_PALETTE.length] ?? PANTS_PALETTE[0] ?? 0x2b3a4a;
+  return PANTS_PALETTE[hash % PANTS_PALETTE.length] ?? PANTS_PALETTE[0] ?? PANTS_FALLBACK;
 }
 
 export function applyClothing(body: THREE.Mesh, shirtColor: number, pantsColor: number): void {
@@ -409,7 +470,7 @@ export function applyClothing(body: THREE.Mesh, shirtColor: number, pantsColor: 
   }
   colors.needsUpdate = true;
   const material = body.material as THREE.MeshStandardMaterial;
-  material.color.setHex(0xffffff);
+  material.color.setHex(NEUTRAL_WHITE);
   if (!material.vertexColors) {
     material.vertexColors = true;
     material.needsUpdate = true;
@@ -417,13 +478,16 @@ export function applyClothing(body: THREE.Mesh, shirtColor: number, pantsColor: 
 }
 
 // South Park-style hop tuning: eased intensity, SLOW waddle cadence (owner:
-// "way too fast" at 6-12Hz — now 2.5-4 hops/s), lift height, exaggerated
-// squash at contact / stretch mid-hop, subtle fore-aft rock plus per-hop
-// chaotic lean/drift/yaw (small: lively wobble, not drunkenness). All scalar.
+// "way too fast" at 6-12Hz, then -25% again at 2.5-4Hz — now 1.875-3
+// hops/s), lift height, exaggerated squash at contact / stretch mid-hop,
+// subtle fore-aft rock plus per-hop chaotic lean/drift/yaw (small: lively
+// wobble, not drunkenness). Flight glide: while airborne the bounce eases
+// out and the rig leans gently forward (HOP_GLIDE_PITCH) instead of hopping.
+// All scalar, no allocations, no lights, no new draw calls.
 const HOP_UP_RATE = 9;
 const HOP_DOWN_RATE = 11;
-const HOP_MIN_HZ = 2.5;
-const HOP_MAX_HZ = 4;
+const HOP_MIN_HZ = 1.875;
+const HOP_MAX_HZ = 3;
 const HOP_LIFT = 0.13;
 const HOP_SQUASH = 0.15;
 const HOP_STRETCH = 0.1;
@@ -431,6 +495,9 @@ const HOP_ROCK = 0.07;
 const HOP_LEAN = 0.1;
 const HOP_DRIFT = 0.03;
 const HOP_YAW = 0.06;
+// Forward lean (radians, rig-local +X pitches the +Z-facing nose gently
+// down toward the movement direction) while fully airborne.
+export const HOP_GLIDE_PITCH = 0.15;
 
 export function resetHopState(state: HopState): void {
   state.phase = 0;
@@ -439,6 +506,7 @@ export function resetHopState(state: HopState): void {
   state.lean = 0;
   state.drift = 0;
   state.yawWob = 0;
+  state.glide = 0;
 }
 
 export function resetHopVisual(rig: THREE.Object3D, baseY: number): void {
@@ -449,22 +517,39 @@ export function resetHopVisual(rig: THREE.Object3D, baseY: number): void {
 
 // Per-frame hop writer (no allocations — pure transform writes on the rig).
 // speed01: 0 = stand still (eases back to exact identity), 1 = full tilt.
-// The rig must be a CHILD of the physics-tracked object so the follow camera
-// keeps following the true body position while only the visual hops.
+// airborne: while true the bounce amount eases to 0 (no hopping mid-air)
+// and the rig eases into a gentle forward-lean glide instead; landing (false
+// again) resumes the bounce. The rig must be a CHILD of the physics-tracked
+// object so the follow camera keeps following the true body position while
+// only the visual hops. The avatar faces its movement direction, so the
+// rig-local forward pitch leans toward movement for locals and remotes alike.
 export function updateHopVisual(
   rig: THREE.Object3D,
   baseY: number,
   speed01: number,
   state: HopState,
   deltaSeconds: number,
+  airborne = false,
 ): void {
   if (!(deltaSeconds > 0)) {
     return;
   }
-  const target = Number.isFinite(speed01) ? Math.min(1, Math.max(0, speed01)) : 0;
+  const target = airborne
+    ? 0
+    : Number.isFinite(speed01)
+      ? Math.min(1, Math.max(0, speed01))
+      : 0;
   const rate = target > state.amount ? HOP_UP_RATE : HOP_DOWN_RATE;
   state.amount += THREE.MathUtils.clamp(target - state.amount, -rate * deltaSeconds, rate * deltaSeconds);
-  if (target === 0 && state.amount < 0.001) {
+  // Glide blend follows the airborne flag on the same snappy rates.
+  const glideTarget = airborne ? 1 : 0;
+  const glideRate = glideTarget > state.glide ? HOP_UP_RATE : HOP_DOWN_RATE;
+  state.glide += THREE.MathUtils.clamp(
+    glideTarget - state.glide,
+    -glideRate * deltaSeconds,
+    glideRate * deltaSeconds,
+  );
+  if (target === 0 && state.amount < 0.001 && state.glide < 0.001) {
     // Fully settled: snap to exact identity (no residual offsets for
     // respawn/death/spectate paths to inherit).
     state.amount = 0;
@@ -473,34 +558,45 @@ export function updateHopVisual(
     state.lean = 0;
     state.drift = 0;
     state.yawWob = 0;
+    state.glide = 0;
     resetHopVisual(rig, baseY);
     return;
   }
-  if (state.amount <= 0) {
-    return;
+  if (state.amount > 0) {
+    // Phase advances at π radians per hop (one |sin| bounce per π), so the
+    // visible bounce rate equals HOP_MIN..MAX_HZ (1.875-3 hops/s at full tilt).
+    state.phase += deltaSeconds * (HOP_MIN_HZ + (HOP_MAX_HZ - HOP_MIN_HZ) * state.amount) * Math.PI;
+    // Hop boundary (|sin| period is π): each new bounce draws a fresh lean /
+    // drift / yaw wobble so consecutive hops waddle chaotically.
+    const hopIndex = Math.floor(state.phase / Math.PI);
+    if (hopIndex !== state.lastHop) {
+      state.lastHop = hopIndex;
+      state.lean = (nextUnit(state) * 2 - 1) * HOP_LEAN;
+      state.drift = (nextUnit(state) * 2 - 1) * HOP_DRIFT;
+      state.yawWob = (nextUnit(state) * 2 - 1) * HOP_YAW;
+    }
+    const hop = Math.abs(Math.sin(state.phase));
+    const squash = 1 - hop;
+    rig.position.y = baseY + hop * HOP_LIFT * state.amount;
+    rig.position.x = state.drift * state.amount;
+    const wide = (squash * HOP_SQUASH - hop * HOP_STRETCH * 0.5) * state.amount;
+    const tall = (hop * HOP_STRETCH - squash * HOP_SQUASH) * state.amount;
+    rig.scale.set(1 + wide, 1 + tall, 1 + wide);
+    rig.rotation.x = -HOP_ROCK * state.amount * Math.sin(state.phase);
+    rig.rotation.z = state.lean * state.amount;
+    rig.rotation.y = state.yawWob * state.amount;
+  } else {
+    // No bounce energy (standing still or fully decayed mid-air): exact
+    // base pose; the glide lean applies below when airborne.
+    rig.position.set(0, baseY, 0);
+    rig.scale.set(1, 1, 1);
+    rig.rotation.set(0, 0, 0);
   }
-  // Phase advances at π radians per hop (one |sin| bounce per π), so the
-  // visible bounce rate equals HOP_MIN..MAX_HZ (2.5-4 hops/s at full tilt).
-  state.phase += deltaSeconds * (HOP_MIN_HZ + (HOP_MAX_HZ - HOP_MIN_HZ) * state.amount) * Math.PI;
-  // Hop boundary (|sin| period is π): each new bounce draws a fresh lean /
-  // drift / yaw wobble so consecutive hops waddle chaotically.
-  const hopIndex = Math.floor(state.phase / Math.PI);
-  if (hopIndex !== state.lastHop) {
-    state.lastHop = hopIndex;
-    state.lean = (nextUnit(state) * 2 - 1) * HOP_LEAN;
-    state.drift = (nextUnit(state) * 2 - 1) * HOP_DRIFT;
-    state.yawWob = (nextUnit(state) * 2 - 1) * HOP_YAW;
+  if (state.glide > 0) {
+    // Gentle flight lean on top of whatever the bounce left (nothing, once
+    // the amount has decayed): nose toward the movement direction.
+    rig.rotation.x += HOP_GLIDE_PITCH * state.glide;
   }
-  const hop = Math.abs(Math.sin(state.phase));
-  const squash = 1 - hop;
-  rig.position.y = baseY + hop * HOP_LIFT * state.amount;
-  rig.position.x = state.drift * state.amount;
-  const wide = (squash * HOP_SQUASH - hop * HOP_STRETCH * 0.5) * state.amount;
-  const tall = (hop * HOP_STRETCH - squash * HOP_SQUASH) * state.amount;
-  rig.scale.set(1 + wide, 1 + tall, 1 + wide);
-  rig.rotation.x = -HOP_ROCK * state.amount * Math.sin(state.phase);
-  rig.rotation.z = state.lean * state.amount;
-  rig.rotation.y = state.yawWob * state.amount;
 }
 
 // Round held ball at the RIGHT side (local −X; the body faces +Z), chest
@@ -555,14 +651,14 @@ export function attachHandBall(parent: THREE.Object3D, color: number): HandBallH
       }
       glowTime += deltaSeconds;
       bobTime += deltaSeconds;
-      // Charge glow on the held core (emissive only, no lights): hot flicker
-      // at full charge, steady warm glow below — same language as the old
-      // barrel glow so charge readability is unchanged.
+      // Charge glow on the held core (emissive only, no lights): muted-red
+      // flicker at full charge, steady dimmer red below — same language as
+      // the old barrel glow so charge readability is unchanged.
       if (charge01 >= 0.8) {
-        material.emissive.setHex(0xff4400);
+        material.emissive.setHex(ACCENT_GLOW_BALL_FULL);
         material.emissiveIntensity = 2.0 + Math.sin(glowTime * 40) * 0.5 + Math.sin(glowTime * 13.7) * 0.3;
       } else {
-        material.emissive.setHex(0xff8800);
+        material.emissive.setHex(ACCENT_GLOW_BALL);
         material.emissiveIntensity = charge01 * 1.6;
       }
       // Throw flick (visible forward snap) runs concurrently with the reload

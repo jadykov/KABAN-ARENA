@@ -11,6 +11,13 @@ import {
   FENCE_TEXTURE_WIDTH,
   WALL_HEIGHT,
 } from "../config";
+import {
+  ACCENT_AD_BANNER,
+  ACCENT_AD_FENCE,
+  BASE_AD_CANVAS,
+  BASE_AD_FRAME,
+  NEUTRAL_WHITE,
+} from "../palette";
 
 // Re-exported for playtest checklists: fence slot count must match QA1-A.
 export const EXPECTED_FENCE_SLOTS = FENCE_SLOT_COUNT;
@@ -76,7 +83,7 @@ export function createPlaceholderTexture(
   if (context === null) {
     throw new Error("2d canvas context unavailable");
   }
-  context.fillStyle = "#0d1420";
+  context.fillStyle = BASE_AD_CANVAS;
   context.fillRect(0, 0, width, height);
   context.strokeStyle = accent;
   context.lineWidth = Math.max(2, Math.floor(width / 128));
@@ -105,7 +112,7 @@ export class AdsManager {
   public buildFrames(scene: THREE.Scene): void {
     // Dark back frames for all fence slots in one InstancedMesh.
     const frameGeometry = new THREE.BoxGeometry(2.2, 1.2, 0.06);
-    const frameMaterial = new THREE.MeshStandardMaterial({ color: 0x0d1119, roughness: 0.9 });
+    const frameMaterial = new THREE.MeshStandardMaterial({ color: BASE_AD_FRAME, roughness: 0.9 });
     this.disposables.push(frameGeometry, frameMaterial);
     const slots = getFenceSlotTransforms();
     const frames = new THREE.InstancedMesh(frameGeometry, frameMaterial, slots.length);
@@ -130,7 +137,7 @@ export class AdsManager {
     const pictureGeometry = new THREE.PlaneGeometry(2, 1);
     this.disposables.push(pictureGeometry);
     for (const slot of slots) {
-      const material = new THREE.MeshBasicMaterial({ color: 0xffffff });
+      const material = new THREE.MeshBasicMaterial({ color: NEUTRAL_WHITE });
       this.disposables.push(material);
       this.fenceMaterials.push(material);
       const picture = new THREE.Mesh(pictureGeometry, material);
@@ -145,7 +152,7 @@ export class AdsManager {
     // Hanging banner 4x1m at the arena center (QA3-A), double-sided.
     const bannerGeometry = new THREE.PlaneGeometry(BANNER_WIDTH_M, BANNER_HEIGHT_M);
     this.disposables.push(bannerGeometry);
-    const bannerMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+    const bannerMat = new THREE.MeshBasicMaterial({ color: NEUTRAL_WHITE, side: THREE.DoubleSide });
     this.disposables.push(bannerMat);
     this.bannerMaterial = bannerMat;
     const banner = new THREE.Mesh(bannerGeometry, bannerMat);
@@ -155,7 +162,7 @@ export class AdsManager {
 
     // Slim rig bar above the banner suggesting the hang.
     const barGeometry = new THREE.BoxGeometry(BANNER_WIDTH_M + 0.3, 0.08, 0.08);
-    const barMaterial = new THREE.MeshStandardMaterial({ color: 0x0d1119, roughness: 0.9 });
+    const barMaterial = new THREE.MeshStandardMaterial({ color: BASE_AD_FRAME, roughness: 0.9 });
     this.disposables.push(barGeometry, barMaterial);
     const bar = new THREE.Mesh(barGeometry, barMaterial);
     bar.position.set(0, WALL_HEIGHT + 1.75, 0);
@@ -185,7 +192,7 @@ export class AdsManager {
         `AD ${i + 1}`,
         FENCE_TEXTURE_WIDTH,
         FENCE_TEXTURE_HEIGHT,
-        "#22eeff",
+        ACCENT_AD_FENCE,
       );
       if (texture !== null) {
         this.disposables.push(texture);
@@ -200,7 +207,7 @@ export class AdsManager {
         "KABAN ARENA",
         BANNER_TEXTURE_WIDTH,
         BANNER_TEXTURE_HEIGHT,
-        "#ff44cc",
+        ACCENT_AD_BANNER,
       );
       if (bannerTexture !== null) {
         this.disposables.push(bannerTexture);

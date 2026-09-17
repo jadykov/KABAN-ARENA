@@ -1,12 +1,13 @@
 import * as THREE from "three";
 import { MAX_LIVE_BALLS, SUPER_BLINK_S } from "../config";
 import type { NetBallSnapshot, NetSuperSnapshot } from "../net/protocol";
+import { ACCENT_BALL_CAP, ACCENT_TRAIL, BASE_BASALT, HL_CHARTREUSE, NEUTRAL_WHITE } from "../palette";
 
 export const BALL_RADIUS = 0.38;
-export const BALL_BASALT_COLOR = 0x2b2f36;
-export const BALL_CAP_COLOR = 0xffaa33;
-export const SUPER_BALL_COLOR = 0xc77bff;
-export const SUPER_INNER_COLOR = 0xffffff;
+export const BALL_BASALT_COLOR = BASE_BASALT;
+export const BALL_CAP_COLOR = ACCENT_BALL_CAP;
+export const SUPER_BALL_COLOR = HL_CHARTREUSE;
+export const SUPER_INNER_COLOR = NEUTRAL_WHITE;
 // SUPER pickup orb (center spawn): slightly bigger shells so the x2 buff
 // reads at a glance on a phone screen. No lights, still one draw group.
 export const SUPER_CORE_OUTER_RADIUS = 1.0;
@@ -25,11 +26,12 @@ export const MUZZLE_FLASH_GROW = 1.2;
 // release read without lights or extra draw-call spikes (pooled).
 export const MUZZLE_FLASH_COUNT = 2;
 // Fire trail pool: fixed per-slot trail sprites (2 per ball, 24 total) in
-// gold (normal) / purple (super). Tied to ball-slot visibility (no spawn
-// rate issues, no per-frame alloc); one shared glow texture.
+// pale violet (normal fallback) / chartreuse (super). Tied to ball-slot
+// visibility (no spawn rate issues, no per-frame alloc); one shared glow
+// texture.
 export const TRAILS_PER_BALL = 2;
 export const TRAIL_POOL_SIZE = MAX_LIVE_BALLS * TRAILS_PER_BALL;
-export const TRAIL_GOLD_COLOR = 0xffcc66;
+export const TRAIL_GOLD_COLOR = ACCENT_TRAIL;
 export const TRAIL_SUPER_COLOR = SUPER_BALL_COLOR;
 export const TRAIL_SCALES = [0.42, 0.26] as const;
 export const TRAIL_OPACITIES = [0.55, 0.32] as const;
@@ -76,13 +78,14 @@ interface TrackedBall {
 // Reused across render() calls so no Set is allocated per frame.
 const renderSeen: Set<string> = new Set();
 
-// Pooled cannonballs (MAX_LIVE_BALLS two-tone cores): dark basalt body +
-// owner-color cap for normal shots (per-color cached materials, no per-frame
-// alloc), purple body + white inner for SUPER shots (group scaled x2 via
-// SUPER_BALL_SCALE so the buff reads on a phone screen). Shared geometries
-// across the pool, MeshBasicMaterial only (no new lights, no transparency).
+// Pooled cannonballs (MAX_LIVE_BALLS two-tone cores): dark violet basalt
+// body + owner-color cap for normal shots (per-color cached materials, no
+// per-frame alloc), chartreuse body + white inner for SUPER shots (group
+// scaled x2 via SUPER_BALL_SCALE so the buff reads on a phone screen).
+// Shared geometries across the pool, MeshBasicMaterial only (no new lights,
+// no transparency).
 // Fire trail: 2 pooled glow sprites per live ball slot tinted by the owner's
-// ball.color (purple for SUPER). Impact feedback is the pooled puff burst
+// ball.color (chartreuse for SUPER). Impact feedback is the pooled puff burst
 // (8 sprites) tinted the same way. Vanished ids pop a puff.
 // Mapping is STABLE by ballId (slotIds parallel to groups): insert/delete/
 // order shifts never teleport a ball to another slot. Positions ease toward
@@ -132,7 +135,7 @@ export class BallsPool {
       const sprite = new THREE.Sprite(
         new THREE.SpriteMaterial({
           map: this.glowTexture,
-          color: 0xffffff,
+          color: NEUTRAL_WHITE,
           transparent: true,
           opacity: 0,
           depthWrite: false,
@@ -356,7 +359,7 @@ export class BallsPool {
     slot.sprite.position.set(x, y, z);
     slot.sprite.scale.set(0.6, 0.6, 1);
     const material = slot.sprite.material as THREE.SpriteMaterial;
-    const tint = superShot ? SUPER_BALL_COLOR : Number.isFinite(color) ? color : 0xffcc66;
+    const tint = superShot ? SUPER_BALL_COLOR : Number.isFinite(color) ? color : ACCENT_TRAIL;
     material.color.set(tint);
     material.opacity = 0.9;
   }
@@ -366,7 +369,7 @@ export class BallsPool {
   // pool (no alloc, no lights, DOM-free); the authoritative ball arrives
   // later via render(). Life is MUZZLE_FLASH_LIFE_S so the eye sees origin
   // at cannon. Tint follows the thrower: owner color for normal shots (falls
-  // back to gold for non-finite colors), purple for SUPER.
+  // back to pale violet for non-finite colors), chartreuse for SUPER.
   public flashMuzzle(x: number, y: number, z: number, superShot: boolean, color: number = TRAIL_GOLD_COLOR): void {
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
       return;
@@ -472,7 +475,7 @@ export class SuperCore {
     this.group.add(this.mesh);
     const core = new THREE.Mesh(
       new THREE.OctahedronGeometry(SUPER_CORE_INNER_RADIUS, 0),
-      new THREE.MeshBasicMaterial({ color: 0xffffff }),
+      new THREE.MeshBasicMaterial({ color: NEUTRAL_WHITE }),
     );
     core.name = "super-core-inner";
     this.inner = core;

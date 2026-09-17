@@ -1,9 +1,11 @@
 import {
   CROSSHAIR_CHARGING_COLOR,
   CROSSHAIR_FULL_COLOR,
+  CROSSHAIR_IDLE_COLOR,
   CROSSHAIR_RELOAD_COLOR,
   CROSSHAIR_SUPER_COLOR,
 } from "../config";
+import { HL_CHARTREUSE_CSS } from "../palette";
 
 export interface AimHandle {
   el: HTMLDivElement;
@@ -88,7 +90,7 @@ export function createAim(parent: HTMLElement): AimHandle {
 
   const paintTraj = (): void => {
     const charge = lastCharge;
-    const color = superMode ? CROSSHAIR_SUPER_COLOR : "#ffffff";
+    const color = superMode ? CROSSHAIR_SUPER_COLOR : CROSSHAIR_IDLE_COLOR;
     const useCustom = customTraj !== null && customTraj.length === trajDots.length;
     for (let i = 0; i < trajDots.length; i += 1) {
       const traj = trajDots[i];
@@ -116,24 +118,25 @@ export function createAim(parent: HTMLElement): AimHandle {
       traj.style.opacity = hidden ? "0" : baseOpacity.toFixed(3);
       traj.style.background = color;
     }
-    dot.style.background = superMode ? CROSSHAIR_SUPER_COLOR : "#ffffff";
+    dot.style.background = superMode ? CROSSHAIR_SUPER_COLOR : CROSSHAIR_IDLE_COLOR;
   };
 
   const paintBar = (): void => {
     // Stage 4d.2: the power bar is charge-only (reload moved to its own bar
     // below, painted by paintReload). No dual-purpose anymore.
+    // Palette ramp (all stops are palette constants, no raw color math):
+    // empty white -> charging chartreuse -> FULL muted red. Bar width
+    // carries the fine granularity; color carries the band.
     powerFill.style.width = `${Math.round(lastCharge * 100)}%`;
     if (superMode && lastCharge > 0) {
       powerFill.style.background = CROSSHAIR_SUPER_COLOR;
       return;
     }
-    // Worms ramp: yellow -> red as charge grows.
     const t = Math.max(0, Math.min(1, lastCharge));
     if (t >= 1) {
       powerFill.style.background = CROSSHAIR_FULL_COLOR;
     } else if (t > 0) {
-      const hue = Math.round(48 - 48 * t);
-      powerFill.style.background = `hsl(${hue} 100% 55%)`;
+      powerFill.style.background = HL_CHARTREUSE_CSS;
     } else {
       powerFill.style.background = CROSSHAIR_CHARGING_COLOR;
     }

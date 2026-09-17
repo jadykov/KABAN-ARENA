@@ -111,6 +111,39 @@ describe("InputController", () => {
     }
   });
 
+  it("delivers non-inverted mouse look: mouse up (negative movementY) is +dy", () => {
+    // Owner playtest: raising the mouse must raise the camera/aim.
+    // Raw movementY is screen-space (up = negative); the controller negates
+    // it so LookDelta.dy stays "up positive" like every stick path, and
+    // SceneManager pitch += dy then looks up.
+    const keys = new EventTarget();
+    const pointers = new EventTarget();
+    const input = new InputController();
+    input.attach(keys, pointers);
+    try {
+      const down = new Event("pointerdown") as Event & {
+        button?: number;
+        pointerType?: string;
+      };
+      down.button = 2;
+      down.pointerType = "mouse";
+      pointers.dispatchEvent(down);
+      const move = new Event("pointermove") as Event & {
+        movementX?: number;
+        movementY?: number;
+        pointerType?: string;
+      };
+      move.movementX = 8;
+      move.movementY = -10; // mouse pushed up
+      move.pointerType = "mouse";
+      keys.dispatchEvent(move);
+      expect(input.consumeLookDelta()).toEqual({ dx: 8, dy: 10 });
+      expect(input.consumeLookDelta()).toEqual({ dx: 0, dy: 0 });
+    } finally {
+      input.dispose();
+    }
+  });
+
   it("merges joystick input and stops listening after detach", () => {
     const keys = new EventTarget();
     const pointers = new EventTarget();

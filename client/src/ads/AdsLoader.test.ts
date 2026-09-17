@@ -9,6 +9,7 @@ import {
   resolveBannerUrls,
   resolveFenceUrls,
 } from "./AdsLoader";
+import { ACCENT_AD_FENCE } from "../palette";
 
 describe("ads slot layout (QA1-A)", () => {
   it("exposes 6 fence slots at readable height", () => {
@@ -44,7 +45,7 @@ describe("ads slot layout (QA1-A)", () => {
   it("generates the canvas fallback only where DOM canvas exists", () => {
     // Node has no document: this pins the fallback branch used when owner
     // files are missing (browser draws the placeholder, headless gets null).
-    expect(() => createPlaceholderTexture("AD 1", 512, 256, "#22eeff")).toThrow();
+    expect(() => createPlaceholderTexture("AD 1", 512, 256, ACCENT_AD_FENCE)).toThrow();
   });
 });
 

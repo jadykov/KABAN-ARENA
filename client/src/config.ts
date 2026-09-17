@@ -4,6 +4,20 @@
 // them named here instead of hardcoding literals across modules
 // (AGENTS.md hardcoding rule).
 
+// Color values live in palette.ts (single source of truth); this file only
+// re-exports them under the long-standing gameplay names.
+import {
+  ACCENT_CROSSHAIR_CHARGING,
+  ACCENT_CROSSHAIR_FULL,
+  ACCENT_DEATH_PALE,
+  ACCENT_DEATH_RED,
+  ACCENT_DEATH_WHITE,
+  HL_CHARTREUSE_CSS,
+  IDENTITY_LOCAL,
+  IDENTITY_REMOTES,
+  NEUTRAL_WHITE_CSS,
+} from "./palette";
+
 // Third-person follow camera (Q9-A confirmed 2026-09-11; distance 4m since
 // Stage 4d.2, charge zoom ~3.2m held until the actual shot).
 export const CAMERA_FOV = 75;
@@ -65,6 +79,16 @@ export const ICE_FRICTION = 0.07;
 export const ICE_LINEAR_DAMPING = 1.0;
 export const TRAMPOLINE_IMPULSE = 10;
 export const TRAMPOLINE_COOLDOWN_S = 0.5;
+// Airborne flight gate (hop visuals): enter when |vertical velocity| tops
+// THRESHOLD, exit only after it sits below THRESHOLD*EXIT_FRACTION for
+// EXIT_HOLD_S (two-level gate + hold kills apex flutter: at a jump apex
+// |vy| dips under the exit level for ~0.16s, shorter than the hold).
+// THRESHOLD sits safely above ramp-climb vy (tan14° × 4.5m/s ≈ 1.1 —
+// climbing a ramp stays grounded) and far below trampoline launch
+// (TRAMPOLINE_IMPULSE 8-12). Grounded Rapier rest/contact reads ~0.
+export const AIRBORNE_VY_THRESHOLD = 2.0;
+export const AIRBORNE_EXIT_FRACTION = 0.4;
+export const AIRBORNE_EXIT_HOLD_S = 0.25;
 // Trampoline pads are trigger-only by design (no physical pad collider —
 // see ArenaBuilder.buildColliders): pad top sits at ~0.36m, a resting
 // capsule center at ~1.0m, so the trigger band stays above ground level
@@ -140,11 +164,13 @@ export const CAMERA_SMOOTH_RATE = 13;
 // same kick authoritatively), so reconcileSelf skips corrections for this long
 // after a local kick instead of fighting it and double-tugging the avatar.
 export const RECOIL_RECONCILE_GRACE_S = 0.15;
-// Avatar colors: local fighter orange, remotes cycle the shared palette by
-// sessionId hash. Balls reuse the same mapping (cap/glow/trail tinted by the
-// owner color, basalt body kept) so every core reads as its thrower's.
-export const LOCAL_AVATAR_COLOR = 0xff9f43;
-export const REMOTE_PALETTE = [0x22d3ee, 0xa78bfa, 0x4ade80, 0xf472b6, 0xfacc15, 0x60a5fa] as const;
+// Avatar colors: local fighter salmon-red, remotes cycle the shared identity
+// palette by sessionId hash. Balls reuse the same mapping (cap/glow/trail
+// tinted by the owner color, basalt body kept) so every core reads as its
+// thrower's. Values live in palette.ts (IDENTITY_*); these names are kept
+// so tests and config consumers don't break.
+export const LOCAL_AVATAR_COLOR = IDENTITY_LOCAL;
+export const REMOTE_PALETTE = IDENTITY_REMOTES;
 // Local spawn height mirrors the server PlayerState y (1.1).
 export const SELF_SPAWN_Y = 1.1;
 // Guest nicks (no auth): validated locally, deduped server-side.
@@ -239,10 +265,11 @@ export const HANDBALL_OFFSET_Z = 0.1;
 // fade to this opacity from charge start until the actual shot/cancel.
 // Hit-flash emissive is independent of opacity, so it keeps working.
 export const AVATAR_CHARGE_OPACITY = 0.3;
-// Death burst palette (yellow 10% / orange 30% / red 60%).
-export const DEATH_BURST_YELLOW = 0xffe14d;
-export const DEATH_BURST_ORANGE = 0xff8833;
-export const DEATH_BURST_RED = 0xff3344;
+// Death burst palette (white 10% / pale violet 30% / muted red 60%).
+// Names kept for consumers; values live in palette.ts (scheme buckets).
+export const DEATH_BURST_YELLOW = ACCENT_DEATH_WHITE;
+export const DEATH_BURST_ORANGE = ACCENT_DEATH_PALE;
+export const DEATH_BURST_RED = ACCENT_DEATH_RED;
 export const DEATH_BURST_COUNT = 30;
 // Tap shorter than this never fires (touch blip, not a shot).
 export const TAP_FIRE_MIN_S = 0.08;
@@ -264,6 +291,15 @@ export const AIM_PITCH_RATE = 1.6;
 // while charging so one thumb can turn 360 degrees.
 export const FLOAT_DRAG_RADIUS_PX = 80;
 export const FLOAT_DEADZONE = 0.05;
+// Charge pitch leveling (owner: at aim start the camera eases ONCE toward
+// the horizon/view direction, then free aim; vertical wander while aiming is
+// slightly damped, but aiming down from elevation stays fully possible).
+// One-shot exp ease toward pitch 0 at charge start (cancelled instantly by
+// any aim-stick/float deflection); afterwards vertical stick rate scales by
+// AIM_PITCH_DAMP while charging only (normal look untouched, range untouched).
+export const CHARGE_PITCH_EASE_RATE = 3.5;
+export const CHARGE_PITCH_EASE_DONE = 0.01;
+export const AIM_PITCH_DAMP = 0.6;
 // Light client-side aim assist (subtle, deterministic, no randomness):
 // living enemy within ASSIST range and inside the aim cone gets a gentle
 // pull toward its center (blend fraction, never a snap). Server authority
@@ -272,12 +308,14 @@ export const FLOAT_DEADZONE = 0.05;
 export const AIM_ASSIST_MAX_DIST_M = 18;
 export const AIM_ASSIST_CONE_DEG = 12;
 export const AIM_ASSIST_BLEND = 0.5;
-// Crosshair colors (DOM aim overlay, pointer-events none).
-export const CROSSHAIR_IDLE_COLOR = "#ffffff";
-export const CROSSHAIR_CHARGING_COLOR = "#ffd54d";
-export const CROSSHAIR_FULL_COLOR = "#ff5340";
-export const CROSSHAIR_RELOAD_COLOR = "#7dd7ff";
-export const CROSSHAIR_SUPER_COLOR = "#c77bff";
+// Crosshair colors (DOM aim overlay, pointer-events none). Values live in
+// palette.ts: idle white, charging white, full muted red, reload + super
+// chartreuse (highlight bucket).
+export const CROSSHAIR_IDLE_COLOR = NEUTRAL_WHITE_CSS;
+export const CROSSHAIR_CHARGING_COLOR = ACCENT_CROSSHAIR_CHARGING;
+export const CROSSHAIR_FULL_COLOR = ACCENT_CROSSHAIR_FULL;
+export const CROSSHAIR_RELOAD_COLOR = HL_CHARTREUSE_CSS;
+export const CROSSHAIR_SUPER_COLOR = HL_CHARTREUSE_CSS;
 
 // WebSocket endpoint for the Colyseus server. Env override first
 // (VITE_SERVER_URL), otherwise same host as the page on the default port.

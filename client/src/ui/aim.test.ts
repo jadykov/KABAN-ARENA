@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { CROSSHAIR_RELOAD_COLOR } from "../config";
+import { CROSSHAIR_CHARGING_COLOR, CROSSHAIR_FULL_COLOR, CROSSHAIR_RELOAD_COLOR } from "../config";
+import { HL_CHARTREUSE_CSS } from "../palette";
 import { POWER_BAR_WIDTH_PX, RELOAD_BAR_WIDTH_PX, TRAJ_DOT_COUNT, createAim } from "./aim";
 
 // Minimal DOM stub: vitest runs in node (no jsdom installed, no installs
@@ -91,7 +92,7 @@ describe("createAim throw-polish markup", () => {
     }
   });
 
-  it("scales traj opacity/length with charge and fills the bar yellow->red", () => {
+  it("scales traj opacity/length with charge and fills the bar white->chartreuse->red", () => {
     const parent = new FakeElement();
     const handle = createAim(asHtml(parent));
     try {
@@ -106,25 +107,33 @@ describe("createAim throw-polish markup", () => {
       const fill = el.querySelector("#power-bar")?.querySelector("#power-bar-fill");
       expect(fill?.style.width).toBe("100%");
       expect(fill?.style.background).not.toBe(CROSSHAIR_RELOAD_COLOR);
+      expect(fill?.style.background).toBe(CROSSHAIR_FULL_COLOR);
       handle.setCharge01(0.5);
       expect(fill?.style.width).toBe("50%");
+      // Palette ramp pin: mid-charge is chartreuse, empty is charging white.
+      expect(fill?.style.background).toBe(HL_CHARTREUSE_CSS);
+      handle.setCharge01(0);
+      expect(fill?.style.width).toBe("0%");
+      expect(fill?.style.background).toBe(CROSSHAIR_CHARGING_COLOR);
     } finally {
       handle.dispose();
     }
   });
 
-  it("keeps the power bar charge-only while reload paints its own bar blue", () => {
+  it("keeps the power bar charge-only while reload paints its own bar chartreuse", () => {
     const parent = new FakeElement();
     const handle = createAim(asHtml(parent));
     try {
       const el = handle.el as unknown as FakeElement;
       handle.setCharge01(0.6);
       handle.setReload01(0.5);
-      // Power bar ignores reload (charge-only since Stage 4d.2).
+      // Power bar ignores reload (charge-only since Stage 4d.2): at 0.6 the
+      // palette ramp paints chartreuse — width (60% vs the reload bar's
+      // 50%) proves the bars are independent, not color.
       const fill = el.querySelector("#power-bar")?.querySelector("#power-bar-fill");
       expect(fill?.style.width).toBe("60%");
-      expect(fill?.style.background).not.toBe(CROSSHAIR_RELOAD_COLOR);
-      // Dedicated reload bar shows progress in blue.
+      expect(fill?.style.background).toBe(HL_CHARTREUSE_CSS);
+      // Dedicated reload bar shows progress in chartreuse.
       const reloadFill = parent.querySelector("#reload-bar")?.querySelector("#reload-bar-fill");
       expect(reloadFill?.style.width).toBe("50%");
       expect(reloadFill?.style.background).toBe(CROSSHAIR_RELOAD_COLOR);

@@ -239,16 +239,16 @@ export interface NetBallSnapshot {
   color: number;
 }
 
-// Fighter color for a session: the local player reads orange, every remote
-// reads its palette hash — the same mapping RemoteAvatars paints bodies
-// with, shared here so balls, trails and glows match the thrower.
+// Fighter color for a session: the local player reads identity red, every
+// remote reads its palette hash — the same mapping RemoteAvatars paints
+// bodies with, shared here so balls, trails and glows match the thrower.
 export function paletteForSession(sessionId: string): number {
   let hash = 0;
   for (let i = 0; i < sessionId.length; i += 1) {
     hash = (hash * 31 + sessionId.charCodeAt(i)) >>> 0;
   }
   const color = REMOTE_PALETTE[hash % REMOTE_PALETTE.length];
-  return color ?? REMOTE_PALETTE[0] ?? 0x22d3ee;
+  return color ?? REMOTE_PALETTE[0] ?? LOCAL_AVATAR_COLOR;
 }
 
 export function ownerColorForSession(ownerId: string, selfId: string | null): number {

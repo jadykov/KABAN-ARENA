@@ -10,6 +10,7 @@ import {
   MAX_LIVE_BALLS,
   MAX_PLAYERS,
   PATCH_RATE_MS,
+  PLAYER_BODY_RADIUS,
   RELOAD_MS,
   REMATCH_DELAY_MS,
   RESPAWN_DELAY_MS,
@@ -19,7 +20,7 @@ import {
   WEAK_DAMAGE,
 } from "./config.js";
 import { bodyCenterYAt, groundTopAt, muzzleForShot, resolveThrowerY, sanitizeThrowerY } from "./hits.js";
-import { ArenaRoom } from "./rooms/ArenaRoom.js";
+import { ArenaRoom, SERVER_OBSTACLES } from "./rooms/ArenaRoom.js";
 import type { PlayerState } from "./state.js";
 
 function fakeClient(sessionId: string): Client {
@@ -946,5 +947,172 @@ describe("self-sync: world-space input semantics + welcome spawn coords", () => 
     expect(typeof body.z).toBe("number");
     expect(body.x).toBe(player?.x);
     expect(body.z).toBe(player?.z);
+  });
+});
+
+// Through-wall fix (room level): authoritative positions never enter
+// geometry, so the client reconcile loop has no pass-through to chase.
+// Corner block (4.8, 4.8) hx=hz=1 + 0.5 radius → faces at 3.3 / 6.3;
+// platform 0 (13.8, -8.5) hx=hz=1.2 → min-x face 12.1, open ramp face +z.
+describe("server movement collision (humans + bots stop/slide, never pass)", () => {
+  function sendMove(room: ArenaRoom, sessionId: string, x: number, y: number): void {
+    (room as unknown as { handleInput(sessionId: string, payload: unknown): void }).handleInput(sessionId, {
+      x,
+      y,
+      rotY: 0,
+      seq: 1,
+      charging: false,
+    });
+  }
+
+  function tick50(room: ArenaRoom): void {
+    advance(room, 50);
+    room.tickRoom(50);
+  }
+
+  // Undamageable fighters: balls still fly but canDamage fails, so no
+  // knockback shove ever displaces the measured positions.
+  function godmode(room: ArenaRoom): void {
+    room.state.players.forEach((player: PlayerState): void => {
+      player.invulnUntil = 1e15;
+    });
+  }
+
+  // Asserts one fighter is not strictly inside any expanded solid footprint
+  // (resting contact ON a face is legal — only real penetration fails).
+  function expectOutsideSolids(
+    room: ArenaRoom,
+    solids: ReadonlyArray<{ x: number; z: number; hx: number; hz: number }>,
+    sessionId: string,
+  ): void {
+    const fighter = getPlayer(room, sessionId);
+    if (fighter === undefined) {
+      throw new Error(`missing ${sessionId}`);
+    }
+    for (const solid of solids) {
+      const insideX = Math.abs(fighter.x - solid.x) < solid.hx + PLAYER_BODY_RADIUS - 1e-6;
+      const insideZ = Math.abs(fighter.z - solid.z) < solid.hz + PLAYER_BODY_RADIUS - 1e-6;
+      expect(insideX && insideZ).toBe(false);
+    }
+  }
+
+  it("humans stop at the obstacle face instead of walking through", async () => {
+    const room = await playingRoom();
+    godmode(room);
+    const player = getPlayer(room, "s1");
+    if (player === undefined) {
+      throw new Error("missing s1");
+    }
+    player.x = 1.0;
+    player.z = 4.8;
+    sendMove(room, "s1", 1, 0);
+    for (let i = 0; i < 80; i += 1) {
+      tick50(room);
+    }
+    const after = getPlayer(room, "s1");
+    // Pinned at the expanded face (3.3), made progress, never drifted in z.
+    expect(after?.x ?? 99).toBeLessThanOrEqual(3.3 + 1e-9);
+    expect(after?.x ?? 0).toBeGreaterThan(2.5);
+    expect(after?.z ?? 99).toBeCloseTo(4.8, 9);
+  });
+
+  it("humans slide along the face on diagonal input", async () => {
+    const room = await playingRoom();
+    godmode(room);
+    const player = getPlayer(room, "s1");
+    if (player === undefined) {
+      throw new Error("missing s1");
+    }
+    player.x = 3.2;
+    player.z = 4.8;
+    sendMove(room, "s1", 1, 1);
+    const solids = [...SERVER_OBSTACLES, ...SERVER_PLATFORMS];
+    // Short window: 8 ticks slide +z along the face (x pinned at 3.3) while
+    // z is still alongside the block — longer runs legitimately round the
+    // corner (x frees once z clears 6.3), which is correct wall behavior.
+    for (let i = 0; i < 8; i += 1) {
+      tick50(room);
+      expectOutsideSolids(room, solids, "s1");
+    }
+    const after = getPlayer(room, "s1");
+    // X stays pinned at the face while Z advances past the block.
+    expect(after?.x ?? 99).toBeLessThanOrEqual(3.3 + 1e-9);
+    expect(after?.z ?? 0).toBeGreaterThan(5.5);
+  });
+
+  it("platform sheer sides block, the ramp side stays walkable", async () => {
+    const room = await playingRoom();
+    godmode(room);
+    const player = getPlayer(room, "s1");
+    if (player === undefined) {
+      throw new Error("missing s1");
+    }
+    player.x = 10;
+    player.z = -8.5;
+    sendMove(room, "s1", 1, 0);
+    for (let i = 0; i < 40; i += 1) {
+      tick50(room);
+    }
+    expect(getPlayer(room, "s1")?.x ?? 99).toBeLessThanOrEqual(12.1 + 1e-9);
+    // Ramp side (+z of platform 0): walks in past the open face plane (-6.8).
+    player.x = 13.8;
+    player.z = -6.0;
+    sendMove(room, "s1", 0, -1);
+    for (let i = 0; i < 20; i += 1) {
+      tick50(room);
+    }
+    expect(getPlayer(room, "s1")?.z ?? 0).toBeLessThan(-7.5);
+  });
+
+  it("bots never penetrate solids (same resolver as humans)", async () => {
+    const room = await playingRoom();
+    godmode(room);
+    const botIds: string[] = [];
+    room.state.players.forEach((player: PlayerState, key: string): void => {
+      if (player.isBot) {
+        botIds.push(key);
+      }
+    });
+    expect(botIds.length).toBeGreaterThan(0);
+    const solids = [...SERVER_OBSTACLES, ...SERVER_PLATFORMS];
+    for (let i = 0; i < 60; i += 1) {
+      // Re-pin every bot just outside the corner-block face (whatever the
+      // brain chooses next — at most 0.11m per tick — the resolver must
+      // keep it out of the expanded footprint).
+      for (const id of botIds) {
+        const bot = getPlayer(room, id);
+        if (bot !== undefined) {
+          bot.x = 3.0;
+          bot.z = 4.8;
+        }
+      }
+      tick50(room);
+      for (const id of botIds) {
+        expectOutsideSolids(room, solids, id);
+      }
+    }
+  });
+
+  it("ball-hit knockback stops at the block face instead of embedding", async () => {
+    const room = await playingRoom();
+    const { shooter, target } = isolateDuel(room);
+    // Victim just outside obstacle0's min-x face (3.3 expanded); shooter
+    // west of them firing +x (yaw -π/2) so the 1.2m shove pushes +x.
+    shooter.x = 0;
+    shooter.z = 4.8;
+    target.x = 2.5;
+    target.z = 4.8;
+    target.hp = 100;
+    fireAs(room, "s1", { power01: 1, yaw: -Math.PI / 2, pitch: 0.1, super: false });
+    expect(room.state.balls.size).toBe(1);
+    for (let i = 0; i < 60 && room.state.balls.size > 0; i += 1) {
+      advance(room, 50);
+      room.tickRoom(50);
+    }
+    const after = getPlayer(room, "s2");
+    // Knockback fired (victim moved +x) but stopped at the expanded face —
+    // without the resolver it would land at 3.7, strictly inside.
+    expect(after?.x ?? 0).toBeGreaterThan(2.5);
+    expect(after?.x ?? 99).toBeLessThanOrEqual(3.3 + 1e-6);
   });
 });

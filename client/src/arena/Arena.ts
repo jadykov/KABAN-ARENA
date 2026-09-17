@@ -16,6 +16,26 @@ import {
   WALL_THICKNESS,
 } from "../config";
 import type { PhysicsWorld } from "../physics/World";
+import {
+  ACCENT_ICE_GLOW,
+  ACCENT_OBSTACLE_TINT,
+  ACCENT_STRIP,
+  ACCENT_STRIP_BASE,
+  BASE_CAP,
+  BASE_FIGURE_TINTS,
+  BASE_FLOOR,
+  BASE_ICE,
+  BASE_OBSTACLE,
+  BASE_OBSTACLE_TOP,
+  BASE_PAD,
+  BASE_PLATFORM,
+  BASE_PLATFORM_TOP,
+  BASE_RAMP,
+  BASE_TRAMPOLINE,
+  BASE_WALL,
+  HL_CHARTREUSE,
+  NEUTRAL_WHITE,
+} from "../palette";
 
 export interface ObstacleSpec {
   x: number;
@@ -317,7 +337,7 @@ export class ArenaBuilder {
     const size = ARENA_HALF_SIZE * 2;
     const geometry = this.track(new THREE.PlaneGeometry(size, size));
     const material = this.track(
-      new THREE.MeshStandardMaterial({ color: 0x141a26, roughness: 0.9, metalness: 0.05 }),
+      new THREE.MeshStandardMaterial({ color: BASE_FLOOR, roughness: 0.9, metalness: 0.05 }),
     );
     const floor = new THREE.Mesh(geometry, material);
     floor.rotation.x = -Math.PI / 2;
@@ -331,7 +351,7 @@ export class ArenaBuilder {
     const t = WALL_THICKNESS;
     const geometry = this.track(new THREE.BoxGeometry(1, 1, 1));
     const material = this.track(
-      new THREE.MeshStandardMaterial({ color: 0x1b2334, roughness: 0.85, metalness: 0.1 }),
+      new THREE.MeshStandardMaterial({ color: BASE_WALL, roughness: 0.85, metalness: 0.1 }),
     );
     const walls = new THREE.InstancedMesh(geometry, material, 4);
     this.wallMaterial = material;
@@ -354,13 +374,13 @@ export class ArenaBuilder {
     walls.receiveShadow = true;
     this.place(walls, scene);
 
-    // Neon top strips (cyan): one more InstancedMesh, emissive, no shadows.
+    // Neon top strips (muted red): one more InstancedMesh, emissive, no shadows.
     const stripGeometry = this.track(new THREE.BoxGeometry(1, 0.08, 1));
     const stripMaterial = this.track(
       new THREE.MeshStandardMaterial({
-        color: 0x0b2b33,
-        emissive: 0x22eeff,
-        emissiveIntensity: 1.4,
+        color: ACCENT_STRIP_BASE,
+        emissive: ACCENT_STRIP,
+        emissiveIntensity: 1.0,
       }),
     );
     const strips = new THREE.InstancedMesh(stripGeometry, stripMaterial, 4);
@@ -378,10 +398,10 @@ export class ArenaBuilder {
     // Vertex colors: top face carries a subtle neon tint (QD4-A polish),
     // multiplied with the dark base material.
     const geometry = this.track(new THREE.BoxGeometry(1, 1, 1));
-    paintTopFaceVertices(geometry, new THREE.Color(0x9fd8ff), new THREE.Color(0xffffff));
+    paintTopFaceVertices(geometry, new THREE.Color(BASE_OBSTACLE_TOP), new THREE.Color(NEUTRAL_WHITE));
     const material = this.track(
       new THREE.MeshStandardMaterial({
-        color: 0x232c44,
+        color: BASE_OBSTACLE,
         roughness: 0.8,
         metalness: 0.15,
         vertexColors: true,
@@ -389,13 +409,13 @@ export class ArenaBuilder {
     );
     const blocks = new THREE.InstancedMesh(geometry, material, specs.length);
     const matrix = new THREE.Matrix4();
-    const accent = new THREE.Color(0xff44cc);
-    const plain = new THREE.Color(0xffffff);
+    const accent = new THREE.Color(ACCENT_OBSTACLE_TINT);
+    const plain = new THREE.Color(NEUTRAL_WHITE);
     specs.forEach((spec, index) => {
       matrix.makeScale(spec.hx * 2, spec.hy * 2, spec.hz * 2);
       matrix.setPosition(spec.x, spec.hy, spec.z);
       blocks.setMatrixAt(index, matrix);
-      // Alternate subtle magenta edge instance tint for readability.
+      // Alternate subtle muted-red edge instance tint for readability.
       blocks.setColorAt(index, index % 2 === 0 ? plain : accent);
     });
     blocks.instanceMatrix.needsUpdate = true;
@@ -415,10 +435,10 @@ export class ArenaBuilder {
     // never z-fight — the capsule stands on the figure box). No extra lights.
     const platforms = getPlatforms();
     const topGeometry = this.track(new THREE.BoxGeometry(1, 1, 1));
-    paintTopFaceVertices(topGeometry, new THREE.Color(0x8fd8a0), new THREE.Color(0xffffff));
+    paintTopFaceVertices(topGeometry, new THREE.Color(BASE_PLATFORM_TOP), new THREE.Color(NEUTRAL_WHITE));
     const topMaterial = this.track(
       new THREE.MeshStandardMaterial({
-        color: 0x27334d,
+        color: BASE_PLATFORM,
         roughness: 0.8,
         metalness: 0.15,
         vertexColors: true,
@@ -426,13 +446,18 @@ export class ArenaBuilder {
     );
     const tops = new THREE.InstancedMesh(topGeometry, topMaterial, platforms.length);
     const matrix = new THREE.Matrix4();
-    // Distinct accent per figure (tall cube / long block / box / prism).
-    const accents = [new THREE.Color(0xffffff), new THREE.Color(0xffc46b), new THREE.Color(0x9fd8ff), new THREE.Color(0xd9b8ff)];
+    // Distinct accent per figure (white / muted red / dark violet / pale violet).
+    const accents = [
+      new THREE.Color(BASE_FIGURE_TINTS[0] ?? NEUTRAL_WHITE),
+      new THREE.Color(BASE_FIGURE_TINTS[1] ?? NEUTRAL_WHITE),
+      new THREE.Color(BASE_FIGURE_TINTS[2] ?? NEUTRAL_WHITE),
+      new THREE.Color(BASE_FIGURE_TINTS[3] ?? NEUTRAL_WHITE),
+    ];
     platforms.forEach((platform, index) => {
       matrix.makeScale(platform.hx * 2, platform.topY, platform.hz * 2);
       matrix.setPosition(platform.x, platform.topY / 2, platform.z);
       tops.setMatrixAt(index, matrix);
-      tops.setColorAt(index, accents[index % accents.length] ?? new THREE.Color(0xffffff));
+      tops.setColorAt(index, accents[index % accents.length] ?? new THREE.Color(NEUTRAL_WHITE));
     });
     tops.instanceMatrix.needsUpdate = true;
     if (tops.instanceColor !== null) {
@@ -447,7 +472,7 @@ export class ArenaBuilder {
     // top face; 5mm is visually imperceptible). No collider needed — the
     // figure box already tops out there.
     const capMaterial = this.track(
-      new THREE.MeshStandardMaterial({ color: 0x3a4a6e, roughness: 0.6, metalness: 0.25 }),
+      new THREE.MeshStandardMaterial({ color: BASE_CAP, roughness: 0.6, metalness: 0.25 }),
     );
     for (const platform of platforms) {
       const capHeight = 0.1;
@@ -462,7 +487,7 @@ export class ArenaBuilder {
     // Walk-up ramps: individual rotated slabs (2 meshes, no instancing —
     // only two of them). Same material family, tilted to match colliders.
     const rampMaterial = this.track(
-      new THREE.MeshStandardMaterial({ color: 0x2c3a58, roughness: 0.75, metalness: 0.15 }),
+      new THREE.MeshStandardMaterial({ color: BASE_RAMP, roughness: 0.75, metalness: 0.15 }),
     );
     for (const ramp of getRamps()) {
       const length = ramp.halfLength * 2;
@@ -490,8 +515,8 @@ export class ArenaBuilder {
     const geometry = this.track(new THREE.CircleGeometry(1, 40));
     const material = this.track(
       new THREE.MeshStandardMaterial({
-        color: 0x1c3a55,
-        emissive: 0x2288ff,
+        color: BASE_ICE,
+        emissive: ACCENT_ICE_GLOW,
         emissiveIntensity: 0.35,
         transparent: true,
         opacity: 0.75,
@@ -516,14 +541,14 @@ export class ArenaBuilder {
     const zones = getTrampolines();
     const baseGeometry = this.track(new THREE.CylinderGeometry(1, 1.15, 0.25, 24));
     const baseMaterial = this.track(
-      new THREE.MeshStandardMaterial({ color: 0x2a2440, roughness: 0.7, metalness: 0.2 }),
+      new THREE.MeshStandardMaterial({ color: BASE_TRAMPOLINE, roughness: 0.7, metalness: 0.2 }),
     );
     const bases = new THREE.InstancedMesh(baseGeometry, baseMaterial, zones.length);
     const padGeometry = this.track(new THREE.CylinderGeometry(0.85, 0.85, 0.12, 24));
     const padMaterial = this.track(
       new THREE.MeshStandardMaterial({
-        color: 0x331133,
-        emissive: 0xff66ff,
+        color: BASE_PAD,
+        emissive: HL_CHARTREUSE,
         emissiveIntensity: 0.9,
         roughness: 0.5,
       }),
@@ -549,7 +574,7 @@ export class ArenaBuilder {
     const spawns = getSpawnPoints();
     const geometry = this.track(new THREE.RingGeometry(0.5, 0.7, 32));
     const material = this.track(
-      new THREE.MeshBasicMaterial({ color: 0x44ffcc, transparent: true, opacity: 0.8, side: THREE.DoubleSide }),
+      new THREE.MeshBasicMaterial({ color: HL_CHARTREUSE, transparent: true, opacity: 0.8, side: THREE.DoubleSide }),
     );
     const markers = new THREE.InstancedMesh(geometry, material, spawns.length);
     const matrix = new THREE.Matrix4();

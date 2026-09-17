@@ -46,10 +46,11 @@ import {
   WALL_HEIGHT,
 } from "../config";
 import { ArenaBuilder, getTrampolineAt, isOnSlippery } from "../arena/Arena";
-import { PowerUpPickups, PowerUpState, type PowerUpKind } from "../arena/PowerUps";
+import { KIND_COLORS, PowerUpPickups, PowerUpState, type PowerUpKind } from "../arena/PowerUps";
 import { BallsPool, SuperCore } from "../fx/Balls";
 import { CameraShake, HitFlash } from "../fx/CameraShake";
 import {
+  AirborneGate,
   applyClothing,
   attachAvatarVisuals,
   createHopState,
@@ -63,6 +64,18 @@ import {
 import { ParticlePool } from "../fx/Particles";
 import { PhysicsWorld, type Vector3Like } from "../physics/World";
 import type { NetBallSnapshot, NetSuperSnapshot } from "../net/protocol";
+import {
+  ACCENT_FIRE_BURST,
+  ACCENT_HIT_BURST,
+  ACCENT_HIT_FLASH,
+  ACCENT_SPARK,
+  ACCENT_SPOT,
+  BASE_BG,
+  HL_SHIELD,
+  HL_TRAMP_BURST,
+  NEUTRAL_MOON,
+  NEUTRAL_WHITE,
+} from "../palette";
 
 // Planar movement input: x = strafe right (+1) / left (-1),
 // y = forward (+1) / back (-1). Values are clamped to length 1.
@@ -102,6 +115,11 @@ export class SceneManager {
   private avatarMaterial: THREE.MeshStandardMaterial | null = null;
   private readonly hop = createHopState();
   private readonly hopPrev = new THREE.Vector3();
+  // Flight gate: airborne while the Rapier body climbs/falls fast
+  // (trampoline launch, platform drop) — the hop rig glides instead of
+  // bouncing. Two-level gate with exit hold (no ramp trips, no apex
+  // flutter); refreshed in updatePhysics every frame.
+  private readonly airborneGate = new AirborneGate();
   private shieldBubble: THREE.Mesh | null = null;
   private yaw = 0;
   private pitch = 0.25;
@@ -178,13 +196,13 @@ export class SceneManager {
     }
     this.built = true;
 
-    this.scene.background = new THREE.Color(0x0b0e14);
-    this.scene.fog = new THREE.Fog(0x0b0e14, 22, 72);
+    this.scene.background = new THREE.Color(BASE_BG);
+    this.scene.fog = new THREE.Fog(BASE_BG, 22, 72);
 
-    const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+    const ambient = new THREE.AmbientLight(NEUTRAL_WHITE, 0.6);
     this.scene.add(ambient);
 
-    const directional = new THREE.DirectionalLight(0xffffff, 1.0);
+    const directional = new THREE.DirectionalLight(NEUTRAL_WHITE, 1.0);
     directional.position.set(5, 10, 5);
     directional.castShadow = true;
     directional.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
@@ -196,7 +214,7 @@ export class SceneManager {
 
     // MAP exception: a single no-shadow spotlight for the hanging banner
     // (ads dressing QA3-A). Fixed cheap cost, no shadow map, aimed down.
-    const bannerSpot = new THREE.SpotLight(0xffe6ff, 50, 14, 0.55, 0.5, 1.2);
+    const bannerSpot = new THREE.SpotLight(ACCENT_SPOT, 50, 14, 0.55, 0.5, 1.2);
     bannerSpot.position.set(0, WALL_HEIGHT + 4.5, 0);
     bannerSpot.target.position.set(0, WALL_HEIGHT + 1.2, 0);
     bannerSpot.castShadow = false;
@@ -217,8 +235,8 @@ export class SceneManager {
     // white base material (ONE draw call, emissive hit-flash untouched).
     const capsuleGeometry = new THREE.CapsuleGeometry(0.5, 1.0, 8, 16);
     const capsuleMaterial = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      emissive: 0xff2200,
+      color: NEUTRAL_WHITE,
+      emissive: ACCENT_HIT_FLASH,
       emissiveIntensity: 0,
       roughness: 0.55,
       vertexColors: true,
@@ -241,7 +259,7 @@ export class SceneManager {
 
     const bubbleGeometry = new THREE.SphereGeometry(0.95, 20, 14);
     const bubbleMaterial = new THREE.MeshBasicMaterial({
-      color: 0x44ffcc,
+      color: HL_SHIELD,
       transparent: true,
       opacity: 0.28,
     });
@@ -252,7 +270,7 @@ export class SceneManager {
     this.shieldBubble = bubble;
 
     // 4d.1: held ball + face ride on the rig (ball right hand chest height,
-    // face front +Z) so they hop with the body. Tinted local orange.
+    // face front +Z) so they hop with the body. Tinted local identity red.
     this.avatarVisuals = attachAvatarVisuals(rig, LOCAL_AVATAR_COLOR);
     this.ballsPool = new BallsPool(this.scene);
     this.superCore = new SuperCore(this.scene);
@@ -312,6 +330,12 @@ export class SceneManager {
 
   public isSpectating(): boolean {
     return this.spectating;
+  }
+
+  // Flight gate for tests/telemetry: true while the body is airborne enough
+  // to glide instead of hop (see updatePhysics).
+  public isAirborne(): boolean {
+    return this.airborneGate.isAirborne;
   }
 
   // Combat wiring: charge 0..1 for the held-ball glow/swell, latest
@@ -565,14 +589,16 @@ export class SceneManager {
     // South Park hop: displacement speed eases the rig bounce (0 standing
     // still). The rig is a CHILD of the tracked root, so the follow camera
     // keeps following the true body position while only the visual hops.
-    // No allocations: one scratch vector + scalar math.
+    // Airborne (trampoline/platform flight) swaps the bounce for a gentle
+    // forward-lean glide — no hopping mid-air. No allocations: one scratch
+    // vector + scalar math.
     if (this.avatarRig !== null && this.avatar !== null) {
       const movedX = this.avatar.position.x - this.hopPrev.x;
       const movedZ = this.avatar.position.z - this.hopPrev.z;
       const speed01 = deltaSeconds > 0
         ? Math.min(1, Math.hypot(movedX, movedZ) / (deltaSeconds * MOVE_SPEED))
         : 0;
-      updateHopVisual(this.avatarRig, 0, speed01, this.hop, deltaSeconds);
+      updateHopVisual(this.avatarRig, 0, speed01, this.hop, deltaSeconds, this.airborneGate.isAirborne);
       this.hopPrev.set(this.avatar.position.x, this.avatar.position.y, this.avatar.position.z);
     }
     this.updateCameraTransform(deltaSeconds);
@@ -594,7 +620,7 @@ export class SceneManager {
       while (this.sparkTimer >= interval) {
         this.sparkTimer -= interval;
         const muzzle = this.muzzlePosition();
-        this.particles.spawn(muzzle.x, muzzle.y, muzzle.z, 2, new THREE.Color(0xffaa33), 1.5, 1.5);
+        this.particles.spawn(muzzle.x, muzzle.y, muzzle.z, 2, new THREE.Color(ACCENT_SPARK), 1.5, 1.5);
       }
     } else {
       this.sparkTimer = 0;
@@ -645,13 +671,18 @@ export class SceneManager {
     physics.step(deltaSeconds);
     const position = physics.getPlayerPosition();
     avatar.position.set(position.x, position.y, position.z);
+    // Flight gate for the hop rig: post-step vertical speed past the
+    // threshold means trampoline launch / platform drop (glide, no bounce).
+    // Trampoline vy=10 trips it immediately; grounded rest stays ~0; ramp
+    // climbs (~1.1) never reach the 2.0 entry level.
+    this.airborneGate.update(Math.abs(physics.getPlayerVelocity().y), deltaSeconds);
 
     this.trampolineCooldown = Math.max(0, this.trampolineCooldown - deltaSeconds);
     const pad = getTrampolineAt(position.x, position.z);
     if (pad !== null && position.y < TRAMPOLINE_TRIGGER_Y && this.trampolineCooldown <= 0) {
       this.trampolineCooldown = TRAMPOLINE_COOLDOWN_S;
       physics.launchTrampoline();
-      this.particles.spawn(position.x, 0.5, position.z, PARTICLE_BURST_COUNT, new THREE.Color(0xff66ff));
+      this.particles.spawn(position.x, 0.5, position.z, PARTICLE_BURST_COUNT, new THREE.Color(HL_TRAMP_BURST));
       this.shake.add(0.35);
       this.events.push({ type: "trampoline" });
     }
@@ -670,16 +701,16 @@ export class SceneManager {
       return;
     }
     if (kind === "speed") {
-      this.particles.spawn(avatar.position.x, 1.2, avatar.position.z, 16, new THREE.Color(0x22eeff));
+      this.particles.spawn(avatar.position.x, 1.2, avatar.position.z, 16, new THREE.Color(KIND_COLORS.speed));
     } else if (kind === "shield") {
-      this.particles.spawn(avatar.position.x, 1.2, avatar.position.z, 16, new THREE.Color(0x44ff66));
+      this.particles.spawn(avatar.position.x, 1.2, avatar.position.z, 16, new THREE.Color(KIND_COLORS.shield));
     } else if (physics !== null) {
       // Impulse knockback dash in the current move (or facing) direction.
       const direction = worldMove.lengthSq() > 0.0001
         ? worldMove.clone().normalize()
         : new THREE.Vector3(Math.sin(avatar.rotation.y), 0, Math.cos(avatar.rotation.y));
       physics.applyPlayerImpulse(direction.x * KNOCKBACK_IMPULSE, 2.5, direction.z * KNOCKBACK_IMPULSE);
-      this.particles.spawn(avatar.position.x, 1.2, avatar.position.z, PARTICLE_BURST_COUNT, new THREE.Color(0xff8833));
+      this.particles.spawn(avatar.position.x, 1.2, avatar.position.z, PARTICLE_BURST_COUNT, new THREE.Color(KIND_COLORS.impulse));
       this.shake.add(0.25);
     }
   }
@@ -711,12 +742,12 @@ export class SceneManager {
   public applyTestHit(): boolean {
     if (this.powerState.consumeShieldHit()) {
       this.flash.trigger();
-      this.burstAtAvatar(new THREE.Color(0x44ff66), 12);
+      this.burstAtAvatar(new THREE.Color(KIND_COLORS.shield), 12);
       return true;
     }
     this.flash.trigger();
     this.shake.add(0.45);
-    this.burstAtAvatar(new THREE.Color(0xff5533), PARTICLE_BURST_COUNT);
+    this.burstAtAvatar(new THREE.Color(ACCENT_HIT_BURST), PARTICLE_BURST_COUNT);
     return false;
   }
 
@@ -754,6 +785,8 @@ export class SceneManager {
     this.avatar.rotation.y = 0;
     this.resetHop();
     this.hopPrev.set(x, SELF_SPAWN_Y, z);
+    // A teleport zeroes body velocity (physics.reset) — never airborne.
+    this.airborneGate.reset();
     // A teleport is authoritative placement (spawn/respawn/snap) — any
     // pending recoil grace is stale, clear it so corrections resume.
     this.recoilGraceLeftS = 0;
@@ -813,7 +846,7 @@ export class SceneManager {
   public playFireFeedback(): void {
     this.flash.trigger();
     this.shake.add(0.2);
-    this.burstAtAvatar(new THREE.Color(0xffcc44), 8);
+    this.burstAtAvatar(new THREE.Color(ACCENT_FIRE_BURST), 8);
   }
 
   public getCameraAngles(): { yaw: number; pitch: number } {
@@ -851,6 +884,7 @@ export class SceneManager {
     this.aimYaw = 0;
     this.aimPitch = 0.25;
     this.recoilGraceLeftS = 0;
+    this.airborneGate.reset();
     this.cameraSmoothInit = false;
     this.smoothCamPos.set(0, 0, 0);
     this.smoothCamLook.set(0, 0, 0);
@@ -948,7 +982,7 @@ export class SceneManager {
   // 1 ambient + the pre-existing banner spot exception).
   private buildSky(scene: THREE.Scene): void {
     const moonGeometry = new THREE.CircleGeometry(3, 32);
-    const moonMaterial = new THREE.MeshBasicMaterial({ color: 0xf4f1de, fog: false });
+    const moonMaterial = new THREE.MeshBasicMaterial({ color: NEUTRAL_MOON, fog: false });
     const moon = new THREE.Mesh(moonGeometry, moonMaterial);
     moon.name = "moon";
     moon.position.set(-30, 38, -60);
@@ -973,7 +1007,7 @@ export class SceneManager {
     const starGeometry = new THREE.BufferGeometry();
     starGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
     const starMaterial = new THREE.PointsMaterial({
-      color: 0xffffff,
+      color: NEUTRAL_WHITE,
       size: 0.35,
       sizeAttenuation: true,
       fog: false,

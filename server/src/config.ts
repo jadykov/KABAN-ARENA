@@ -15,6 +15,10 @@ export const SIM_TICK_MS = 50; // fixed server simulation step
 export const PLAYER_SPEED = 4.5; // mirrors client MOVE_SPEED
 export const ARENA_HALF_SIZE = 16.8; // mirrors client ARENA_HALF_SIZE (+20%)
 export const SPAWN_INSET = 2.4; // mirrors client SPAWN_INSET (scaled)
+// Player body radius for server-side movement collision (mirrors the client
+// Rapier capsule radius 0.5 in World.ts): the authoritative XZ position is
+// the body CENTER, so solid faces stop it one radius out.
+export const PLAYER_BODY_RADIUS = 0.5;
 
 // Short-round loop C2: lobby countdown 3s, respawn 3s, invuln 2s.
 export const LOBBY_COUNTDOWN_MS = 3000;
@@ -85,11 +89,22 @@ export const RECOIL_FULL_M = 0.8;
 // cannonball impacts. Thin ramp slabs are ignored server-side (balls fly
 // over them); the client still collides the capsule with ramp prisms.
 // 4 entries mirror client PLATFORM_FIGURES (x/z/hx/hz/topY only).
-export const SERVER_PLATFORMS: ReadonlyArray<{ x: number; z: number; hx: number; hz: number; topY: number }> = [
-  { x: 13.8, z: -8.5, hx: 1.2, hz: 1.2, topY: 2.6 },
-  { x: -13.5, z: 10.0, hx: 2.4, hz: 1.0, topY: 1.8 },
-  { x: -11.5, z: -9.5, hx: 1.4, hz: 1.4, topY: 2.2 },
-  { x: 5.0, z: 13.5, hx: 1.0, hz: 1.0, topY: 2.0 },
+// rampSide marks the walk-up face (mirrors client rampSide): server movement
+// collision leaves that face OPEN so fighters can climb onto the top, while
+// the other three faces stay sheer walls.
+export interface ServerPlatformDef {
+  x: number;
+  z: number;
+  hx: number;
+  hz: number;
+  topY: number;
+  rampSide: "+x" | "-x" | "+z" | "-z";
+}
+export const SERVER_PLATFORMS: ReadonlyArray<ServerPlatformDef> = [
+  { x: 13.8, z: -8.5, hx: 1.2, hz: 1.2, topY: 2.6, rampSide: "+z" },
+  { x: -13.5, z: 10.0, hx: 2.4, hz: 1.0, topY: 1.8, rampSide: "-z" },
+  { x: -11.5, z: -9.5, hx: 1.4, hz: 1.4, topY: 2.2, rampSide: "+x" },
+  { x: 5.0, z: 13.5, hx: 1.0, hz: 1.0, topY: 2.0, rampSide: "-x" },
 ];
 // Super-core: center spawn every 45s, 15s life, blink last 3s, 1.7m pickup
 // (matches the bigger 0.8/0.4 visual), buffs NEXT shot only (consumed on

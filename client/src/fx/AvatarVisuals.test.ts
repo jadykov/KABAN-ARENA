@@ -13,6 +13,7 @@ import {
 } from "../config";
 import {
   applyClothing,
+  AirborneGate,
   attachAvatarVisuals,
   attachFace,
   attachHandBall,
@@ -22,6 +23,7 @@ import {
   FACE_DECAL_Y,
   FACE_VARIANT_COUNT,
   faceVariantForSession,
+  HOP_GLIDE_PITCH,
   PANTS_PALETTE,
   pantsColorForSession,
   resetHopState,
@@ -256,7 +258,7 @@ describe("Face decal (big schematic per-player variants)", () => {
 describe("applyClothing (two-tone shirt/pants via vertex colors)", () => {
   it("bakes a soft shirt/pants split with a white vertex-colored base", () => {
     const geo = new THREE.CapsuleGeometry(0.5, 1.0, 4, 8);
-    const mat = new THREE.MeshStandardMaterial({ color: 0xff9f43 });
+    const mat = new THREE.MeshStandardMaterial({ color: LOCAL_AVATAR_COLOR });
     const body = new THREE.Mesh(geo, mat);
     try {
       applyClothing(body, 0xff0000, 0x0000ff);
@@ -399,7 +401,7 @@ describe("updateHopVisual (South Park speed hop, transform-only)", () => {
     const leans = new Set<number>();
     const drifts = new Set<number>();
     const yawWobs = new Set<number>();
-    // ~10+ hops at full-speed cadence (2.5-4 Hz over ~4s).
+    // ~7+ hops at full-speed cadence (1.875-3 Hz over ~4s).
     for (let i = 0; i < 240; i += 1) {
       updateHopVisual(rig, 0, 1, state, 1 / 60);
       leans.add(state.lean);
@@ -411,7 +413,7 @@ describe("updateHopVisual (South Park speed hop, transform-only)", () => {
     expect(yawWobs.size).toBeGreaterThan(1);
   });
 
-  it("hop cadence stays in the 2.5-4 Hz band at full speed", () => {
+  it("hop cadence stays in the 1.875-3 Hz band at full speed", () => {
     const rig = new THREE.Group();
     const state = createHopState("cadence-check");
     // Warm up well past the eased ramp so amount ≈ 1 (max cadence).
@@ -423,11 +425,66 @@ describe("updateHopVisual (South Park speed hop, transform-only)", () => {
     for (let i = 0; i < 60; i += 1) {
       updateHopVisual(rig, 0, 1, state, 1 / 60);
     }
-    // One |sin| bounce per π radians: hops in that second must be 2.5-4
-    // (upper bound with float-dust slack; amount can never exceed 1).
+    // One |sin| bounce per π radians: hops in that second must be 1.875-3
+    // (-25% from 2.5-4; upper bound with float-dust slack; amount ≤ 1).
     const hopsPerSecond = (state.phase - startPhase) / Math.PI;
-    expect(hopsPerSecond).toBeGreaterThanOrEqual(2.5);
-    expect(hopsPerSecond).toBeLessThanOrEqual(4.01);
+    expect(hopsPerSecond).toBeGreaterThanOrEqual(1.875);
+    expect(hopsPerSecond).toBeLessThanOrEqual(3.01);
+  });
+
+  it("airborne suppresses the bounce and leans into a glide instead", () => {
+    expect(HOP_GLIDE_PITCH).toBeGreaterThan(0);
+    const rig = new THREE.Group();
+    const state = createHopState("glide-check");
+    // Grounded at full speed first: real bounce lift appears.
+    let lifted = false;
+    for (let i = 0; i < 120; i += 1) {
+      updateHopVisual(rig, 0, 1, state, 1 / 60, false);
+      if (rig.position.y > 0.05) {
+        lifted = true;
+      }
+    }
+    expect(lifted).toBe(true);
+    // Takeoff: bounce decays within a few frames, then pure glide — measure
+    // the settled tail (no lift, forward lean, no squash residue).
+    let tailMaxY = 0;
+    for (let i = 0; i < 180; i += 1) {
+      updateHopVisual(rig, 0, 1, state, 1 / 60, true);
+      if (i >= 120) {
+        tailMaxY = Math.max(tailMaxY, rig.position.y);
+      }
+    }
+    expect(tailMaxY).toBe(0);
+    expect(state.glide).toBeCloseTo(1, 2);
+    // Lean points forward (toward movement): positive rig-local X rotation.
+    expect(rig.rotation.x).toBeCloseTo(HOP_GLIDE_PITCH, 2);
+    // No squash/stretch residue while gliding.
+    expect(rig.scale.x).toBeCloseTo(1, 6);
+    expect(rig.scale.y).toBeCloseTo(1, 6);
+  });
+
+  it("landing resumes the bounce and clears the glide exactly", () => {
+    const rig = new THREE.Group();
+    const state = createHopState("land-check");
+    for (let i = 0; i < 60; i += 1) {
+      updateHopVisual(rig, 0, 1, state, 1 / 60, true);
+    }
+    expect(state.glide).toBeGreaterThan(0.5);
+    // Touchdown: bounce lift returns, glide drains to exact identity.
+    let lifted = false;
+    for (let i = 0; i < 240; i += 1) {
+      updateHopVisual(rig, 0, 1, state, 1 / 60, false);
+      if (rig.position.y > 0.05) {
+        lifted = true;
+      }
+    }
+    expect(lifted).toBe(true);
+    for (let i = 0; i < 120; i += 1) {
+      updateHopVisual(rig, 0, 0, state, 1 / 60, false);
+    }
+    expect(rig.position.y).toBe(0);
+    expect(rig.rotation.x).toBe(0);
+    expect(state.glide).toBe(0);
   });
 
   it("seedHopState reseeds the chaos stream deterministically", () => {
@@ -442,6 +499,53 @@ describe("updateHopVisual (South Park speed hop, transform-only)", () => {
     }
     expect(rigSecond.rotation.z).toBe(rigFirst.rotation.z);
     expect(rigSecond.position.x).toBe(rigFirst.position.x);
+  });
+});
+
+describe("AirborneGate (two-level flight gate with exit hold)", () => {
+  const FRAME = 1 / 60;
+
+  it("ramp-climb vy never trips it; launch vy enters immediately", () => {
+    const gate = new AirborneGate();
+    // Sustained 14°-ramp climb (~1.1 m/s) stays grounded indefinitely.
+    for (let i = 0; i < 120; i += 1) {
+      expect(gate.update(1.1, FRAME)).toBe(false);
+    }
+    expect(gate.isAirborne).toBe(false);
+    // Trampoline-class launch trips on the first tick.
+    expect(gate.update(10, FRAME)).toBe(true);
+    expect(gate.isAirborne).toBe(true);
+  });
+
+  it("holds through the apex dip, exits after sustained rest", () => {
+    const gate = new AirborneGate();
+    gate.update(10, FRAME);
+    // Jump-apex dip (|vy| ~0.1 for ~0.15s) must NOT flutter the flag off.
+    for (let i = 0; i < 9; i += 1) {
+      expect(gate.update(0.1, FRAME)).toBe(true);
+    }
+    // Sustained ground rest (past the 0.25s hold) clears it.
+    for (let i = 0; i < 20; i += 1) {
+      gate.update(0, FRAME);
+    }
+    expect(gate.update(0, FRAME)).toBe(false);
+    expect(gate.isAirborne).toBe(false);
+  });
+
+  it("mid-band vy holds the previous state either way", () => {
+    const grounded = new AirborneGate();
+    expect(grounded.update(1.5, FRAME)).toBe(false);
+    const flying = new AirborneGate();
+    flying.update(10, FRAME);
+    expect(flying.update(1.5, FRAME)).toBe(true);
+  });
+
+  it("reset clears a latched airborne state", () => {
+    const gate = new AirborneGate();
+    gate.update(10, FRAME);
+    gate.reset();
+    expect(gate.isAirborne).toBe(false);
+    expect(gate.update(0, FRAME)).toBe(false);
   });
 });
 

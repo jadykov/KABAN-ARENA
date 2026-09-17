@@ -17,6 +17,7 @@ import {
   MIN_TOTAL_PLAYERS,
   NICK_MAX_LENGTH,
   PATCH_RATE_MS,
+  PLAYER_BODY_RADIUS,
   PLAYER_SPEED,
   RELOAD_MS,
   REMATCH_DELAY_MS,
@@ -71,10 +72,11 @@ export interface FirePayload {
 export type CenterItemKind = "super"; // | "pineapple" | "heal" (future)
 
 // Server obstacle mirrors (client Arena.getObstacleLayout): AABB check for
-// cannonball impacts. Heights ignored — balls fly over low blocks only when
+// cannonball impacts AND authoritative movement collision (see
+// resolvePlayerMove). Heights ignored — balls fly over low blocks only when
 // above hy*2, otherwise they impact. Positions scaled x1.2 with the map
 // (4 -> 4.8, 9 -> 10.8); block half extents unchanged.
-const SERVER_OBSTACLES: Array<{ x: number; z: number; hx: number; hz: number; topY: number }> = [
+export const SERVER_OBSTACLES: Array<{ x: number; z: number; hx: number; hz: number; topY: number }> = [
   { x: 4.8, z: 4.8, hx: 1, hz: 1, topY: 1.0 },
   { x: -4.8, z: 4.8, hx: 1, hz: 1, topY: 1.0 },
   { x: 4.8, z: -4.8, hx: 1, hz: 1, topY: 1.0 },
@@ -97,6 +99,118 @@ function clampAngle(value: unknown): number {
     return 0;
   }
   return value;
+}
+
+// Server-side movement solid: XZ AABB with per-face openness. Obstacles are
+// closed on all four faces; platforms leave their ramp-side face OPEN so
+// fighters can walk up onto the top (the server never tracks body height,
+// so a blanket platform block would trap climbers at the footprint edge).
+interface MoveSolid {
+  x: number;
+  z: number;
+  hx: number;
+  hz: number;
+  openMinX: boolean;
+  openMaxX: boolean;
+  openMinZ: boolean;
+  openMaxZ: boolean;
+}
+
+const MOVE_SOLIDS: readonly MoveSolid[] = [
+  ...SERVER_OBSTACLES.map((block) => ({
+    x: block.x,
+    z: block.z,
+    hx: block.hx,
+    hz: block.hz,
+    openMinX: false,
+    openMaxX: false,
+    openMinZ: false,
+    openMaxZ: false,
+  })),
+  ...SERVER_PLATFORMS.map((platform) => ({
+    x: platform.x,
+    z: platform.z,
+    hx: platform.hx,
+    hz: platform.hz,
+    openMinX: platform.rampSide === "-x",
+    openMaxX: platform.rampSide === "+x",
+    openMinZ: platform.rampSide === "-z",
+    openMaxZ: platform.rampSide === "+z",
+  })),
+];
+
+// Strictly-inside test against the radius-expanded footprint. Strict (not
+// <=): resting contact ON a face counts as outside, so a fighter pressed
+// against a wall keeps colliding instead of flipping into the escape rule.
+// The EPS shrinks the inside band by far more than float dust (~1e-16: the
+// clamped face coord and the expanded bound round differently, which once
+// let a pinned fighter read as "inside" one tick later and walk straight
+// through the wall) yet far less than any real penetration, so genuinely
+// embedded fighters (platform top, knockback) still escape.
+const FOOTPRINT_EPS = 1e-9;
+function insideSolidFootprint(solid: MoveSolid, x: number, z: number, radius: number): boolean {
+  return (
+    Math.abs(x - solid.x) < solid.hx + radius - FOOTPRINT_EPS &&
+    Math.abs(z - solid.z) < solid.hz + radius - FOOTPRINT_EPS
+  );
+}
+
+// Authoritative XZ collision resolution (humans AND bots): per-axis swept
+// clamp against every solid face (X first, then Z), so diagonal input slides
+// along faces instead of sticking. A step can never tunnel (max ~0.23m per
+// 50ms tick vs 1.25m+ expanded half extents). If the start point is already
+// inside a footprint (fighter standing on a platform top, or embedded by a
+// knockback shove), that solid is skipped for this step so the fighter can
+// always walk back out — nobody gets permanently trapped.
+export function resolvePlayerMove(
+  fromX: number,
+  fromZ: number,
+  toX: number,
+  toZ: number,
+  radius: number = PLAYER_BODY_RADIUS,
+): { x: number; z: number } {
+  if (
+    !Number.isFinite(fromX) ||
+    !Number.isFinite(fromZ) ||
+    !Number.isFinite(toX) ||
+    !Number.isFinite(toZ) ||
+    !(radius > 0)
+  ) {
+    return { x: fromX, z: fromZ };
+  }
+  let x = toX;
+  for (const solid of MOVE_SOLIDS) {
+    if (insideSolidFootprint(solid, fromX, fromZ, radius)) {
+      continue;
+    }
+    if (fromZ >= solid.z - solid.hz - radius && fromZ <= solid.z + solid.hz + radius) {
+      const minFace = solid.x - solid.hx - radius;
+      const maxFace = solid.x + solid.hx + radius;
+      if (!solid.openMinX && fromX <= minFace && x > minFace) {
+        x = minFace;
+      }
+      if (!solid.openMaxX && fromX >= maxFace && x < maxFace) {
+        x = maxFace;
+      }
+    }
+  }
+  let z = toZ;
+  for (const solid of MOVE_SOLIDS) {
+    if (insideSolidFootprint(solid, fromX, fromZ, radius)) {
+      continue;
+    }
+    if (x >= solid.x - solid.hx - radius && x <= solid.x + solid.hx + radius) {
+      const minFace = solid.z - solid.hz - radius;
+      const maxFace = solid.z + solid.hz + radius;
+      if (!solid.openMinZ && fromZ <= minFace && z > minFace) {
+        z = minFace;
+      }
+      if (!solid.openMaxZ && fromZ >= maxFace && z < maxFace) {
+        z = maxFace;
+      }
+    }
+  }
+  return { x, z };
 }
 
 // Authoritative FFA room (Stage 4): guest-nick join, inputs-only 20/s,
@@ -488,14 +602,17 @@ export class ArenaRoom extends Room<ArenaState> {
     const dirX = muzzle.dirX;
     const dirZ = muzzle.dirZ;
     const dirY = muzzle.dirY;
-    // Recoil kick opposite the horizontal fire dir, clamped to the arena.
+    // Recoil kick opposite the horizontal fire dir, resolved against geometry
+    // like any other move (a kick into a wall stops at the face, never
+    // embeds — authoritative positions stay legal), then clamped to the arena.
     const recoil = recoilDistanceForPower(power01);
     const horizontal = Math.hypot(dirX, dirZ);
     if (horizontal > 0.0001 && Number.isFinite(recoil) && recoil > 0) {
       const kickX = (dirX / horizontal) * recoil;
       const kickZ = (dirZ / horizontal) * recoil;
-      shooter.x = clampPosition(shooter.x - kickX);
-      shooter.z = clampPosition(shooter.z - kickZ);
+      const kicked = resolvePlayerMove(shooter.x, shooter.z, shooter.x - kickX, shooter.z - kickZ);
+      shooter.x = clampPosition(kicked.x);
+      shooter.z = clampPosition(kicked.z);
     }
     const ball = new BallState();
     ball.ballId = `b${this.ballCounter}`;
@@ -639,8 +756,18 @@ export class ArenaRoom extends Room<ArenaState> {
     if (length < 0.001) {
       return;
     }
-    victim.x = clampPosition(victim.x + (dx / length) * HIT_KNOCKBACK_M);
-    victim.z = clampPosition(victim.z + (dz / length) * HIT_KNOCKBACK_M);
+    // Same collision resolution as movement: a shove toward a wall stops at
+    // the face instead of embedding the authoritative position inside a
+    // closed footprint (which the by-design escape rule would then let walk
+    // out through the far face = pass-through again).
+    const moved = resolvePlayerMove(
+      victim.x,
+      victim.z,
+      victim.x + (dx / length) * HIT_KNOCKBACK_M,
+      victim.z + (dz / length) * HIT_KNOCKBACK_M,
+    );
+    victim.x = clampPosition(moved.x);
+    victim.z = clampPosition(moved.z);
   }
 
   // Center-item lifecycle (generic shape for future arena pickups).
@@ -707,9 +834,19 @@ export class ArenaRoom extends Room<ArenaState> {
         return;
       }
       // R2: aiming/charging runs 50% slower; reloading runs at normal speed.
+      // Collision resolved per axis (slide along faces) BEFORE the arena
+      // clamp, so the authoritative position never enters geometry — this is
+      // what stopped the client reconcile pass-through loop (server targets
+      // are always legal now).
       const speed = input.charging ? PLAYER_SPEED * 0.5 : PLAYER_SPEED;
-      player.x = clampPosition(player.x + input.x * speed * dt);
-      player.z = clampPosition(player.z + input.y * speed * dt);
+      const moved = resolvePlayerMove(
+        player.x,
+        player.z,
+        player.x + input.x * speed * dt,
+        player.z + input.y * speed * dt,
+      );
+      player.x = clampPosition(moved.x);
+      player.z = clampPosition(moved.z);
       player.rotY = input.rotY;
     });
   }
@@ -725,8 +862,16 @@ export class ArenaRoom extends Room<ArenaState> {
         this.brains.set(player.sessionId, brain);
       }
       const step = stepBot(player, brain, now);
-      player.x = clampPosition(player.x + step.moveX * BOT_SPEED * dt);
-      player.z = clampPosition(player.z + step.moveZ * BOT_SPEED * dt);
+      // Same collision resolution as humans: bots stop/slide at geometry
+      // instead of walking through it.
+      const moved = resolvePlayerMove(
+        player.x,
+        player.z,
+        player.x + step.moveX * BOT_SPEED * dt,
+        player.z + step.moveZ * BOT_SPEED * dt,
+      );
+      player.x = clampPosition(moved.x);
+      player.z = clampPosition(moved.z);
       player.rotY = step.rotY;
     });
   }

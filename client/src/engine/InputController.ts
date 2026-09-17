@@ -126,7 +126,12 @@ export class InputController {
       return;
     }
     this.lookDelta.dx += readMovement(event, "movementX");
-    this.lookDelta.dy += readMovement(event, "movementY");
+    // Non-inverted vertical look (owner playtest: mouse up must look up).
+    // Raw movementY is screen-space (mouse up = NEGATIVE), while every other
+    // vertical input in the codebase is up-positive (joystick +y = forward,
+    // aim-stick/float +y = pitch up) and SceneManager applies pitch += dy.
+    // Negating here keeps the LookDelta "up positive" convention end to end.
+    this.lookDelta.dy -= readMovement(event, "movementY");
   };
 
   private readonly handlePointerUp = (event: Event): void => {
