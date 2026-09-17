@@ -4,6 +4,7 @@ import {
   ARENA_HALF_SIZE,
   ICE_FRICTION,
   OBSTACLE_COUNT,
+  PLATFORM_CAP_DROP,
   PLATFORM_FIGURES,
   PLAYER_FRICTION,
   RAMP_SLOPE_DEG,
@@ -194,6 +195,47 @@ describe("collider-visual match", () => {
         (box) => Math.hypot(box.x - pad.x, box.z - pad.z) < pad.radius + 1,
       );
       expect(intruders).toHaveLength(0);
+    }
+  });
+
+  it("keeps platform cap tops strictly below body tops (no z-fighting)", () => {
+    // Stage 4d.2: cap plates drop 5mm below the figure top so the two top
+    // faces are never coplanar (classic z-fight). Caps are the only
+    // individual box meshes with height 0.1 (ramps use 0.2 slabs).
+    expect(PLATFORM_CAP_DROP).toBe(0.005);
+    const scene = new THREE.Scene();
+    const builder = new ArenaBuilder();
+    builder.buildVisuals(scene);
+    try {
+      const platforms = getPlatforms();
+      const caps: THREE.Mesh[] = [];
+      scene.traverse((child: THREE.Object3D) => {
+        if (child instanceof THREE.Mesh && !(child instanceof THREE.InstancedMesh)) {
+          const geometry = child.geometry;
+          if (geometry instanceof THREE.BoxGeometry && geometry.parameters.height === 0.1) {
+            caps.push(child);
+          }
+        }
+      });
+      expect(caps).toHaveLength(platforms.length);
+      for (const platform of platforms) {
+        const cap = caps.find(
+          (mesh) => mesh.position.x === platform.x && mesh.position.z === platform.z,
+        );
+        expect(cap).toBeDefined();
+        if (cap === undefined) {
+          continue;
+        }
+        const geometry = cap.geometry;
+        if (!(geometry instanceof THREE.BoxGeometry)) {
+          throw new Error("cap mesh lost its box geometry");
+        }
+        const capTop = cap.position.y + geometry.parameters.height / 2;
+        expect(capTop).toBeLessThan(platform.topY);
+        expect(platform.topY - capTop).toBeCloseTo(PLATFORM_CAP_DROP, 10);
+      }
+    } finally {
+      builder.dispose(scene);
     }
   });
 

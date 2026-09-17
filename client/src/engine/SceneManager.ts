@@ -2,6 +2,8 @@ import * as THREE from "three";
 import { AdsManager, getFenceSlotTransforms } from "../ads/AdsLoader";
 import {
   ARENA_HALF_SIZE,
+  AVATAR_CHARGE_OPACITY,
+  CAMERA_CHARGE_DISTANCE,
   CAMERA_FOLLOW_DISTANCE,
   CAMERA_FOLLOW_HEIGHT,
   CAMERA_FOV,
@@ -157,6 +159,13 @@ export class SceneManager {
   // Full-charge spark timer: while charge01 >= 0.8 a small ember burst pops
   // at the muzzle every SPARK_INTERVAL_S (pooled, no alloc, no lights).
   private sparkTimer = 0;
+  // Stage 4d.2 charge zoom: main.ts feeds charge01 here every frame while
+  // charging (0 = default 4m, 1 = CAMERA_CHARGE_DISTANCE ~3.2m). The live
+  // cameraDistance eases toward the target at CAMERA_SMOOTH_RATE (no snap);
+  // on shot/cancel main feeds 0 and it eases back. Never reset mid-charge —
+  // only the actual shot / cancel returns it.
+  private chargeZoom01 = 0;
+  private cameraDistance = CAMERA_FOLLOW_DISTANCE;
 
   public constructor(scene: THREE.Scene, camera: THREE.PerspectiveCamera) {
     this.scene = scene;
@@ -284,7 +293,7 @@ export class SceneManager {
 
   // R1 spectator mode: hide the local avatar (no ghost body before Play)
   // and switch the camera to the hover orbit. Restoring to false makes the
-  // avatar visible again for the follow camera (5m, FOV 75).
+  // avatar visible again for the follow camera (4m, FOV 75).
   public setSpectating(value: boolean): void {
     this.spectating = value;
     if (this.avatar !== null) {
@@ -310,6 +319,47 @@ export class SceneManager {
   public setCharge01(value: number): void {
     const clamped = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
     this.charge01 = clamped;
+  }
+
+  // Stage 4d.2 charge-zoom feed (called every frame from main.ts while
+  // charging, with 0 on shot/cancel). Stores the target only — the easing
+  // happens in updateCameraTransform so it never snaps.
+  public setChargeZoom01(value: number): void {
+    this.chargeZoom01 = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+  }
+
+  // Current (eased) follow distance, for tests/telemetry.
+  public getCameraDistance(): number {
+    return this.cameraDistance;
+  }
+
+  // Stage 4d.2 charge translucency (local avatar only, never remotes):
+  // from charge start until the actual shot/cancel the body + hand ball
+  // fade to AVATAR_CHARGE_OPACITY. Transparent flips once and stays flagged
+  // (no per-frame state churn, cheap). Null/spectator-safe: charging guards
+  // failing (no avatar yet) is a silent no-op, never a crash. Hit-flash
+  // writes emissiveIntensity — an independent field — so it keeps working
+  // while translucent.
+  public setChargeTranslucent(active: boolean): void {
+    const translucent = active === true;
+    const opacity = translucent ? AVATAR_CHARGE_OPACITY : 1;
+    if (this.avatarMaterial !== null) {
+      this.avatarMaterial.transparent = true;
+      this.avatarMaterial.opacity = opacity;
+    }
+    this.avatarVisuals?.setTranslucent(translucent);
+  }
+
+  public getAvatarOpacity(): number {
+    return this.avatarMaterial?.opacity ?? 1;
+  }
+
+  public getHandBallOpacity(): number {
+    return this.avatarVisuals?.getBallOpacity() ?? 1;
+  }
+
+  public debugGetAvatarEmissive(): number {
+    return this.avatarMaterial?.emissiveIntensity ?? 0;
   }
 
   public setBattleSnapshot(balls: readonly NetBallSnapshot[], superSnapshot: NetSuperSnapshot | null): void {
@@ -792,6 +842,8 @@ export class SceneManager {
     this.speedWasActive = false;
     this.events.length = 0;
     this.charge01 = 0;
+    this.chargeZoom01 = 0;
+    this.cameraDistance = CAMERA_FOLLOW_DISTANCE;
     this.latestBalls = [];
     this.latestSuper = null;
     this.hasAim = false;
@@ -812,6 +864,8 @@ export class SceneManager {
     if (this.avatarMaterial !== null) {
       this.avatarMaterial.emissiveIntensity = 0;
     }
+    // Stage 4d.2: a reset never leaves the avatar translucent or zoomed.
+    this.setChargeTranslucent(false);
     if (this.physics !== null) {
       this.physics.reset({ x: 0, y: 1.1, z: 0 });
     }
@@ -954,10 +1008,21 @@ export class SceneManager {
     if (this.avatar === null) {
       return;
     }
-    const horizontal = Math.cos(this.pitch) * CAMERA_FOLLOW_DISTANCE;
+    // Stage 4d.2 charge zoom: ease the live distance toward the zoom target
+    // (default 4m -> ~3.2m at full charge) at CAMERA_SMOOTH_RATE so it never
+    // snaps; dt<=0 snaps (build/reset path).
+    const zoomTarget = CAMERA_FOLLOW_DISTANCE
+      + (CAMERA_CHARGE_DISTANCE - CAMERA_FOLLOW_DISTANCE) * this.chargeZoom01;
+    if (!(deltaSeconds > 0)) {
+      this.cameraDistance = zoomTarget;
+    } else {
+      const zoomAlpha = 1 - Math.exp(-CAMERA_SMOOTH_RATE * deltaSeconds);
+      this.cameraDistance += (zoomTarget - this.cameraDistance) * zoomAlpha;
+    }
+    const horizontal = Math.cos(this.pitch) * this.cameraDistance;
     this.cameraOffset.set(
       Math.sin(this.yaw) * horizontal,
-      CAMERA_FOLLOW_HEIGHT + Math.sin(this.pitch) * CAMERA_FOLLOW_DISTANCE,
+      CAMERA_FOLLOW_HEIGHT + Math.sin(this.pitch) * this.cameraDistance,
       Math.cos(this.yaw) * horizontal,
     );
     // Desired follow target (yaw stays instant for mouse responsiveness;

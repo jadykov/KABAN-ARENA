@@ -2,6 +2,7 @@ import * as THREE from "three";
 import {
   ARENA_HALF_SIZE,
   ICE_FRICTION,
+  PLATFORM_CAP_DROP,
   PLATFORM_FIGURES,
   PLAYER_FRICTION,
   RAMP_SLAB_THICKNESS,
@@ -409,9 +410,9 @@ export class ArenaBuilder {
   private buildPlatforms(scene: THREE.Scene): void {
     // Elevated CS-like hills: one InstancedMesh for all figure tops (dark
     // material, neon-tinted top vertices, per-instance accent tint so the
-    // four figures read as distinct), plus one thin flush cap plate per
-    // figure (tiered prism look, top surface flush with the collider top so
-    // the capsule stands exactly on the visual). No extra lights.
+    // four figures read as distinct), plus one thin inset cap plate per
+    // figure (tiered prism look, top 5mm below the collider top so the faces
+    // never z-fight — the capsule stands on the figure box). No extra lights.
     const platforms = getPlatforms();
     const topGeometry = this.track(new THREE.BoxGeometry(1, 1, 1));
     paintTopFaceVertices(topGeometry, new THREE.Color(0x8fd8a0), new THREE.Color(0xffffff));
@@ -441,8 +442,10 @@ export class ArenaBuilder {
     tops.receiveShadow = true;
     this.place(tops, scene);
 
-    // Flush tier caps: thin inset slabs whose top face sits exactly at topY
-    // (no collider needed — the figure box already tops out there).
+    // Flush tier caps: thin inset slabs whose top face sits PLATFORM_CAP_DROP
+    // below topY (Stage 4d.2 z-fighting fix — never coplanar with the figure
+    // top face; 5mm is visually imperceptible). No collider needed — the
+    // figure box already tops out there.
     const capMaterial = this.track(
       new THREE.MeshStandardMaterial({ color: 0x3a4a6e, roughness: 0.6, metalness: 0.25 }),
     );
@@ -450,7 +453,7 @@ export class ArenaBuilder {
       const capHeight = 0.1;
       const capGeometry = this.track(new THREE.BoxGeometry(platform.hx * 2 * 0.7, capHeight, platform.hz * 2 * 0.7));
       const cap = new THREE.Mesh(capGeometry, capMaterial);
-      cap.position.set(platform.x, platform.topY - capHeight / 2, platform.z);
+      cap.position.set(platform.x, platform.topY - capHeight / 2 - PLATFORM_CAP_DROP, platform.z);
       cap.castShadow = false;
       cap.receiveShadow = true;
       this.place(cap, scene);

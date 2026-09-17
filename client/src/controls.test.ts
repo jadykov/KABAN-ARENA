@@ -249,7 +249,7 @@ describe("nick input focus guard (#join-nick must not drive the avatar)", () => 
 describe("Stage 2 confirmed constants", () => {
   it("keeps owner-confirmed camera/joystick values", () => {
     expect(CAMERA_FOV).toBe(75);
-    expect(CAMERA_FOLLOW_DISTANCE).toBe(5);
+    expect(CAMERA_FOLLOW_DISTANCE).toBe(4);
     expect(JOYSTICK_DIAMETER).toBe(120);
     expect(MAX_HEARTS).toBe(4);
   });

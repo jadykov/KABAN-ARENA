@@ -1,11 +1,16 @@
 // Shared tunable constants for Stage 2 (client test scene + controls).
 // Values confirmed with the owner (see MAP.md Stage 2 / Q9-A): camera FOV 75,
-// follow distance 5m, joystick diameter 120px. Keep them named here instead of
-// hardcoding literals across modules (AGENTS.md hardcoding rule).
+// follow distance 4m (Stage 4d.2: 5m -> 4m), joystick diameter 120px. Keep
+// them named here instead of hardcoding literals across modules
+// (AGENTS.md hardcoding rule).
 
-// Third-person follow camera (Q9-A confirmed 2026-09-11).
+// Third-person follow camera (Q9-A confirmed 2026-09-11; distance 4m since
+// Stage 4d.2, charge zoom ~3.2m held until the actual shot).
 export const CAMERA_FOV = 75;
-export const CAMERA_FOLLOW_DISTANCE = 5;
+export const CAMERA_FOLLOW_DISTANCE = 4;
+// Follow distance while fully charged (charge01 = 1): eased toward at
+// CAMERA_SMOOTH_RATE, held until the shot/cancel returns it to default.
+export const CAMERA_CHARGE_DISTANCE = 3.2;
 export const CAMERA_FOLLOW_HEIGHT = 2.1;
 export const CAMERA_LOOK_AT_HEIGHT = 1.2;
 export const CAMERA_SENSITIVITY = 0.0045;
@@ -30,10 +35,11 @@ export const ARENA_HALF_SIZE = 16.8;
 // damping/friction. Ground stays snappy, ice redirects slowly (slippery).
 export const PLAYER_GROUND_ACCEL = 24;
 // Sticky ice (owner 1A): weak controllable slide — on ice the target speed
-// is cut to ICE_SPEED_MULT (40-50% cut) and steering is slow (ICE_ACCEL)
-// but strong enough to escape, so ice feels sticky, never a trap.
+// is cut to ICE_SPEED_MULT (~67% cut since Stage 4d.2: 0.5 -> 0.33, 1.5x
+// stronger slow) and steering is slow (ICE_ACCEL) but strong enough to
+// escape, so ice feels sticky, never a trap.
 export const PLAYER_ICE_ACCEL = 3.0;
-export const ICE_SPEED_MULT = 0.5;
+export const ICE_SPEED_MULT = 0.33;
 
 // HUD placeholder round (QD3 hybrid; real loop lands in Stage 4).
 export const MAX_HEARTS = 4;
@@ -212,6 +218,10 @@ export const PLATFORM_FIGURES: readonly PlatformFigureDef[] = [
   { x: 5.0, z: 13.5, hx: 1.0, hz: 1.0, topY: 2.0, rampSide: "-x", rampWidth: 1.6 },
 ] as const;
 export const RAMP_SLAB_THICKNESS = 0.2;
+// Platform cap plates sit this far below the figure top (Stage 4d.2
+// z-fighting fix): the cap top face must never be coplanar with the body
+// top face. 5mm is visually imperceptible, zero draw-call cost.
+export const PLATFORM_CAP_DROP = 0.005;
 // Camera-wall occlusion: camera clamped inside HALF + this margin (wall line).
 export const CAMERA_WALL_MARGIN = 0.5;
 // Faded wall opacity while the camera sits low/close behind a wall.
@@ -225,6 +235,10 @@ export const HANDBALL_RADIUS = 0.16;
 export const HANDBALL_OFFSET_X = -0.55;
 export const HANDBALL_OFFSET_Y = 0.5;
 export const HANDBALL_OFFSET_Z = 0.1;
+// Local avatar translucency while charging (Stage 4d.2): body + hand ball
+// fade to this opacity from charge start until the actual shot/cancel.
+// Hit-flash emissive is independent of opacity, so it keeps working.
+export const AVATAR_CHARGE_OPACITY = 0.3;
 // Death burst palette (yellow 10% / orange 30% / red 60%).
 export const DEATH_BURST_YELLOW = 0xffe14d;
 export const DEATH_BURST_ORANGE = 0xff8833;

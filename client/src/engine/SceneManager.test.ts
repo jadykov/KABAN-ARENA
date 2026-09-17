@@ -2,6 +2,9 @@ import * as THREE from "three";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ARENA_HALF_SIZE,
+  AVATAR_CHARGE_OPACITY,
+  CAMERA_CHARGE_DISTANCE,
+  CAMERA_FOLLOW_DISTANCE,
   CAMERA_WALL_MARGIN,
   DEATH_BURST_COUNT,
   DEATH_BURST_ORANGE,
@@ -103,5 +106,56 @@ describe("SceneManager recoil kick (opposite fire dir, clamped)", () => {
     const after = manager.getAvatarPosition();
     expect(after.x).toBeLessThanOrEqual(ARENA_HALF_SIZE + 1e-6);
     expect(after.z).toBeLessThanOrEqual(ARENA_HALF_SIZE + 1e-6);
+  });
+});
+
+describe("SceneManager charge zoom (4m default, ~3.2m held until shot)", () => {
+  it("defaults to 4m, eases to ~3.2m at full charge, back to 4m after", async () => {
+    expect(CAMERA_FOLLOW_DISTANCE).toBe(4);
+    expect(CAMERA_CHARGE_DISTANCE).toBe(3.2);
+    const manager = await createManager();
+    expect(manager.getCameraDistance()).toBe(4);
+    manager.setChargeZoom01(1);
+    for (let i = 0; i < 240; i += 1) {
+      manager.update(FRAME, NO_MOVE, NO_LOOK);
+    }
+    expect(manager.getCameraDistance()).toBeCloseTo(CAMERA_CHARGE_DISTANCE, 2);
+    // Held until the shot: aim/camera moves mid-charge never reset it.
+    manager.setCameraAngles(1.2, 0.4);
+    manager.update(FRAME, NO_MOVE, NO_LOOK);
+    expect(manager.getCameraDistance()).toBeCloseTo(CAMERA_CHARGE_DISTANCE, 2);
+    // After the actual shot (or cancel) it eases back to default.
+    manager.setChargeZoom01(0);
+    for (let i = 0; i < 240; i += 1) {
+      manager.update(FRAME, NO_MOVE, NO_LOOK);
+    }
+    expect(manager.getCameraDistance()).toBeCloseTo(CAMERA_FOLLOW_DISTANCE, 2);
+  });
+});
+
+describe("SceneManager charge translucency (local avatar only)", () => {
+  it("fades body + hand ball to ~0.3 while active, restores to 1 after", async () => {
+    expect(AVATAR_CHARGE_OPACITY).toBe(0.3);
+    const manager = await createManager();
+    expect(manager.getAvatarOpacity()).toBe(1);
+    expect(manager.getHandBallOpacity()).toBe(1);
+    manager.setChargeTranslucent(true);
+    expect(manager.getAvatarOpacity()).toBeCloseTo(AVATAR_CHARGE_OPACITY, 10);
+    expect(manager.getHandBallOpacity()).toBeCloseTo(AVATAR_CHARGE_OPACITY, 10);
+    manager.setChargeTranslucent(false);
+    expect(manager.getAvatarOpacity()).toBe(1);
+    expect(manager.getHandBallOpacity()).toBe(1);
+  });
+
+  it("keeps hit-flash emissive working while translucent", async () => {
+    const manager = await createManager();
+    manager.setChargeTranslucent(true);
+    manager.applyTestHit();
+    manager.update(FRAME, NO_MOVE, NO_LOOK);
+    // Flash writes emissiveIntensity — independent of the opacity fade.
+    expect(manager.debugGetAvatarEmissive()).toBeGreaterThan(0);
+    expect(manager.getAvatarOpacity()).toBeCloseTo(AVATAR_CHARGE_OPACITY, 10);
+    manager.setChargeTranslucent(false);
+    expect(manager.getAvatarOpacity()).toBe(1);
   });
 });

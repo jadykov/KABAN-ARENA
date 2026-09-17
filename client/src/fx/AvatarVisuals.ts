@@ -9,6 +9,7 @@
 
 import * as THREE from "three";
 import {
+  AVATAR_CHARGE_OPACITY,
   HANDBALL_OFFSET_X,
   HANDBALL_OFFSET_Y,
   HANDBALL_OFFSET_Z,
@@ -20,6 +21,13 @@ import {
 export interface HandBallHandle {
   readonly group: THREE.Group;
   setCharge01(value: number): void;
+  // Stage 4d.2 charge translucency (local avatar only, driven by
+  // SceneManager): fades the held core to AVATAR_CHARGE_OPACITY from charge
+  // start until the actual shot/cancel. Transparent flips once and stays
+  // flagged (no per-frame state churn); emissive charge glow is independent
+  // and keeps working while translucent.
+  setTranslucent(active: boolean): void;
+  getBallOpacity(): number;
   // Throw flick on release: quick forward snap (~0.15s), then the ball hides
   // for the reload window and pops back at the end (reload return).
   playThrow(): void;
@@ -34,6 +42,8 @@ export interface AvatarVisualsHandle {
   // Re-assign the face variant once the player's session id is known (local
   // avatar builds before join; remotes pass it at createEntry time).
   setFaceSource(sessionId: string): void;
+  setTranslucent(active: boolean): void;
+  getBallOpacity(): number;
   update(deltaSeconds: number): void;
   reset(): void;
   dispose(): void;
@@ -523,6 +533,13 @@ export function attachHandBall(parent: THREE.Object3D, color: number): HandBallH
     setCharge01(value: number): void {
       charge01 = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
     },
+    setTranslucent(active: boolean): void {
+      material.transparent = true;
+      material.opacity = active === true ? AVATAR_CHARGE_OPACITY : 1;
+    },
+    getBallOpacity(): number {
+      return material.opacity;
+    },
     playThrow(): void {
       // Flick and reload clocks start together at release so the ball pops
       // back exactly when the 2.5s FSM reload ends — a new charge never meets
@@ -641,6 +658,12 @@ export function attachAvatarVisuals(
       // Cached per-variant material swap — no new texture, no needsUpdate
       // churn (materials compile once each).
       decal.material = faceMaterialFor(faceVariantForSession(nextSessionId));
+    },
+    setTranslucent(active: boolean): void {
+      ball.setTranslucent(active);
+    },
+    getBallOpacity(): number {
+      return ball.getBallOpacity();
     },
     update(deltaSeconds: number): void {
       ball.update(deltaSeconds);

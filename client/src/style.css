@@ -76,25 +76,6 @@ canvas {
   color: #e9d5ff;
 }
 
-#hud-reload {
-  margin-top: 4px;
-  width: 120px;
-  height: 4px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.15);
-  overflow: hidden;
-}
-
-#hud-reload-fill {
-  width: 100%;
-  height: 100%;
-  background: #7dd7ff;
-  transform: scaleX(0);
-  transform-origin: left center;
-}
-
-/* Throw-polish aim: tiny symbolic dot + 5 CSS trajectory hints + Worms
-   power bar (120px bottom-center). Pure DOM overlay, pointer-events none. */
 #aim {
   position: fixed;
   inset: 0;
@@ -145,6 +126,29 @@ canvas {
   width: 0%;
   height: 100%;
   background: #ffd54d;
+}
+
+/* Stage 4d.2 dedicated reload bar: sibling of #aim (reparented out of it so
+   the sweep stays visible during reload while #aim hides), same 120px
+   width, centered, thin blue fill (1 = ready). DOM only, never captures
+   input. */
+#reload-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 10px;
+  width: 120px;
+  height: 5px;
+  margin-left: -60px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+#reload-bar-fill {
+  width: 100%;
+  height: 100%;
+  background: #7dd7ff;
 }
 
 /* R2 right aim stick: same see-through language as the move stick. */

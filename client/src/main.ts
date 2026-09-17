@@ -60,7 +60,7 @@ const POWERUP_KEYS: Record<string, PowerUpKind> = {
 // Stage 4 entry with R1 pre-join spectator: boot joins the room immediately
 // as a spectator (no nick needed) and watches the live arena from the hover
 // camera behind a semi-transparent plate. Pressing Play sends "play" with a
-// validated nick; on welcome the view switches to the follow camera (5m),
+// validated nick; on welcome the view switches to the follow camera (4m),
 // the avatar appears and physics/inputs activate. Remote fighters replicate
 // from the authoritative room at 20Hz through lerp/slerp interpolation.
 async function boot(): Promise<void> {
@@ -185,7 +185,7 @@ async function boot(): Promise<void> {
       // variant + two-tone clothing now that identity exists (avatar built
       // pre-join, hidden).
       sceneManager.setPlayerSource(net.ownSessionId ?? sessionId);
-      // R1 welcome: hover orbit -> follow camera (5m), avatar visible,
+      // R1 welcome: hover orbit -> follow camera (4m), avatar visible,
       // physics/inputs active, controls revealed. Teleport the local avatar
       // + Rapier body to the authoritative server spawn so the first shot
       // leaves our visible body instead of a phantom corner (~17m gap fix).
@@ -205,8 +205,10 @@ async function boot(): Promise<void> {
       isReloading = false;
       reloadUntilMs = 0;
       sceneManager.setCharge01(0);
+      sceneManager.setChargeZoom01(0);
+      sceneManager.setChargeTranslucent(false);
       aimOverlay.setCharge01(0);
-      aimOverlay.setReload01(0);
+      aimOverlay.setReload01(1);
       aimOverlay.hide();
       hud.addKillfeed(`Joined as ${nick}`);
       hideJoinOverlay();
@@ -225,7 +227,10 @@ async function boot(): Promise<void> {
       isCharging = false;
       isReloading = false;
       sceneManager.setCharge01(0);
+      sceneManager.setChargeZoom01(0);
+      sceneManager.setChargeTranslucent(false);
       aimOverlay.setCharge01(0);
+      aimOverlay.setReload01(1);
       aimOverlay.hide();
       hud.addKillfeed(message);
       hud.setStatus("Room is full — try again later");
@@ -241,12 +246,13 @@ async function boot(): Promise<void> {
       isReloading = false;
       hasSuperBuff = false;
       sceneManager.setCharge01(0);
+      sceneManager.setChargeZoom01(0);
+      sceneManager.setChargeTranslucent(false);
       sceneManager.setBattleSnapshot([], null);
       aimOverlay.setCharge01(0);
-      aimOverlay.setReload01(0);
+      aimOverlay.setReload01(1);
       aimOverlay.hide();
       hud.setSuperBadge(false);
-      hud.setReload01(0);
       sceneManager.setSpectating(true);
       joystick.element.style.display = "none";
       aimStick.element.style.display = "none";
@@ -416,6 +422,10 @@ async function boot(): Promise<void> {
     }
     isCharging = true;
     chargeStartMs = nowMs;
+    // Stage 4d.2: avatar fades from charge start until the actual shot /
+    // cancel; zoom starts at default and eases per-frame below.
+    sceneManager.setChargeTranslucent(true);
+    sceneManager.setChargeZoom01(0);
     // No aim snapshot here: direction resolves at release (stopCharge).
     aimOverlay.show();
   }
@@ -426,6 +436,9 @@ async function boot(): Promise<void> {
     }
     isCharging = false;
     sceneManager.setCharge01(0);
+    // Stage 4d.2: cancel returns zoom + opacity (eased, never mid-charge).
+    sceneManager.setChargeZoom01(0);
+    sceneManager.setChargeTranslucent(false);
     aimOverlay.setCharge01(0);
     aimOverlay.setTrajectory(null);
     aimOverlay.hide();
@@ -439,6 +452,10 @@ async function boot(): Promise<void> {
     const chargeMs = nowMs - chargeStartMs;
     isCharging = false;
     sceneManager.setCharge01(0);
+    // Stage 4d.2: the shot (or tap) returns zoom + opacity — held until here,
+    // never reset mid-charge or on aim-stick moves.
+    sceneManager.setChargeZoom01(0);
+    sceneManager.setChargeTranslucent(false);
     aimOverlay.setCharge01(0);
     aimOverlay.setTrajectory(null);
     aimOverlay.hide();
@@ -760,12 +777,11 @@ async function boot(): Promise<void> {
       floatVector = { x: 0, y: 0 };
       sceneManager.setCharge01(0);
       aimOverlay.setCharge01(0);
-      aimOverlay.setReload01(0);
+      aimOverlay.setReload01(1);
       aimOverlay.hide();
       hud.setTimer(ROUND_SECONDS);
       hud.setScore(START_SCORE);
       hud.setHeartsFromHearts(MAX_HEARTS);
-      hud.setReload01(1);
     }
   };
   window.addEventListener("keydown", handleKeyDown);
@@ -909,21 +925,21 @@ async function boot(): Promise<void> {
       if (isCharging) {
         const charge01 = Math.max(0, Math.min(1, (nowMs - chargeStartMs) / (CHARGE_MAX_S * 1000)));
         sceneManager.setCharge01(charge01);
+        // Stage 4d.2: zoom follows charge01 every frame (eased in the scene),
+        // held until stopCharge/cancelCharge — aim-stick moves never reset it.
+        sceneManager.setChargeZoom01(charge01);
         aimOverlay.setCharge01(charge01);
       }
       if (isReloading) {
         if (nowMs >= reloadUntilMs) {
           isReloading = false;
-          hud.setReload01(1);
-          aimOverlay.setReload01(0);
+          aimOverlay.setReload01(1);
         } else {
           const progress = 1 - (reloadUntilMs - nowMs) / RELOAD_MS;
-          hud.setReload01(progress);
           aimOverlay.setReload01(progress);
         }
       } else if (!isCharging) {
-        hud.setReload01(1);
-        aimOverlay.setReload01(0);
+        aimOverlay.setReload01(1);
       }
     }
     // Self reconciliation FIRST (playing + alive only): correct toward the

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { CROSSHAIR_RELOAD_COLOR } from "../config";
-import { POWER_BAR_WIDTH_PX, TRAJ_DOT_COUNT, createAim } from "./aim";
+import { POWER_BAR_WIDTH_PX, RELOAD_BAR_WIDTH_PX, TRAJ_DOT_COUNT, createAim } from "./aim";
 
 // Minimal DOM stub: vitest runs in node (no jsdom installed, no installs
 // allowed), and createAim only needs createElement/style/dataset/appendChild.
@@ -63,9 +63,10 @@ beforeEach(() => {
 
 // Throw-polish aim: symbolic dot + 5 traj dots + Worms power bar, no SVG.
 describe("createAim throw-polish markup", () => {
-  it("builds dot + 5 traj dots + power bar with no SVG ring/spinner", () => {
+  it("builds dot + 5 traj dots + power bar + reload bar with no SVG ring/spinner", () => {
     expect(TRAJ_DOT_COUNT).toBe(5);
     expect(POWER_BAR_WIDTH_PX).toBe(120);
+    expect(RELOAD_BAR_WIDTH_PX).toBe(120);
     const parent = new FakeElement();
     const handle = createAim(asHtml(parent));
     try {
@@ -76,6 +77,12 @@ describe("createAim throw-polish markup", () => {
       const bar = el.querySelector("#power-bar");
       expect(bar).not.toBe(null);
       expect(bar?.querySelector("#power-bar-fill")).not.toBe(null);
+      // Reviewer F1: the reload bar is a sibling OUTSIDE #aim (never a
+      // child), so the sweep stays visible while #aim hides during reload.
+      expect(el.querySelector("#reload-bar")).toBe(null);
+      const reload = parent.querySelector("#reload-bar");
+      expect(reload).not.toBe(null);
+      expect(reload?.querySelector("#reload-bar-fill")).not.toBe(null);
       const svgChild = el.children.find((child) => child.id === "svg");
       expect(svgChild).toBe(undefined);
       expect(parent.children).toContain(el);
@@ -106,17 +113,27 @@ describe("createAim throw-polish markup", () => {
     }
   });
 
-  it("reload uses the bar only with a blue fill", () => {
+  it("keeps the power bar charge-only while reload paints its own bar blue", () => {
     const parent = new FakeElement();
     const handle = createAim(asHtml(parent));
     try {
       const el = handle.el as unknown as FakeElement;
       handle.setCharge01(0.6);
       handle.setReload01(0.5);
+      // Power bar ignores reload (charge-only since Stage 4d.2).
       const fill = el.querySelector("#power-bar")?.querySelector("#power-bar-fill");
-      expect(fill?.style.width).toBe("50%");
-      expect(fill?.style.background).toBe(CROSSHAIR_RELOAD_COLOR);
+      expect(fill?.style.width).toBe("60%");
+      expect(fill?.style.background).not.toBe(CROSSHAIR_RELOAD_COLOR);
+      // Dedicated reload bar shows progress in blue.
+      const reloadFill = parent.querySelector("#reload-bar")?.querySelector("#reload-bar-fill");
+      expect(reloadFill?.style.width).toBe("50%");
+      expect(reloadFill?.style.background).toBe(CROSSHAIR_RELOAD_COLOR);
+      // Ready = full bar; firing = empty bar.
+      handle.setReload01(1);
+      expect(reloadFill?.style.width).toBe("100%");
       handle.setReload01(0);
+      expect(reloadFill?.style.width).toBe("0%");
+      // Reload activity never touches the charge bar.
       expect(fill?.style.width).toBe("60%");
     } finally {
       handle.dispose();
@@ -127,12 +144,53 @@ describe("createAim throw-polish markup", () => {
     const parent = new FakeElement();
     const handle = createAim(asHtml(parent));
     const el = handle.el as unknown as FakeElement;
+    const reload = parent.querySelector("#reload-bar");
     handle.hide();
     expect(el.style.display).toBe("none");
     handle.show();
     expect(el.style.display).toBe("");
     handle.dispose();
     expect(parent.children).not.toContain(el);
+    expect(reload).not.toBe(null);
+    if (reload !== null) {
+      expect(parent.children).not.toContain(reload);
+    }
+  });
+
+  // Reviewer F1: the reload sweep must be VISIBLE end-to-end. Pre-fix the
+  // bar was a child of #aim, so stopCharge's hide() buried the whole 2.5s
+  // sweep in a display:none subtree — this test asserts visibility (not
+  // just paint) and fails on that behavior.
+  it("shows the reload sweep while #aim is hidden, hides it when ready", () => {
+    const parent = new FakeElement();
+    const handle = createAim(asHtml(parent));
+    try {
+      const el = handle.el as unknown as FakeElement;
+      const reload = parent.querySelector("#reload-bar");
+      expect(reload).not.toBe(null);
+      if (reload === null) {
+        return;
+      }
+      const reloadFill = reload.querySelector("#reload-bar-fill");
+      expect(reloadFill).not.toBe(null);
+      // Idle: no permanent bar on screen.
+      expect(reload.style.display).toBe("none");
+      // Shot: #aim hides (stopCharge path) while the reload feed starts.
+      handle.hide();
+      expect(el.style.display).toBe("none");
+      handle.setReload01(0.25);
+      expect(reload.style.display).toBe("");
+      expect(reloadFill?.style.width).toBe("25%");
+      handle.setReload01(0.75);
+      expect(reload.style.display).toBe("");
+      expect(reloadFill?.style.width).toBe("75%");
+      // Reload complete / ready: bar hides again (no visual noise).
+      handle.setReload01(1);
+      expect(reloadFill?.style.width).toBe("100%");
+      expect(reload.style.display).toBe("none");
+    } finally {
+      handle.dispose();
+    }
   });
 });
 

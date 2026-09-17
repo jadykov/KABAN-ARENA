@@ -30,7 +30,6 @@ export interface HudHandle {
   getHearts(): number;
   getHalves(): number;
   setSuperBadge(visible: boolean): void;
-  setReload01(value: number): void;
   setStatus(text: string): void;
   addKillfeed(message: string): void;
   // Placeholder hit logic for the Stage 2 test scene: 1 hit = 1 heart lost.
@@ -41,9 +40,10 @@ export interface HudHandle {
 
 // Hybrid HUD (QD3 + R2 halves): DOM overlay top bar with always-visible
 // timer + score, 4 hearts top-center under the timer rendered from halves
-// (full/half/empty), a SUPER badge for the x2-next-shot buff, and a thin
-// reload progress bar. Minimal, readable on narrow mobile viewports, never
-// blocks the canvas (pointer-events none).
+// (full/half/empty) and a SUPER badge for the x2-next-shot buff. Reload
+// lives in the aim overlay since Stage 4d.2 (dedicated bar under the power
+// bar). Minimal, readable on narrow mobile viewports, never blocks the
+// canvas (pointer-events none).
 export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): HudHandle {
   const root = document.createElement("div");
   root.id = "hud";
@@ -75,19 +75,12 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
   superBadge.textContent = "SUPER x2";
   superBadge.style.display = "none";
 
-  const reload = document.createElement("div");
-  reload.id = "hud-reload";
-  const reloadFill = document.createElement("div");
-  reloadFill.id = "hud-reload-fill";
-  reload.appendChild(reloadFill);
-
   const killfeed = document.createElement("div");
   killfeed.id = "hud-killfeed";
 
   root.appendChild(topBar);
   root.appendChild(hearts);
   root.appendChild(superBadge);
-  root.appendChild(reload);
   root.appendChild(killfeed);
   parent.appendChild(root);
 
@@ -142,10 +135,6 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
     },
     setSuperBadge(visible: boolean): void {
       superBadge.style.display = visible ? "" : "none";
-    },
-    setReload01(value: number): void {
-      const clamped = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
-      reloadFill.style.transform = `scaleX(${clamped})`;
     },
     setStatus(text: string): void {
       status.textContent = text;

@@ -35,13 +35,14 @@ function horizontalSpeed(manager: SceneManager): number {
   return Math.hypot(velocity.x, velocity.z);
 }
 
-// Sticky ice (owner 1A): blending steers toward a HALVED target on ice
-// (MOVE * ICE_SPEED_MULT, 50% cut) at ICE_ACCEL, so coasting decays FAST
-// instead of gliding for a full second — but never hard-zeroes in one
-// frame (the old absolute-set bug) and stays escapable with steady input.
+// Sticky ice (owner 1A, 1.5x stronger since Stage 4d.2): blending steers
+// toward a CUT target on ice (MOVE * ICE_SPEED_MULT, ~67% cut) at ICE_ACCEL,
+// so coasting decays FAST instead of gliding for a full second — but never
+// hard-zeroes in one frame (the old absolute-set bug) and stays escapable
+// with steady input.
 describe("SceneManager movement blending (ice/impulse regression)", () => {
   it("does not zero instantly but decays fast on ice with no input (sticky)", async () => {
-    expect(ICE_SPEED_MULT).toBe(0.5);
+    expect(ICE_SPEED_MULT).toBe(0.33);
     const manager = await createSceneManager();
     const zone = getSlipperyZones()[0];
     if (zone === undefined) {
@@ -66,15 +67,15 @@ describe("SceneManager movement blending (ice/impulse regression)", () => {
     expect(manager.getAvatarPosition().x - start.x).toBeGreaterThan(0.5);
   });
 
-  it("caps steady-input speed on ice near 50% of ground speed (sticky)", async () => {
-    expect(ICE_SPEED_MULT).toBeCloseTo(0.5, 10);
+  it("caps steady-input speed on ice near 33% of ground speed (sticky)", async () => {
+    expect(ICE_SPEED_MULT).toBeCloseTo(0.33, 10);
     const manager = await createSceneManager();
     const zone = getSlipperyZones()[0];
     if (zone === undefined) {
       throw new Error("no slippery zone defined");
     }
-    // Full forward input held on ice: velocity settles near the halved
-    // target (MOVE * 0.5), never the full ground speed.
+    // Full forward input held on ice: velocity settles near the cut
+    // target (MOVE * 0.33), never the full ground speed.
     manager.debugSetPlayerState(
       { x: zone.x, y: 1.1, z: zone.z },
       { x: 0, y: 0, z: 0 },
@@ -94,7 +95,7 @@ describe("SceneManager movement blending (ice/impulse regression)", () => {
     }
     const iceSpeed = horizontalSpeed(manager);
     expect(iceSpeed).toBeGreaterThan(0.5);
-    expect(iceSpeed).toBeLessThan(MOVE_SPEED * 0.75);
+    expect(iceSpeed).toBeLessThan(MOVE_SPEED * 0.5);
   });
 
   it("lets an impulse power-up carry the player >0.5m within 0.5s", async () => {
