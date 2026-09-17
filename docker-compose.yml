@@ -1,0 +1,33 @@
+services:
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/workbench/new-game
+      - client-node-modules:/workbench/new-game/client/node_modules
+      - root-node-modules:/workbench/new-game/node_modules
+    working_dir: /workbench/new-game
+    command: npm run dev --workspace @kaban-arena/client
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "2567:2567"
+    volumes:
+      - .:/workbench/new-game
+      - server-node-modules:/workbench/new-game/server/node_modules
+      - root-node-modules:/workbench/new-game/node_modules
+    environment:
+      - PORT=2567
+    working_dir: /workbench/new-game
+    command: npm run dev --workspace @kaban-arena/server
+
+volumes:
+  client-node-modules: {}
+  server-node-modules: {}
+  root-node-modules: {}

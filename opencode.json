@@ -1,0 +1,35 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "builder": {
+      "permission": {
+        "bash": {
+          "npm run typecheck*": "allow",
+          "docker info*": "allow",
+          "docker images*": "allow",
+          "docker ps*": "allow",
+          "timeout *docker build*": "allow",
+          "timeout *docker run*": "allow",
+          "timeout *npm run typecheck*": "allow",
+          "timeout *docker info*": "allow",
+          "timeout *docker images*": "allow",
+          "timeout *docker ps*": "allow",
+          "*--privileged*": "deny",
+          "*docker*--cap-add*": "deny",
+          "*docker*-v /*": "deny",
+          "*docker*--volume*": "deny",
+          "*docker*--mount*": "deny",
+          "*docker*--pid=*": "deny",
+          "*docker*--network=host*": "deny",
+          "*docker*--userns=*": "deny",
+          "*docker*--net*": "deny",
+          "*docker*--device*": "deny",
+          "*docker*-v ~*": "deny",
+          "*docker*-v $HOME*": "deny",
+          "*|*": "deny",
+          "*xargs*": "deny"
+        }
+      }
+    }
+  }
+}

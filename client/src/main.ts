@@ -1,0 +1,981 @@
+import "./style.css";
+import * as THREE from "three";
+import {
+  AIM_EXPO,
+  AIM_PITCH_RATE,
+  AIM_STICK_DIAMETER,
+  AIM_YAW_RATE,
+  BALL_GRAVITY,
+  CAMERA_PITCH_MAX,
+  CAMERA_PITCH_MIN,
+  CHARGE_MAX_S,
+  FLOAT_DEADZONE,
+  FLOAT_DRAG_RADIUS_PX,
+  INPUT_SEND_INTERVAL_S,
+  LOCAL_AVATAR_COLOR,
+  MAX_HEARTS,
+  MOVE_STICK_DIAMETER,
+  RELOAD_MS,
+  ROUND_SECONDS,
+  SELF_RECONCILE_SNAP_M,
+  START_SCORE,
+  TAP_FIRE_MIN_S,
+  TRAJ_PREVIEW_DT_S,
+  getServerUrl,
+} from "./config";
+import { Engine } from "./engine/Engine";
+import { InputController, isTypingTarget } from "./engine/InputController";
+import { SceneManager } from "./engine/SceneManager";
+import { NetworkManager, type RoomSnapshot } from "./net/NetworkManager";
+import { RemoteAvatars } from "./net/RemoteAvatars";
+import { applyAimAssist } from "./net/aimAssist";
+import {
+  applyExpo,
+  buildInputPayload,
+  chargeToPower01,
+  directionFromYawPitch,
+  formatCounters,
+  halvesForHp,
+  muzzleForShot,
+  normalizePlayNick,
+  powerToSpeed,
+  worldMoveFromYaw,
+} from "./net/protocol";
+import { TRAJ_DOT_COUNT, createAim, type TrajSample } from "./ui/aim";
+import { createHud } from "./ui/hud";
+import { createJoystick } from "./ui/joystick";
+import type { PowerUpKind } from "./arena/PowerUps";
+
+// Debug/playtest power-up grants: physical key positions 1/2/3 on any
+// layout (e.code, never key) — same layout-independence rule as WASD.
+const POWERUP_KEYS: Record<string, PowerUpKind> = {
+  Digit1: "speed",
+  Numpad1: "speed",
+  Digit2: "shield",
+  Numpad2: "shield",
+  Digit3: "impulse",
+  Numpad3: "impulse",
+};
+
+// Stage 4 entry with R1 pre-join spectator: boot joins the room immediately
+// as a spectator (no nick needed) and watches the live arena from the hover
+// camera behind a semi-transparent plate. Pressing Play sends "play" with a
+// validated nick; on welcome the view switches to the follow camera (5m),
+// the avatar appears and physics/inputs activate. Remote fighters replicate
+// from the authoritative room at 20Hz through lerp/slerp interpolation.
+async function boot(): Promise<void> {
+  const container = document.getElementById("app");
+  if (container === null) {
+    throw new Error("#app container missing");
+  }
+
+  const engine = new Engine(container);
+  const sceneManager = new SceneManager(engine.scene, engine.camera);
+  sceneManager.build();
+  // R1: boot starts spectating — no ghost body, hover orbit over the arena.
+  sceneManager.setSpectating(true);
+
+  const input = new InputController();
+  input.attach(window, engine.renderer.domElement);
+
+  const hud = createHud(document.body);
+  hud.setTimer(ROUND_SECONDS);
+  hud.setScore(START_SCORE);
+  hud.setStatus("Watching live arena — pick a nick and press Play");
+  hud.addKillfeed("Welcome to KABAN ARENA");
+
+  const joystick = createJoystick(document.body, {
+    diameter: MOVE_STICK_DIAMETER,
+    onMove: (vector): void => {
+      input.setJoystick({ x: applyExpo(vector.x, AIM_EXPO), y: applyExpo(vector.y, AIM_EXPO) });
+    },
+  });
+  // R1: spectators see the plate + hover camera only — controls appear on
+  // welcome (hover -> follow transition).
+  joystick.element.style.display = "none";
+
+  // R2 minimal charge FSM: right aim stick drives yaw/pitch, hold to charge,
+  // release to fire via sendFire. Gated by isPlaying && !spectating.
+  const aimOverlay = createAim(document.body);
+  aimOverlay.hide();
+  let aimVector = { x: 0, y: 0 };
+  const aimStick = createJoystick(document.body, {
+    diameter: AIM_STICK_DIAMETER,
+    id: "aim-stick",
+    onMove: (vector): void => {
+      aimVector = { x: applyExpo(vector.x, AIM_EXPO), y: applyExpo(vector.y, AIM_EXPO) };
+    },
+  });
+  aimStick.element.style.display = "none";
+
+  const remotes = new RemoteAvatars(engine.scene);
+
+  let latest: RoomSnapshot | null = null;
+  let isPlaying = false;
+  let inputSeq = 0;
+  let inputAccumulator = 0;
+  let connecting = false;
+  // Last seen self alive flag (null = no snapshot yet): false->true while
+  // playing means an authoritative respawn — teleport to the server spawn.
+  let lastSelfAlive: boolean | null = null;
+
+  // R2 charge/reload state (ms wall clock via Date.now()).
+  let chargeStartMs = 0;
+  let isCharging = false;
+  let isReloading = false;
+  let reloadUntilMs = 0;
+  let hasSuperBuff = false;
+  let aimYaw = 0;
+  let aimPitch = 0.25;
+  // Floating right-thumb aim (Brawl-Stars-like one-thumb flow): pointerdown on
+  // the right half records a floating origin where the thumb landed; drag
+  // offsets map to an expo-shaped vector integrated into aimYaw/aimPitch at
+  // the shared stick rates. The fixed aim stick + FIRE button stay as
+  // fallback visuals calling the same charge FSM (never required).
+  let floatActive = false;
+  let floatPointerId: number | null = null;
+  let floatOriginX = 0;
+  let floatOriginY = 0;
+  let floatVector = { x: 0, y: 0 };
+
+  // Join overlay + FIRE button are declared early so network callbacks can
+  // show/hide them (spectators see the plate, fighters see controls).
+  // Join overlay: guest nick + Play press, no auth. R1: a semi-transparent
+  // centered plate over the live arena (see style.css); stays visible while
+  // spectating, hides on welcome, reappears on disconnect for late join.
+  const overlay = document.createElement("div");
+  overlay.id = "join-overlay";
+  const nickInput = document.createElement("input");
+  nickInput.id = "join-nick";
+  nickInput.maxLength = 16;
+  nickInput.placeholder = "Your nick";
+  nickInput.autocomplete = "off";
+  const playButton = document.createElement("button");
+  playButton.id = "join-play";
+  playButton.textContent = "Play";
+  overlay.appendChild(nickInput);
+  overlay.appendChild(playButton);
+  document.body.appendChild(overlay);
+
+  // FIRE button (mobile) + Space (desktop): hitscan A trigger.
+  // Hidden until the local player joins the fight (welcome).
+  const fireButton = document.createElement("button");
+  fireButton.id = "fire-button";
+  fireButton.textContent = "FIRE";
+  fireButton.style.display = "none";
+  document.body.appendChild(fireButton);
+
+  function showJoinOverlay(): void {
+    overlay.style.display = "flex";
+  }
+
+  function hideJoinOverlay(): void {
+    overlay.style.display = "none";
+  }
+
+  const net = new NetworkManager(getServerUrl(), {
+    onSnapshot: (snapshot): void => {
+      latest = snapshot;
+      applySnapshot(snapshot);
+    },
+    onWelcome: (sessionId, nick, spawn): void => {
+      isPlaying = true;
+      // Our session id is known from join time (ownSessionId set on room
+      // join, before welcome): lock in our deterministic Nintendo-style face
+      // variant + two-tone clothing now that identity exists (avatar built
+      // pre-join, hidden).
+      sceneManager.setPlayerSource(net.ownSessionId ?? sessionId);
+      // R1 welcome: hover orbit -> follow camera (5m), avatar visible,
+      // physics/inputs active, controls revealed. Teleport the local avatar
+      // + Rapier body to the authoritative server spawn so the first shot
+      // leaves our visible body instead of a phantom corner (~17m gap fix).
+      sceneManager.setSpectating(false);
+      if (spawn !== null && spawn !== undefined) {
+        sceneManager.teleportSelf(spawn.x, spawn.z);
+      }
+      // Snapshot-driven teleport/respawn below covers payloads without
+      // coords (compat) and any later alive-again transitions.
+      joystick.element.style.display = "";
+      aimStick.element.style.display = "";
+      fireButton.style.display = "";
+      const angles = sceneManager.getCameraAngles();
+      aimYaw = angles.yaw;
+      aimPitch = angles.pitch;
+      isCharging = false;
+      isReloading = false;
+      reloadUntilMs = 0;
+      sceneManager.setCharge01(0);
+      aimOverlay.setCharge01(0);
+      aimOverlay.setReload01(0);
+      aimOverlay.hide();
+      hud.addKillfeed(`Joined as ${nick}`);
+      hideJoinOverlay();
+    },
+    onSpectator: (sessionId): void => {
+      void sessionId;
+      // Still watching: keep the plate + hover camera, controls hidden.
+      if (!isPlaying) {
+        showJoinOverlay();
+      }
+    },
+    onRoomFull: (message): void => {
+      // Explicit capacity rejection: never leave the player on a silent
+      // overlay — show the plate again with feedback instead of hanging.
+      isPlaying = false;
+      isCharging = false;
+      isReloading = false;
+      sceneManager.setCharge01(0);
+      aimOverlay.setCharge01(0);
+      aimOverlay.hide();
+      hud.addKillfeed(message);
+      hud.setStatus("Room is full — try again later");
+      showJoinOverlay();
+    },
+    onKillfeed: (message): void => {
+      hud.addKillfeed(message);
+    },
+    onLeave: (): void => {
+      latest = null;
+      isPlaying = false;
+      isCharging = false;
+      isReloading = false;
+      hasSuperBuff = false;
+      sceneManager.setCharge01(0);
+      sceneManager.setBattleSnapshot([], null);
+      aimOverlay.setCharge01(0);
+      aimOverlay.setReload01(0);
+      aimOverlay.hide();
+      hud.setSuperBadge(false);
+      hud.setReload01(0);
+      sceneManager.setSpectating(true);
+      joystick.element.style.display = "none";
+      aimStick.element.style.display = "none";
+      fireButton.style.display = "none";
+      hud.setStatus("Disconnected — press Play to rejoin");
+      showJoinOverlay();
+    },
+    onError: (message): void => {
+      hud.addKillfeed(`Net error: ${message}`);
+    },
+  });
+
+  const applySnapshot = (snapshot: RoomSnapshot): void => {
+    // Top bar timer + score always visible (QD3); R2 halves (4 hearts x
+    // full/half/empty from halvesForHp). Status line shows live counters
+    // only (Players N | Watching M) — runners never see a spectator list.
+    // Balls + SUPER core go straight to the scene (null hides the core).
+    sceneManager.setBattleSnapshot(snapshot.balls, snapshot.super ?? null);
+    const counters = formatCounters(snapshot.players);
+    const selfId = net.ownSessionId;
+    const self = snapshot.players.find((player) => player.sessionId === selfId);
+    if (self !== undefined) {
+      hud.setScore(self.score);
+      hud.setHearts(halvesForHp(self.hp));
+      hasSuperBuff = self.superBuff === true;
+      const canShowSuper = isPlaying && !sceneManager.isSpectating();
+      hud.setSuperBadge(canShowSuper && hasSuperBuff);
+      aimOverlay.setSuper(canShowSuper && hasSuperBuff);
+    } else {
+      hasSuperBuff = false;
+      hud.setSuperBadge(false);
+      aimOverlay.setSuper(false);
+    }
+    if (self !== undefined && isPlaying && !self.alive) {
+      hud.setStatus("Fragged — respawn in 3s…");
+    } else {
+      hud.setStatus(counters);
+    }
+    // Self spawn tracking: while fighting, an alive-again transition means
+    // the server respawned us at a fresh corner — teleport the local avatar
+    // + Rapier body there (no 28m respawn gap). The first alive sighting
+    // after welcome is also teleported when the welcome payload carried no
+    // coords (compat path); per-frame reconcileSelf below then keeps drift
+    // bounded without jitter. The reverse transition (alive -> dead) pops
+    // the death burst at the last known position so frags read instantly.
+    if (self !== undefined && isPlaying && self.alive && !sceneManager.isSpectating()) {
+      if (lastSelfAlive === false) {
+        sceneManager.teleportSelf(self.x, self.z);
+      } else if (lastSelfAlive === null) {
+        const local = sceneManager.getAvatarPosition();
+        const gap = Math.hypot(self.x - local.x, self.z - local.z);
+        if (gap > SELF_RECONCILE_SNAP_M) {
+          sceneManager.teleportSelf(self.x, self.z);
+        }
+      }
+      lastSelfAlive = true;
+    } else if (self !== undefined && isPlaying) {
+      if (lastSelfAlive === true && self.alive === false && !sceneManager.isSpectating()) {
+        sceneManager.spawnDeathBurst(self.x, 1.2, self.z);
+      }
+      lastSelfAlive = false;
+    }
+    if (snapshot.phase === "lobby") {
+      hud.setTimer(ROUND_SECONDS);
+    } else if (snapshot.phase === "countdown") {
+      hud.setTimer(snapshot.countdownMs / 1000);
+    } else if (snapshot.phase === "playing") {
+      hud.setTimer(snapshot.remainingMs / 1000);
+    } else {
+      hud.setTimer(0);
+      const winner = snapshot.players.find((player) => player.sessionId === snapshot.winner);
+      if (winner !== undefined && (self === undefined || self.alive || !isPlaying)) {
+        hud.setStatus(`${winner.nick} wins! ${counters}`);
+      }
+    }
+  };
+  // R1 Play: while offline it connects as a spectator first and then sends
+  // "play" with a validated nick (empty input -> Guest-XXXX); while already
+  // connected it just sends "play". The server replies with "welcome".
+  const handlePlay = (): void => {
+    if (connecting) {
+      return;
+    }
+    const nick = normalizePlayNick(nickInput.value);
+    if (!net.isConnected) {
+      connecting = true;
+      playButton.textContent = "Joining…";
+      net
+        .connect("")
+        .then((): void => {
+          connecting = false;
+          playButton.textContent = "Play";
+          net.sendPlay(nick);
+        })
+        .catch((error: unknown): void => {
+          connecting = false;
+          playButton.textContent = "Play";
+          const message = error instanceof Error ? error.message : "join failed";
+          hud.addKillfeed(`Join failed (${message}) — practice mode`);
+          hud.setStatus("Server unreachable — practice mode, retry Play");
+        });
+      return;
+    }
+    net.sendPlay(nick);
+  };
+  playButton.addEventListener("click", handlePlay);
+  // Enter with a nick joins the arena room (same path as Play click).
+  nickInput.addEventListener("keydown", (event: KeyboardEvent): void => {
+    if (event.code === "Enter" || event.code === "NumpadEnter") {
+      event.preventDefault();
+      handlePlay();
+    }
+  });
+
+  // R1 auto-join: connect immediately as a spectator (no nick needed) so
+  // boot shows the live arena from the hover camera behind the plate.
+  // Failures keep the local test scene + plate (practice mode, retry Play).
+  const connectAsSpectator = (): void => {
+    if (connecting || net.isConnected) {
+      return;
+    }
+    connecting = true;
+    net
+      .connect("")
+      .then((): void => {
+        connecting = false;
+      })
+      .catch((error: unknown): void => {
+        connecting = false;
+        const message = error instanceof Error ? error.message : "join failed";
+        hud.addKillfeed(`Spectate failed (${message}) — practice mode`);
+        hud.setStatus("Server unreachable — practice mode, retry Play");
+      });
+  };
+
+  // R2 release-to-fire FSM: hold (floating right-half / aim stick / FIRE /
+  // Space / LMB) to charge, release to sendFire. Quick tap >=80ms fires a
+  // weak shot. Gated by playing + alive. Precision pass: aim is NEVER locked
+  // at charge-start. The shot direction is resolved at RELEASE moment from
+  // the live aim (camera + stick/float), so PC mouse and the mobile gesture
+  // share one fire-time path. Charge feeds power/speed/damage only.
+  function isSelfAlive(): boolean {
+    const selfId = net.ownSessionId;
+    if (selfId === null || latest === null) {
+      return true;
+    }
+    const self = latest.players.find((player) => player.sessionId === selfId);
+    if (self === undefined) {
+      return true;
+    }
+    return self.alive;
+  }
+
+  function startCharge(): void {
+    if (!isPlaying || sceneManager.isSpectating()) {
+      return;
+    }
+    if (isCharging) {
+      return;
+    }
+    const nowMs = Date.now();
+    if (nowMs < reloadUntilMs) {
+      return;
+    }
+    if (!isSelfAlive()) {
+      return;
+    }
+    isCharging = true;
+    chargeStartMs = nowMs;
+    // No aim snapshot here: direction resolves at release (stopCharge).
+    aimOverlay.show();
+  }
+
+  function cancelCharge(): void {
+    if (!isCharging) {
+      return;
+    }
+    isCharging = false;
+    sceneManager.setCharge01(0);
+    aimOverlay.setCharge01(0);
+    aimOverlay.setTrajectory(null);
+    aimOverlay.hide();
+  }
+
+  function stopCharge(): void {
+    if (!isCharging) {
+      return;
+    }
+    const nowMs = Date.now();
+    const chargeMs = nowMs - chargeStartMs;
+    isCharging = false;
+    sceneManager.setCharge01(0);
+    aimOverlay.setCharge01(0);
+    aimOverlay.setTrajectory(null);
+    aimOverlay.hide();
+    if (chargeMs < TAP_FIRE_MIN_S * 1000) {
+      return;
+    }
+    // Cancel without local reload visuals when the shot cannot reach the
+    // server: not fighting, offline, or round phase is not playing (the
+    // server rejects fire outside playing, so a local 2.5s spin desyncs).
+    if (!isPlaying || sceneManager.isSpectating()) {
+      return;
+    }
+    if (!net.isConnected) {
+      return;
+    }
+    if (latest !== null && latest.phase !== "playing") {
+      return;
+    }
+    if (!isSelfAlive()) {
+      return;
+    }
+    // Fire-time aim (shared PC + mobile path): with stick and float idle the
+    // shot goes exactly where the camera looks RIGHT NOW (release moment),
+    // never where it looked at charge-start. A deflected stick/float keeps
+    // the live integrated aimYaw/aimPitch below, so mobile aiming works.
+    // Light aim assist then gently pulls toward a nearby enemy in the cone.
+    const stickIdle = Math.abs(aimVector.x) < 0.05 && Math.abs(aimVector.y) < 0.05;
+    const floatIdle = Math.abs(floatVector.x) < 0.05 && Math.abs(floatVector.y) < 0.05;
+    if (stickIdle && floatIdle) {
+      const releaseAngles = sceneManager.getCameraAngles();
+      aimYaw = releaseAngles.yaw;
+      aimPitch = releaseAngles.pitch;
+    }
+    const power01 = chargeToPower01(chargeMs / 1000);
+    const selfPos = sceneManager.getAvatarPosition();
+    const assistCandidates = remotes.livingPositions(net.ownSessionId);
+    const assisted = applyAimAssist(
+      aimYaw,
+      aimPitch,
+      { x: selfPos.x, z: selfPos.z },
+      assistCandidates,
+    );
+    // The server spawns at torso height on our elevation: send the live
+    // body-center y (avatar position.y) with the payload so platform and
+    // mid-jump throws leave the hand, not the feet.
+    net.sendFire({
+      power01,
+      yaw: assisted.yaw,
+      pitch: assisted.pitch,
+      super: hasSuperBuff,
+      throwerY: selfPos.y,
+    });
+    // Instant local feedback (<1 frame, zero network wait): pooled flash AT
+    // the hand (bodyCenter XZ + dir*0.7, y = bodyY + torso offset) so the eye
+    // sees the shot leave the hand before the server round-trip. The
+    // authoritative ball eases in later via BallsPool lerp.
+    const muzzle = muzzleForShot(selfPos.x, selfPos.y, selfPos.z, assisted.yaw, assisted.pitch);
+    sceneManager.flashMuzzle(muzzle.x, muzzle.y, muzzle.z, hasSuperBuff, LOCAL_AVATAR_COLOR);
+    // Instant client recoil (mirrors the authoritative server kick): nudge
+    // the avatar opposite the fire dir so the shot feels punchy with zero
+    // network wait. The server re-applies the same kick authoritatively.
+    sceneManager.applyRecoilKick(power01);
+    sceneManager.playThrow();
+    hasSuperBuff = false;
+    hud.setSuperBadge(false);
+    aimOverlay.setSuper(false);
+    isReloading = true;
+    reloadUntilMs = nowMs + RELOAD_MS;
+  }
+
+  const handleFirePointerDown = (event: Event): void => {
+    event.preventDefault();
+    startCharge();
+  };
+
+  const handleFirePointerUp = (): void => {
+    stopCharge();
+  };
+
+  const handleFirePointerCancel = (): void => {
+    cancelCharge();
+  };
+
+  const handleAimPointerDown = (): void => {
+    startCharge();
+  };
+
+  const handleAimPointerUp = (): void => {
+    stopCharge();
+  };
+
+  const handleAimPointerCancel = (): void => {
+    cancelCharge();
+  };
+
+  fireButton.addEventListener("pointerdown", handleFirePointerDown);
+  fireButton.addEventListener("pointerup", handleFirePointerUp);
+  fireButton.addEventListener("pointercancel", handleFirePointerCancel);
+  fireButton.addEventListener("pointerleave", handleFirePointerCancel);
+  aimStick.element.addEventListener("pointerdown", handleAimPointerDown);
+  aimStick.element.addEventListener("pointerup", handleAimPointerUp);
+  aimStick.element.addEventListener("pointercancel", handleAimPointerCancel);
+
+  // Floating right-half aim zone (touch) + LMB hold (PC): ONE gesture =
+  // press-hold (charge + preview) + drag (aim + camera follow) + release
+  // (fire). Touch: pointerdown on the right half with a floating origin.
+  // PC: LMB down on the canvas starts charge; RMB free-look is kept only
+  // while NOT charging (tick zeroes look deltas during charge). The fixed
+  // stick/FIRE listeners above stay as fallback calling the same FSM.
+  // Strict TS: DOM payloads read through guarded local readers (no `any`).
+  function readPointerId(event: Event): number | null {
+    const value = (event as unknown as { pointerId?: unknown }).pointerId;
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+
+  function readClientPoint(event: Event): { x: number; y: number } | null {
+    const body = event as unknown as { clientX?: unknown; clientY?: unknown };
+    if (typeof body.clientX !== "number" || typeof body.clientY !== "number") {
+      return null;
+    }
+    if (!Number.isFinite(body.clientX) || !Number.isFinite(body.clientY)) {
+      return null;
+    }
+    return { x: body.clientX, y: body.clientY };
+  }
+
+  function readPointerKind(event: Event): { type: string | null; button: number | null } {
+    const body = event as unknown as { pointerType?: unknown; button?: unknown };
+    return {
+      type: typeof body.pointerType === "string" ? body.pointerType : null,
+      button: typeof body.button === "number" ? body.button : null,
+    };
+  }
+
+  function targetOnGameUi(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) {
+      return false;
+    }
+    if (target instanceof HTMLInputElement || target instanceof HTMLButtonElement) {
+      return true;
+    }
+    return target.closest("#join-overlay,#joystick,#aim-stick,#fire-button") !== null;
+  }
+
+  function overlayOpen(): boolean {
+    return overlay.style.display !== "none";
+  }
+
+  const handleFloatPointerDown = (event: Event): void => {
+    if (!isPlaying || sceneManager.isSpectating()) {
+      return;
+    }
+    if (isTypingTarget(event)) {
+      return;
+    }
+    const target = (event as unknown as { target?: unknown }).target as EventTarget | null;
+    if (targetOnGameUi(target)) {
+      return;
+    }
+    if (overlayOpen() && target instanceof HTMLElement && target.closest("#join-overlay") !== null) {
+      return;
+    }
+    const pointerId = readPointerId(event);
+    const point = readClientPoint(event);
+    const kind = readPointerKind(event);
+    if (pointerId === null || point === null) {
+      return;
+    }
+    if (kind.type === "touch") {
+      // Right half only — the left half belongs to the move stick.
+      if (point.x < window.innerWidth / 2) {
+        return;
+      }
+      if (floatActive) {
+        return;
+      }
+    } else {
+      // PC parity via the same path: LMB on the canvas starts charge.
+      // Guard typing/join overlay; RMB stays free-look (InputController).
+      if (kind.button !== 0) {
+        return;
+      }
+      if (overlayOpen()) {
+        return;
+      }
+      if (!(target instanceof HTMLElement) || target !== engine.renderer.domElement) {
+        // Canvas-only so HUD/DOM clicks never charge.
+        return;
+      }
+      if (floatActive) {
+        return;
+      }
+    }
+    floatActive = true;
+    floatPointerId = pointerId;
+    floatOriginX = point.x;
+    floatOriginY = point.y;
+    floatVector = { x: 0, y: 0 };
+    startCharge();
+  };
+
+  const handleFloatPointerMove = (event: Event): void => {
+    if (!floatActive) {
+      return;
+    }
+    const pointerId = readPointerId(event);
+    if (pointerId === null || pointerId !== floatPointerId) {
+      return;
+    }
+    const point = readClientPoint(event);
+    if (point === null) {
+      return;
+    }
+    const radius = FLOAT_DRAG_RADIUS_PX > 0 ? FLOAT_DRAG_RADIUS_PX : 80;
+    let dx = (point.x - floatOriginX) / radius;
+    let dy = (point.y - floatOriginY) / radius;
+    const length = Math.hypot(dx, dy);
+    if (length > 1) {
+      dx /= length;
+      dy /= length;
+    }
+    // Joystick convention: screen-up means +y (pitch up).
+    floatVector = { x: applyExpo(dx, AIM_EXPO), y: applyExpo(-dy, AIM_EXPO) };
+  };
+
+  const handleFloatPointerUp = (event: Event): void => {
+    if (!floatActive) {
+      return;
+    }
+    const pointerId = readPointerId(event);
+    if (pointerId !== null && pointerId !== floatPointerId) {
+      return;
+    }
+    floatActive = false;
+    floatPointerId = null;
+    floatVector = { x: 0, y: 0 };
+    stopCharge();
+  };
+
+  const handleFloatPointerCancel = (event: Event): void => {
+    if (!floatActive) {
+      return;
+    }
+    const pointerId = readPointerId(event);
+    if (pointerId !== null && pointerId !== floatPointerId) {
+      return;
+    }
+    floatActive = false;
+    floatPointerId = null;
+    floatVector = { x: 0, y: 0 };
+    cancelCharge();
+  };
+
+  window.addEventListener("pointerdown", handleFloatPointerDown);
+  window.addEventListener("pointermove", handleFloatPointerMove);
+  window.addEventListener("pointerup", handleFloatPointerUp);
+  window.addEventListener("pointercancel", handleFloatPointerCancel);
+
+  // Async Rapier WASM boot. The scene stays playable on the legacy
+  // kinematic path when physics fails — never a fatal error.
+  const physicsReady = await sceneManager.initPhysics();
+  hud.addKillfeed(physicsReady ? "Physics ready — have fun!" : "Physics offline — fallback movement");
+
+  const handleKeyDown = (event: KeyboardEvent): void => {
+    // Typing a nick must never fire Space/H/R/power-up shortcuts.
+    if (isTypingTarget(event)) {
+      return;
+    }
+    const granted = POWERUP_KEYS[event.code];
+    if (granted !== undefined) {
+      // Spectators have no avatar: power-up grants are fighters-only, same
+      // gate as Space/fire below.
+      if (!isPlaying) {
+        return;
+      }
+      sceneManager.grantPowerUp(granted);
+      hud.addKillfeed(`Power-up granted: ${granted}`);
+      return;
+    }
+    if (event.code === "Space") {
+      event.preventDefault();
+      // R2 Space hold charges, release fires (same FSM as sticks). Gated
+      // inside startCharge by isPlaying && !spectating && alive + reload.
+      if (!event.repeat) {
+        if (isPlaying && !sceneManager.isSpectating()) {
+          startCharge();
+        }
+      }
+      return;
+    }
+    if (event.code === "KeyH") {
+      // Test-scene hit: a shield charge absorbs one hit, otherwise the HUD
+      // loses one heart (QD3: 1 hit = 1 heart). Fighters-only: spectators
+      // must not fake hearts while watching.
+      if (!isPlaying) {
+        return;
+      }
+      const absorbed = sceneManager.applyTestHit();
+      if (absorbed) {
+        hud.addKillfeed("Shield absorbed the hit");
+      } else {
+        hud.simulateHit("test hit");
+      }
+    }
+    if (event.code === "KeyR") {
+      // Scene reset is fighters-only: a spectator pressing R must not wipe
+      // the watched arena or fake the HUD timer/score/hearts.
+      if (!isPlaying) {
+        return;
+      }
+      sceneManager.reset();
+      input.reset();
+      isCharging = false;
+      isReloading = false;
+      reloadUntilMs = 0;
+      aimVector = { x: 0, y: 0 };
+      floatActive = false;
+      floatPointerId = null;
+      floatVector = { x: 0, y: 0 };
+      sceneManager.setCharge01(0);
+      aimOverlay.setCharge01(0);
+      aimOverlay.setReload01(0);
+      aimOverlay.hide();
+      hud.setTimer(ROUND_SECONDS);
+      hud.setScore(START_SCORE);
+      hud.setHeartsFromHearts(MAX_HEARTS);
+      hud.setReload01(1);
+    }
+  };
+  window.addEventListener("keydown", handleKeyDown);
+
+  const handleKeyUp = (event: KeyboardEvent): void => {
+    if (isTypingTarget(event)) {
+      return;
+    }
+    if (event.code === "Space") {
+      event.preventDefault();
+      stopCharge();
+    }
+  };
+  window.addEventListener("keyup", handleKeyUp);
+
+  const handlePageHide = (): void => {
+    window.removeEventListener("keydown", handleKeyDown);
+    window.removeEventListener("keyup", handleKeyUp);
+    window.removeEventListener("pointerdown", handleFloatPointerDown);
+    window.removeEventListener("pointermove", handleFloatPointerMove);
+    window.removeEventListener("pointerup", handleFloatPointerUp);
+    window.removeEventListener("pointercancel", handleFloatPointerCancel);
+    playButton.removeEventListener("click", handlePlay);
+    fireButton.removeEventListener("pointerdown", handleFirePointerDown);
+    fireButton.removeEventListener("pointerup", handleFirePointerUp);
+    fireButton.removeEventListener("pointercancel", handleFirePointerCancel);
+    fireButton.removeEventListener("pointerleave", handleFirePointerCancel);
+    aimStick.element.removeEventListener("pointerdown", handleAimPointerDown);
+    aimStick.element.removeEventListener("pointerup", handleAimPointerUp);
+    aimStick.element.removeEventListener("pointercancel", handleAimPointerCancel);
+    void net.disconnect();
+    joystick.destroy();
+    aimStick.destroy();
+    aimOverlay.dispose();
+    hud.dispose();
+    input.dispose();
+    remotes.dispose();
+    sceneManager.dispose();
+    engine.dispose();
+    if (overlay.parentElement === document.body) {
+      document.body.removeChild(overlay);
+    }
+    if (fireButton.parentElement === document.body) {
+      document.body.removeChild(fireButton);
+    }
+  };
+  window.addEventListener("pagehide", handlePageHide);
+
+  // Honest trajectory preview: the same v0 (charge power -> speed) and
+  // gravity the authoritative server integrates, sampled at fixed steps and
+  // projected to screen-space offsets from the crosshair. Runs while
+  // charging so the dots move with power + aim. DOM overlay only.
+  const projScratch = new THREE.Vector3();
+  function computeAimTrajectory(): TrajSample[] {
+    const chargeS = Math.max(0, (Date.now() - chargeStartMs) / 1000);
+    const speed = powerToSpeed(chargeToPower01(chargeS));
+    const dir = directionFromYawPitch(aimYaw, aimPitch);
+    const origin = sceneManager.getAvatarPosition();
+    // Identical muzzle helper as the fire path (bodyCenter XZ + dir*0.7,
+    // y = bodyY + torso offset) so the preview tracks elevation too.
+    const muzzle = muzzleForShot(origin.x, origin.y, origin.z, aimYaw, aimPitch);
+    const muzzleX = muzzle.x;
+    const muzzleY = muzzle.y;
+    const muzzleZ = muzzle.z;
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    engine.camera.updateMatrixWorld();
+    const samples: TrajSample[] = [];
+    // Start at t=0 (muzzle) so the first dot visibly leaves the torso —
+    // same origin/offset/height/gravity as the authoritative spawn.
+    for (let i = 0; i < TRAJ_DOT_COUNT; i += 1) {
+      const t = i * TRAJ_PREVIEW_DT_S;
+      projScratch.set(
+        muzzleX + dir.x * speed * t,
+        muzzleY + dir.y * speed * t - 0.5 * BALL_GRAVITY * t * t,
+        muzzleZ + dir.z * speed * t,
+      );
+      projScratch.project(engine.camera);
+      const behind = projScratch.z > 1 || projScratch.z < -1;
+      const rawX = projScratch.x * (width / 2);
+      const rawY = -projScratch.y * (height / 2);
+      samples.push({
+        x: Math.max(-width / 2 + 6, Math.min(width / 2 - 6, rawX)),
+        y: Math.max(-height / 2 + 6, Math.min(height / 2 - 6, rawY)),
+        visible: !behind,
+      });
+    }
+    return samples;
+  }
+
+  engine.onUpdate((deltaSeconds): void => {
+    if (deltaSeconds <= 0) {
+      return;
+    }
+    // R1: spectators send no movement — gate inputs by the playing flag
+    // (SceneManager also ignores them while spectating; belt and braces).
+    // Look deltas are still consumed so they never pile up before welcome.
+    const rawMove = input.getMoveVector();
+    const rawLook = input.consumeLookDelta();
+    const playing = isPlaying && !sceneManager.isSpectating();
+    const move = playing ? rawMove : { x: 0, y: 0 };
+    // While charging the camera follows aim (one-thumb 360 turn); RMB
+    // free-look applies only when NOT charging.
+    const look = playing ? (isCharging ? { dx: 0, dy: 0 } : rawLook) : { dx: 0, dy: 0 };
+    // R2 aim + charge + reload tick (fighters only, spectators gated out).
+    // Aim rule: a deflected stick/float integrates yaw/pitch at the shared
+    // rate (mobile aiming, also while charging); an idle stick AND idle float
+    // tracks the live camera every frame — even mid-charge — so
+    // release-moment aim never drifts from what the player sees. While
+    // charging the camera copies aimYaw/aimPitch each frame (360-degree one
+    // thumb turn). Charge only drives power (charge01), never direction.
+    if (playing) {
+      if (Math.hypot(aimVector.x, aimVector.y) >= FLOAT_DEADZONE) {
+        aimYaw -= aimVector.x * AIM_YAW_RATE * deltaSeconds;
+        const nextPitch = aimPitch + aimVector.y * AIM_PITCH_RATE * deltaSeconds;
+        aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextPitch));
+      }
+      if (Math.hypot(floatVector.x, floatVector.y) >= FLOAT_DEADZONE) {
+        aimYaw -= floatVector.x * AIM_YAW_RATE * deltaSeconds;
+        const nextFloatPitch = aimPitch + floatVector.y * AIM_PITCH_RATE * deltaSeconds;
+        aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextFloatPitch));
+      }
+      if (
+        Math.abs(aimVector.x) < 0.05 &&
+        Math.abs(aimVector.y) < 0.05 &&
+        Math.abs(floatVector.x) < 0.05 &&
+        Math.abs(floatVector.y) < 0.05
+      ) {
+        const cam = sceneManager.getCameraAngles();
+        aimYaw = cam.yaw;
+        aimPitch = cam.pitch;
+      }
+      if (isCharging) {
+        // Camera follows aim while charging (per-frame, no alloc).
+        sceneManager.setCameraAngles(aimYaw, aimPitch);
+      }
+      // Aim feed every frame (recoil kick dir + spark emitter; body keeps
+      // movement yaw — no barrel to track since 4d.1).
+      sceneManager.setAimAngles(aimYaw, aimPitch);
+      const nowMs = Date.now();
+      if (isCharging) {
+        const charge01 = Math.max(0, Math.min(1, (nowMs - chargeStartMs) / (CHARGE_MAX_S * 1000)));
+        sceneManager.setCharge01(charge01);
+        aimOverlay.setCharge01(charge01);
+      }
+      if (isReloading) {
+        if (nowMs >= reloadUntilMs) {
+          isReloading = false;
+          hud.setReload01(1);
+          aimOverlay.setReload01(0);
+        } else {
+          const progress = 1 - (reloadUntilMs - nowMs) / RELOAD_MS;
+          hud.setReload01(progress);
+          aimOverlay.setReload01(progress);
+        }
+      } else if (!isCharging) {
+        hud.setReload01(1);
+        aimOverlay.setReload01(0);
+      }
+    }
+    // Self reconciliation FIRST (playing + alive only): correct toward the
+    // authoritative server self before local physics integrates, so input
+    // builds on top of the authoritative base instead of overwriting the
+    // correction same-frame. Lerp 0.5-6m, snap beyond, no jitter in band.
+    if (latest !== null && playing) {
+      const selfId = net.ownSessionId;
+      const selfSnap = latest.players.find((player) => player.sessionId === selfId);
+      if (selfSnap !== undefined && selfSnap.alive) {
+        sceneManager.reconcileSelf(selfSnap.x, selfSnap.z, deltaSeconds);
+      }
+    }
+    sceneManager.update(deltaSeconds, move, look);
+    // Honest preview after the camera moved: dots track the real arc.
+    if (playing && isCharging) {
+      aimOverlay.setTrajectory(computeAimTrajectory());
+    }
+    for (const arenaEvent of sceneManager.drainEvents()) {
+      if (arenaEvent.type === "pickup") {
+        hud.addKillfeed(`Picked up ${arenaEvent.kind}`);
+      } else if (arenaEvent.type === "trampoline") {
+        hud.addKillfeed("Boing! Trampoline launch");
+      } else {
+        hud.addKillfeed("Speed boost expired");
+      }
+    }
+    // Remote replication: ease every snapshot through lerp/slerp.
+    if (latest !== null) {
+      remotes.sync(latest.players, net.ownSessionId, deltaSeconds);
+    }
+    // Inputs-only upstream at 20 ticks/s: camera-relative stick (move.x/y)
+    // rotated to WORLD-space via the shared worldMoveFromYaw helper (same
+    // formula as SceneManager.update local physics) + avatar facing rotY.
+    // The server applies input.x -> world X, input.y -> world Z directly.
+    // R1: gated by the playing flag — spectators have no body to drive.
+    // R2: charging flag slows the server 50% while aiming a shot.
+    if (net.isConnected && isPlaying) {
+      inputAccumulator += deltaSeconds;
+      if (inputAccumulator >= INPUT_SEND_INTERVAL_S) {
+        inputAccumulator = 0;
+        inputSeq += 1;
+        const facing = sceneManager.getAvatarFacing();
+        const cameraYaw = sceneManager.getCameraAngles().yaw;
+        const world = worldMoveFromYaw(move.x, move.y, cameraYaw);
+        net.sendInput(buildInputPayload(world.x, world.y, facing, inputSeq, isCharging));
+      }
+    }
+  });
+  // R1: join immediately as a spectator so boot shows the live arena.
+  connectAsSpectator();
+  engine.start();
+}
+
+void boot();

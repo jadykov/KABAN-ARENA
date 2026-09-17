@@ -1,0 +1,37 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noImplicitAny": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    // Legacy @colyseus/schema @type decorators require the experimental
+    // decorator transform. This MUST live in the base config (not only
+    // server/tsconfig.json): tsx run from the repo root resolves the root
+    // tsconfig, and without this flag it emits the new TC39 decorator
+    // shape where the legacy (target, field) signature receives
+    // `target === undefined` -> live `setState(new ArenaState())` crashes
+    // with `setRoot of undefined`, while vitest (cwd=server/) still passes.
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    // @colyseus/schema @type() installs prototype getter/setters whose
+    // setter stamps `$childType` (e.g. PlayerState) onto the MapSchema.
+    // ES2022 class fields default to define-semantics, which bypasses the
+    // setter, leaving `$childType === undefined` -> any encode of a room
+    // with players crashes in `encodeKeyValueOperation` (`type` undefined).
+    // Assign-semantics restores the setter path (standard Colyseus setup).
+    "useDefineForClassFields": false,
+    "declaration": true,
+    "sourceMap": true
+  }
+}

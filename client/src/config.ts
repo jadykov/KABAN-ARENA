@@ -1,0 +1,280 @@
+// Shared tunable constants for Stage 2 (client test scene + controls).
+// Values confirmed with the owner (see MAP.md Stage 2 / Q9-A): camera FOV 75,
+// follow distance 5m, joystick diameter 120px. Keep them named here instead of
+// hardcoding literals across modules (AGENTS.md hardcoding rule).
+
+// Third-person follow camera (Q9-A confirmed 2026-09-11).
+export const CAMERA_FOV = 75;
+export const CAMERA_FOLLOW_DISTANCE = 5;
+export const CAMERA_FOLLOW_HEIGHT = 2.1;
+export const CAMERA_LOOK_AT_HEIGHT = 1.2;
+export const CAMERA_SENSITIVITY = 0.0045;
+export const CAMERA_PITCH_MIN = -0.15;
+export const CAMERA_PITCH_MAX = 0.9;
+
+// Virtual joystick (Q9-A: left side, diameter 120px, transparent look-through).
+export const JOYSTICK_DIAMETER = 120;
+export const JOYSTICK_RADIUS = JOYSTICK_DIAMETER / 2;
+export const JOYSTICK_KNOB_DIAMETER = 52;
+// Low opacity so the game view stays visible through the control (A2).
+export const JOYSTICK_OPACITY = 0.4;
+export const JOYSTICK_KNOB_OPACITY = 0.55;
+
+// Test-scene avatar movement. Map +20% (28m -> ~33.6m): half 14 -> 16.8,
+// spawn inset scaled proportionally (2 -> 2.4).
+export const MOVE_SPEED = 4.5;
+export const ARENA_HALF_SIZE = 16.8;
+// Movement blending (ice/impulse fix): horizontal velocity is steered toward
+// the input target by at most ACCEL m/s per second instead of being hard-set
+// every frame, so ice sliding and knockback impulses survive and decay via
+// damping/friction. Ground stays snappy, ice redirects slowly (slippery).
+export const PLAYER_GROUND_ACCEL = 24;
+// Sticky ice (owner 1A): weak controllable slide — on ice the target speed
+// is cut to ICE_SPEED_MULT (40-50% cut) and steering is slow (ICE_ACCEL)
+// but strong enough to escape, so ice feels sticky, never a trap.
+export const PLAYER_ICE_ACCEL = 3.0;
+export const ICE_SPEED_MULT = 0.5;
+
+// HUD placeholder round (QD3 hybrid; real loop lands in Stage 4).
+export const MAX_HEARTS = 4;
+export const ROUND_SECONDS = 180;
+export const START_SCORE = 0;
+
+// Perf budget (AGENTS.md pitfalls): shadow map stays at or below 1024.
+export const SHADOW_MAP_SIZE = 1024;
+
+// Stage 3 physics (QT3-A confirmed 2026-09-11: fixed tick 60Hz decoupled,
+// ice friction 0.05-0.1, trampoline impulse 8-12, tuned here).
+export const PHYSICS_TICK_HZ = 60;
+export const PHYSICS_FIXED_DT = 1 / PHYSICS_TICK_HZ;
+export const PHYSICS_GRAVITY_Y = -9.81;
+export const PHYSICS_MAX_ACCUMULATOR = 0.1;
+export const PLAYER_FRICTION = 0.7;
+export const PLAYER_RESTITUTION = 0.1;
+export const PLAYER_LINEAR_DAMPING = 2.5;
+// Ice/puddle friction inside the QT3-A 0.05-0.1 band; damping raised for
+// sticky ice (owner 1A) so the capsule slows to the halved target speed
+// instead of gliding forever — escapable via ICE_ACCEL steering.
+export const ICE_FRICTION = 0.07;
+export const ICE_LINEAR_DAMPING = 1.0;
+export const TRAMPOLINE_IMPULSE = 10;
+export const TRAMPOLINE_COOLDOWN_S = 0.5;
+// Trampoline pads are trigger-only by design (no physical pad collider —
+// see ArenaBuilder.buildColliders): pad top sits at ~0.36m, a resting
+// capsule center at ~1.0m, so the trigger band stays above ground level
+// but below the launch apex.
+export const TRAMPOLINE_TRIGGER_Y = 1.7;
+export const KNOCKBACK_IMPULSE = 9;
+
+// Stage 3 arena (QD2-A neon-warehouse, QD5-A 6-8 low symmetric blocks).
+export const OBSTACLE_COUNT = 8;
+export const WALL_HEIGHT = 3;
+export const WALL_THICKNESS = 0.5;
+export const TRAMPOLINE_RADIUS = 1.2;
+export const SLIPPERY_RADIUS = 2.64;
+export const SPAWN_COUNT = 4;
+export const SPAWN_INSET = 2.4;
+
+// Power-up set A1 (speed x1.3 timed, shield 1 hit, impulse knockback).
+export const SPEED_MULTIPLIER = 1.3;
+export const SPEED_DURATION_S = 6;
+export const SHIELD_MAX_HITS = 1;
+export const POWERUP_RESPAWN_S = 8;
+export const POWERUP_PICKUP_RADIUS = 1.2;
+
+// Beauty-perf FX (QD4-A: hit flash + pooled particles + light camera shake).
+export const PARTICLE_POOL_SIZE = 128;
+export const PARTICLE_LIFETIME_S = 0.6;
+export const PARTICLE_BURST_COUNT = 24;
+export const SHAKE_MAX_OFFSET = 0.25;
+export const SHAKE_DECAY = 3;
+export const HIT_FLASH_DURATION_S = 0.18;
+
+// Ads dressing (QA1-5A confirmed): 6 fence slots 512x256 + 1 banner 4x1m.
+// Owner drops fence-*.png/jpg + banner.png/jpg into client/assets/ads/
+// (synced to public/ads by scripts/sync-ads.mjs); placeholders are SVGs.
+export const FENCE_SLOT_COUNT = 6;
+export const FENCE_TEXTURE_WIDTH = 512;
+export const FENCE_TEXTURE_HEIGHT = 256;
+export const BANNER_WIDTH_M = 4;
+export const BANNER_HEIGHT_M = 1;
+export const BANNER_TEXTURE_WIDTH = 512;
+export const BANNER_TEXTURE_HEIGHT = 128;
+export const ADS_PUBLIC_BASE_PATH = "/ads";
+
+// Stage 4 netcode (client mirrors; server src/config.ts is authoritative).
+// Inputs-only upstream at 20 ticks/s, delta patches downstream at 20/s.
+export const SERVER_URL_DEFAULT_PORT = 2567;
+export const ROOM_NAME = "arena";
+export const INPUT_SEND_HZ = 20;
+export const INPUT_SEND_INTERVAL_S = 1 / INPUT_SEND_HZ;
+export const MAX_PLAYERS = 6;
+// Hitscan A mirrors (100HP / 25 dmg = 4 hits = 4 hearts, QD3/Q8).
+export const HIT_MAX_RANGE = 18;
+export const HIT_COOLDOWN_MS = 350;
+export const HIT_DAMAGE = 25;
+// Client interpolation of remote avatars (server patches at 20Hz).
+export const LERP_SMOOTHING = 10;
+export const SNAP_DISTANCE = 6;
+// Self reconciliation toward the authoritative server snapshot (XZ only,
+// per-frame, no alloc): drift under MIN stays local (no jitter), drift in
+// [MIN, SNAP] eases at RATE, drift beyond SNAP snaps (spawn/respawn/teleport).
+// Gentle tuning (0.7/8): the client predicts the server instant-move rule, so
+// small per-tick differences must not visibly tug the avatar — the wider
+// deadband plus slower ease hides high-frequency lateral jitter at 60/120Hz.
+export const SELF_RECONCILE_MIN_M = 0.7;
+export const SELF_RECONCILE_SNAP_M = 6;
+export const SELF_RECONCILE_RATE = 8;
+// Follow-camera smoothing: desired position + lookAt ease at this exp rate
+// (1/s), so per-frame avatar corrections never translate into camera jumps.
+// Yaw stays instant (responsive mouse); remote-avatar yaw wrap already uses
+// shortest-arc lerpAngle (see net/interpolation.ts).
+export const CAMERA_SMOOTH_RATE = 13;
+// Recoil grace: the client kick is prediction-only (the server re-applies the
+// same kick authoritatively), so reconcileSelf skips corrections for this long
+// after a local kick instead of fighting it and double-tugging the avatar.
+export const RECOIL_RECONCILE_GRACE_S = 0.15;
+// Avatar colors: local fighter orange, remotes cycle the shared palette by
+// sessionId hash. Balls reuse the same mapping (cap/glow/trail tinted by the
+// owner color, basalt body kept) so every core reads as its thrower's.
+export const LOCAL_AVATAR_COLOR = 0xff9f43;
+export const REMOTE_PALETTE = [0x22d3ee, 0xa78bfa, 0x4ade80, 0xf472b6, 0xfacc15, 0x60a5fa] as const;
+// Local spawn height mirrors the server PlayerState y (1.1).
+export const SELF_SPAWN_Y = 1.1;
+// Guest nicks (no auth): validated locally, deduped server-side.
+export const NICK_MIN_LENGTH = 2;
+export const NICK_MAX_LENGTH = 16;
+export const DEFAULT_NICK = "Kaban";
+// R1 pre-join spectator: empty Play nick falls back to Guest-XXXX.
+export const GUEST_NICK_PREFIX = "Guest";
+
+// R1 spectator hover camera: cinematic angled top-down above the arena
+// with a slow drift/orbit (see SceneManager.updateSpectatorCamera).
+// Scaled +20% with the map (14/16/14 -> 16.8/19.2/16.8).
+export const SPECTATOR_CAM_X = 16.8;
+export const SPECTATOR_CAM_Y = 19.2;
+export const SPECTATOR_CAM_Z = 16.8;
+export const SPECTATOR_ORBIT_SPEED = 0.12;
+export const SPECTATOR_BOB_AMPLITUDE = 0.6;
+export const SPECTATOR_BOB_SPEED = 0.4;
+
+// R2 hand-ball combat (client mirrors; server src/config.ts authoritative).
+// Charge 0-1.0s -> power01 [0.5, 1], 2.5s reload, FULL 25 / WEAK 12.5 (halves).
+export const CHARGE_MAX_S = 1.0;
+export const RELOAD_MS = 2500;
+export const FULL_DAMAGE = 25;
+export const WEAK_DAMAGE = 12.5;
+export const SUPER_DAMAGE_MULT = 2;
+export const FULL_POWER_THRESHOLD = 0.8;
+// Weak shots fly slightly slower than before (MIN 14 -> 11, ~21% down);
+// strong/full shots keep the current MAX 20 speed/physics.
+export const BALL_MIN_SPEED = 11;
+export const BALL_MAX_SPEED = 20;
+// Client preview mirror of the authoritative server ball (server
+// src/config.ts is truth): same muzzle/body-height/gravity so the aim dots
+// show the real arc. Light-lob tuning (precision pass), MAX 20 kept.
+export const BALL_GRAVITY = 3.5;
+// Torso/hand height above the thrower body-center y: ground body-center is
+// SELF_SPAWN_Y 1.1, so spawn y = bodyY + 0.3 == 1.4 on the ground (unchanged
+// from the old absolute height); on platforms it tracks the elevation.
+export const BALL_TORSO_OFFSET = 0.3;
+export const TRAJ_PREVIEW_DT_S = 0.12;
+export const MAX_LIVE_BALLS = 12;
+export const MAX_HALVES = 8;
+export const SUPER_SPAWN_S = 45;
+export const SUPER_LIFE_S = 15;
+export const SUPER_BLINK_S = 3;
+// Recoil: server-authoritative kick opposite the fire dir, mirrored here
+// for the instant client feedback nudge (weak 0.4m -> full 0.8m).
+export const RECOIL_WEAK_M = 0.4;
+export const RECOIL_FULL_M = 0.8;
+// CS-like asymmetric figures (owner 2A): 4 distinct hills — tall cube (SE),
+// long block (NW), box (SW), prism (N lane). One quadrant each, footprints
+// and heights vary (1.8-2.6m, all <= 3m so the camera sees over), center
+// (0,0) stays empty for Worms drops (SUPER core). Each figure has a walk-up
+// ramp on EXACTLY ONE side (rampSide); the other 3 sides are sheer walls the
+// capsule cannot climb. Ramp slope is RAMP_SLOPE_DEG (run = topY/tan) so the
+// capsule walks up with no jumping. rampWidth is the full slab width (m).
+export const RAMP_SLOPE_DEG = 14;
+export interface PlatformFigureDef {
+  x: number;
+  z: number;
+  hx: number;
+  hz: number;
+  topY: number;
+  rampSide: "+x" | "-x" | "+z" | "-z";
+  rampWidth: number;
+}
+export const PLATFORM_FIGURES: readonly PlatformFigureDef[] = [
+  { x: 13.8, z: -8.5, hx: 1.2, hz: 1.2, topY: 2.6, rampSide: "+z", rampWidth: 2.0 },
+  { x: -13.5, z: 10.0, hx: 2.4, hz: 1.0, topY: 1.8, rampSide: "-z", rampWidth: 1.6 },
+  { x: -11.5, z: -9.5, hx: 1.4, hz: 1.4, topY: 2.2, rampSide: "+x", rampWidth: 1.8 },
+  { x: 5.0, z: 13.5, hx: 1.0, hz: 1.0, topY: 2.0, rampSide: "-x", rampWidth: 1.6 },
+] as const;
+export const RAMP_SLAB_THICKNESS = 0.2;
+// Camera-wall occlusion: camera clamped inside HALF + this margin (wall line).
+export const CAMERA_WALL_MARGIN = 0.5;
+// Faded wall opacity while the camera sits low/close behind a wall.
+export const WALL_FADE_OPACITY = 0.25;
+// Hand-ball prop: the avatar holds a round core in its right hand (no
+// barrel anymore). Throw flick duration (forward snap on release) + held-ball
+// look (radius, right-side chest attach mirroring the old cannon offset).
+// NOTE: the avatar faces local +Z, so the anatomical RIGHT hand is local −X.
+export const HANDBALL_THROW_FLICK_S = 0.15;
+export const HANDBALL_RADIUS = 0.16;
+export const HANDBALL_OFFSET_X = -0.55;
+export const HANDBALL_OFFSET_Y = 0.5;
+export const HANDBALL_OFFSET_Z = 0.1;
+// Death burst palette (yellow 10% / orange 30% / red 60%).
+export const DEATH_BURST_YELLOW = 0xffe14d;
+export const DEATH_BURST_ORANGE = 0xff8833;
+export const DEATH_BURST_RED = 0xff3344;
+export const DEATH_BURST_COUNT = 30;
+// Tap shorter than this never fires (touch blip, not a shot).
+export const TAP_FIRE_MIN_S = 0.08;
+// Chest-exit muzzle mirror of server BALL_MUZZLE_OFFSET (single constants:
+// preview origin and authoritative spawn must stay identical). 0.7m along
+// the aim dir from the body center — just in front of the 0.5m capsule.
+export const BALL_MUZZLE_OFFSET = 0.7;
+// Aim sticks: right side big zone (~160px) for yaw/pitch, left enlarged
+// (~140px) with expo response so small drifts stay precise.
+export const AIM_STICK_DIAMETER = 160;
+export const MOVE_STICK_DIAMETER = 140;
+export const AIM_EXPO = 1.4;
+export const AIM_YAW_RATE = 2.4;
+export const AIM_PITCH_RATE = 1.6;
+// Floating right-thumb aim zone (Brawl-Stars-like one-thumb flow): pointerdown
+// anywhere on the right half starts charge at the touch point (floating
+// origin, not a fixed disc); drag offset in px maps to [-1, 1] over this
+// radius, then expo + deadzone + yaw/pitch rates above. Camera copies aim
+// while charging so one thumb can turn 360 degrees.
+export const FLOAT_DRAG_RADIUS_PX = 80;
+export const FLOAT_DEADZONE = 0.05;
+// Light client-side aim assist (subtle, deterministic, no randomness):
+// living enemy within ASSIST range and inside the aim cone gets a gentle
+// pull toward its center (blend fraction, never a snap). Server authority
+// unchanged (server BALL_HIT_RADIUS 0.9 kept); assist only nudges the
+// release-time yaw/pitch in buildFirePayload path.
+export const AIM_ASSIST_MAX_DIST_M = 18;
+export const AIM_ASSIST_CONE_DEG = 12;
+export const AIM_ASSIST_BLEND = 0.5;
+// Crosshair colors (DOM aim overlay, pointer-events none).
+export const CROSSHAIR_IDLE_COLOR = "#ffffff";
+export const CROSSHAIR_CHARGING_COLOR = "#ffd54d";
+export const CROSSHAIR_FULL_COLOR = "#ff5340";
+export const CROSSHAIR_RELOAD_COLOR = "#7dd7ff";
+export const CROSSHAIR_SUPER_COLOR = "#c77bff";
+
+// WebSocket endpoint for the Colyseus server. Env override first
+// (VITE_SERVER_URL), otherwise same host as the page on the default port.
+export function getServerUrl(): string {
+  const fromEnv = import.meta.env["VITE_SERVER_URL"];
+  if (typeof fromEnv === "string" && fromEnv.length > 0) {
+    return fromEnv;
+  }
+  if (typeof window !== "undefined" && window.location !== undefined) {
+    const host = window.location.hostname !== "" ? window.location.hostname : "localhost";
+    return `ws://${host}:${SERVER_URL_DEFAULT_PORT}`;
+  }
+  return `ws://localhost:${SERVER_URL_DEFAULT_PORT}`;
+}

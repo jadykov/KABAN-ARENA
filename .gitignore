@@ -1,0 +1,18 @@
+AGENTS.md
+MAP.md
+LOG.md
+LOG-ARCHIVE.md
+
+# secrets guard — never commit keys/tokens (values stay outside repo)
+.env
+*.key
+*.pem
+*.p12
+id_*
+.ssh/
+
+# build artifacts (never commit)
+node_modules/
+client/dist/
+server/dist/
+coverage/

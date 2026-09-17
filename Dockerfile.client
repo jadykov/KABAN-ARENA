@@ -1,0 +1,20 @@
+# KABAN ARENA — client image (Stage 1 skeleton)
+# Reproducible dev/build/test isolation. Working folder: /workbench/new-game
+FROM node:20-alpine
+
+WORKDIR /workbench/new-game
+
+# Install workspace deps first for layer caching.
+COPY package.json package-lock.json tsconfig.base.json tsconfig.json .eslintrc.json ./
+COPY client/package.json ./client/package.json
+COPY server/package.json ./server/package.json
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+
+# Copy the rest and verify the client builds during image build.
+COPY client/ ./client/
+COPY server/ ./server/
+RUN npm run build --workspace @kaban-arena/client
+
+EXPOSE 5173
+
+CMD ["npm", "run", "dev", "--workspace", "@kaban-arena/client"]
