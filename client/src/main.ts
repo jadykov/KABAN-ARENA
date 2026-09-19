@@ -11,6 +11,8 @@ import {
   CHARGE_MAX_S,
   FLOAT_DEADZONE,
   FLOAT_DRAG_RADIUS_PX,
+  IDLE_FOLLOW_RATE,
+  IDLE_RECENTER_MOVE_MAX,
   INPUT_SEND_INTERVAL_S,
   LOCAL_AVATAR_COLOR,
   MAX_HEARTS,
@@ -29,7 +31,8 @@ import { SceneManager } from "./engine/SceneManager";
 import { NetworkManager, type RoomSnapshot } from "./net/NetworkManager";
 import { RemoteAvatars } from "./net/RemoteAvatars";
 import { applyAimAssist } from "./net/aimAssist";
-import { beginChargeLevel, pitchRateScale, stepChargeLevel, type ChargeLevel } from "./net/chargeAim";
+import { beginChargeLevel, pitchRateScale, stepChargeLevel, yawRateScale, type ChargeLevel } from "./net/chargeAim";
+import { cameraYawBehindFacing, forwardnessRateScale, shouldIdleFollow, shouldIdleRecenter, stepIdleFollowPitch, stepIdleFollowYaw, stepIdleRecenterPitch, stepIdleRecenterYaw, stickAngleFromForward, type IdleFollowGate, type IdleRecenterGate } from "./net/idleFollow";
 import {
   applyExpo,
   buildInputPayload,
@@ -141,6 +144,35 @@ async function boot(): Promise<void> {
   let floatOriginX = 0;
   let floatOriginY = 0;
   let floatVector = { x: 0, y: 0 };
+  // Idle-follow gate scratch (Stage 4d.2-fix2 follow-up): mutated every
+  // playing frame and passed to shouldIdleFollow so the gate check itself
+  // allocates nothing per frame.
+  const idleFollowGate: IdleFollowGate = {
+    playing: false,
+    charging: false,
+    alive: false,
+    lookDx: 0,
+    lookDy: 0,
+    moveX: 0,
+    moveY: 0,
+  };
+  // Idle-recenter scratch + timer (post-playtest Option A): the gate object
+  // is mutated every playing frame like idleFollowGate above (no per-frame
+  // object literals); idleTimerS accumulates seconds while the stick is
+  // released with no look input and not charging, reset to 0 otherwise and
+  // on every camera-state transition (welcome / roomFull / leave / reset /
+  // teleport / respawn / spectate / charge start — see each site).
+  const idleRecenterGate: IdleRecenterGate = {
+    playing: false,
+    charging: false,
+    alive: false,
+    lookDx: 0,
+    lookDy: 0,
+    moveX: 0,
+    moveY: 0,
+    idleTimerS: 0,
+  };
+  let idleTimerS = 0;
 
   // Join overlay + FIRE button are declared early so network callbacks can
   // show/hide them (spectators see the plate, fighters see controls).
@@ -207,6 +239,7 @@ async function boot(): Promise<void> {
       aimPitch = angles.pitch;
       isCharging = false;
       chargeLevel.active = false;
+      idleTimerS = 0;
       isReloading = false;
       reloadUntilMs = 0;
       sceneManager.setCharge01(0);
@@ -231,6 +264,7 @@ async function boot(): Promise<void> {
       isPlaying = false;
       isCharging = false;
       chargeLevel.active = false;
+      idleTimerS = 0;
       isReloading = false;
       sceneManager.setCharge01(0);
       sceneManager.setChargeZoom01(0);
@@ -250,6 +284,7 @@ async function boot(): Promise<void> {
       isPlaying = false;
       isCharging = false;
       chargeLevel.active = false;
+      idleTimerS = 0;
       isReloading = false;
       hasSuperBuff = false;
       sceneManager.setCharge01(0);
@@ -308,11 +343,13 @@ async function boot(): Promise<void> {
     if (self !== undefined && isPlaying && self.alive && !sceneManager.isSpectating()) {
       if (lastSelfAlive === false) {
         sceneManager.teleportSelf(self.x, self.z);
+        idleTimerS = 0;
       } else if (lastSelfAlive === null) {
         const local = sceneManager.getAvatarPosition();
         const gap = Math.hypot(self.x - local.x, self.z - local.z);
         if (gap > SELF_RECONCILE_SNAP_M) {
           sceneManager.teleportSelf(self.x, self.z);
+          idleTimerS = 0;
         }
       }
       lastSelfAlive = true;
@@ -429,6 +466,10 @@ async function boot(): Promise<void> {
     }
     isCharging = true;
     chargeStartMs = nowMs;
+    // A new aim takes over the camera: drop any pending idle recenter so the
+    // charge zoom path starts clean (the per-frame loop also holds the timer
+    // at 0 for the whole charge).
+    idleTimerS = 0;
     // One-shot pitch leveling armed: the camera eases toward the horizon
     // until the first aim-stick deflection takes over (per-frame below).
     chargeLevel = beginChargeLevel();
@@ -446,6 +487,7 @@ async function boot(): Promise<void> {
     }
     isCharging = false;
     chargeLevel.active = false;
+    idleTimerS = 0;
     sceneManager.setCharge01(0);
     // Stage 4d.2: cancel returns zoom + opacity (eased, never mid-charge).
     sceneManager.setChargeZoom01(0);
@@ -463,6 +505,7 @@ async function boot(): Promise<void> {
     const chargeMs = nowMs - chargeStartMs;
     isCharging = false;
     chargeLevel.active = false;
+    idleTimerS = 0;
     sceneManager.setCharge01(0);
     // Stage 4d.2: the shot (or tap) returns zoom + opacity — held until here,
     // never reset mid-charge or on aim-stick moves.
@@ -782,6 +825,7 @@ async function boot(): Promise<void> {
       input.reset();
       isCharging = false;
       chargeLevel.active = false;
+      idleTimerS = 0;
       isReloading = false;
       reloadUntilMs = 0;
       aimVector = { x: 0, y: 0 };
@@ -907,19 +951,121 @@ async function boot(): Promise<void> {
     // charging the camera copies aimYaw/aimPitch each frame (360-degree one
     // thumb turn). Charge only drives power (charge01), never direction.
     // Charge leveling: at aim start the pitch eases ONCE toward the horizon
-    // (interrupted by any aim deflection); while charging the vertical rate
-    // is damped (muted wander, full down-aim range kept).
+    // (interrupted by any aim deflection); while charging both stick rates
+    // run damped (calmer aiming, full down-aim range kept).
     if (playing) {
       const pitchScale = pitchRateScale(isCharging);
+      const yawScale = yawRateScale(isCharging);
       if (Math.hypot(aimVector.x, aimVector.y) >= FLOAT_DEADZONE) {
-        aimYaw -= aimVector.x * AIM_YAW_RATE * deltaSeconds;
+        aimYaw -= aimVector.x * AIM_YAW_RATE * yawScale * deltaSeconds;
         const nextPitch = aimPitch + aimVector.y * AIM_PITCH_RATE * pitchScale * deltaSeconds;
         aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextPitch));
       }
       if (Math.hypot(floatVector.x, floatVector.y) >= FLOAT_DEADZONE) {
-        aimYaw -= floatVector.x * AIM_YAW_RATE * deltaSeconds;
+        aimYaw -= floatVector.x * AIM_YAW_RATE * yawScale * deltaSeconds;
         const nextFloatPitch = aimPitch + floatVector.y * AIM_PITCH_RATE * pitchScale * deltaSeconds;
         aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextFloatPitch));
+      }
+      // Idle soft-follow (Stage 4d.2-fix2): not charging, no explicit look
+      // input, avatar moving with the stick predominantly forward → ease the
+      // camera yaw behind the avatar's facing yaw and level the pitch toward
+      // near-horizon. The yaw target
+      // is cameraYawBehindFacing(facing) = facing + PI (camera-behind
+      // convention: camera sits at avatar + (sin c, cos c)*d per
+      // updateCameraTransform while the avatar faces (sin r, cos r) per
+      // the movement yaw, so behind requires c = r + PI — raw facing as a
+      // target would sit exactly PI away and orbit ~1.3 rev/s). The
+      // forwardness gate (|phi| <= IDLE_FOLLOW_MAX_STICK_ANGLE inside
+      // shouldIdleFollow) is the orbit invariant: per frame facing is
+      // recomputed as r = c + PI - phi, so only near-forward inputs run the
+      // follow (|delta| <= phi, gentle straightening) while backpedal/strafe
+      // leave the camera untouched. Post-playtest Option A: the gate is
+      // 0.8 rad so W+A / W+D diagonals follow, and the yaw rate is softened
+      // by forwardnessRateScale(phi) = cos(phi) at the call site (edge
+      // drift <= RATE * 0.8 * cos(0.8) ~= 1.4 rad/s; pure forward
+      // unchanged). Pitch levels at the full rate. Gated
+      // on rawLook == 0 so an RMB drag always wins; dead/spectating never
+      // reach here (playing folds in !spectating, alive folds in the last
+      // self snapshot). Runs before the idle-track copy below so aim
+      // re-syncs to the followed camera in the same frame. Scalar math,
+      // no per-frame allocations beyond the existing getCameraAngles shape
+      // (gate runs through the reused idleFollowGate scratch above).
+      idleFollowGate.playing = playing;
+      idleFollowGate.charging = isCharging;
+      idleFollowGate.alive = lastSelfAlive !== false;
+      idleFollowGate.lookDx = rawLook.dx;
+      idleFollowGate.lookDy = rawLook.dy;
+      idleFollowGate.moveX = move.x;
+      idleFollowGate.moveY = move.y;
+      if (shouldIdleFollow(idleFollowGate)) {
+        const followed = sceneManager.getCameraAngles();
+        const phi = stickAngleFromForward(move.x, move.y);
+        const followRate = IDLE_FOLLOW_RATE * forwardnessRateScale(phi);
+        sceneManager.setCameraAngles(
+          stepIdleFollowYaw(
+            followed.yaw,
+            cameraYawBehindFacing(sceneManager.getAvatarFacing()),
+            deltaSeconds,
+            followRate,
+          ),
+          stepIdleFollowPitch(followed.pitch, deltaSeconds),
+        );
+      }
+      // Idle recenter (post-playtest Option A, creep-band fix): the stick truly
+      // released (|move| <= IDLE_RECENTER_MOVE_MAX = 0.01, the shared
+      // facing-freeze threshold), no look input, not charging — after
+      // IDLE_RECENTER_DELAY_S ease the camera toward behind the static last
+      // facing (true fixed point: facing does not move while released, so
+      // this converges instead of orbiting) and level the pitch, at
+      // IDLE_RECENTER_RATE_S via the recenter wrappers. The creep band
+      // (0.01, 0.1) is a dead zone by construction: follow needs mag >=
+      // IDLE_FOLLOW_MOVE_MIN (0.1), recenter needs lengthSq <= MAX*MAX, so a
+      // creep-held stick moves NEITHER path.
+      // through the clamped setCameraAngles setter. The timer accumulates
+      // here (scalar, no alloc): any stick lengthSq above MAX*MAX (creep
+      // input included), any look delta, charging, dead, or !playing resets
+      // it to 0 AND fails the gate below, so touching stick/look
+      // mid-recenter cancels immediately with no easing that frame, and a
+      // creep-held stick never accumulates toward the delay. Charge zoom
+      // path untouched (recenter only runs when !charging; startCharge
+      // already zeroed the timer).
+      // Static-facing premise, mirrored from SceneManager.update: facing is
+      // recomputed from camera-relative worldMove whenever its lengthSq tops
+      // IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX, so the timer must
+      // use the SAME product (not IDLE_FOLLOW_MOVE_MIN) or creep input would
+      // accumulate delay while the facing keeps moving underneath.
+      const idleMoveLenSq = move.x * move.x + move.y * move.y;
+      const idleReleaseLenSq = IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX;
+      if (
+        !playing ||
+        isCharging ||
+        lastSelfAlive === false ||
+        rawLook.dx !== 0 ||
+        rawLook.dy !== 0 ||
+        idleMoveLenSq > idleReleaseLenSq
+      ) {
+        idleTimerS = 0;
+      } else {
+        idleTimerS += deltaSeconds;
+      }
+      idleRecenterGate.playing = playing;
+      idleRecenterGate.charging = isCharging;
+      idleRecenterGate.alive = lastSelfAlive !== false;
+      idleRecenterGate.lookDx = rawLook.dx;
+      idleRecenterGate.lookDy = rawLook.dy;
+      idleRecenterGate.moveX = move.x;
+      idleRecenterGate.moveY = move.y;
+      idleRecenterGate.idleTimerS = idleTimerS;
+      if (shouldIdleRecenter(idleRecenterGate)) {
+        const settled = sceneManager.getCameraAngles();
+        sceneManager.setCameraAngles(
+          stepIdleRecenterYaw(
+            settled.yaw,
+            cameraYawBehindFacing(sceneManager.getAvatarFacing()),
+            deltaSeconds,
+          ),
+          stepIdleRecenterPitch(settled.pitch, deltaSeconds),
+        );
       }
       if (
         Math.abs(aimVector.x) < 0.05 &&

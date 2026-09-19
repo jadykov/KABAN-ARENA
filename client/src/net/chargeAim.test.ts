@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { AIM_PITCH_DAMP, CAMERA_PITCH_MAX, CAMERA_PITCH_MIN } from "../config";
-import { beginChargeLevel, pitchRateScale, stepChargeLevel } from "./chargeAim";
+import { AIM_PITCH_DAMP, AIM_YAW_DAMP, CAMERA_PITCH_MAX, CAMERA_PITCH_MIN } from "../config";
+import { beginChargeLevel, pitchRateScale, stepChargeLevel, yawRateScale } from "./chargeAim";
 
 const FRAME = 1 / 60;
 
@@ -65,5 +65,17 @@ describe("charge pitch damping (vertical rate scale)", () => {
     expect(AIM_PITCH_DAMP).toBeLessThan(0.8);
     expect(pitchRateScale(true)).toBe(AIM_PITCH_DAMP);
     expect(pitchRateScale(false)).toBe(1);
+  });
+});
+
+describe("charge yaw damping (horizontal rate scale, 4d.2-fix2)", () => {
+  it("runs calmer while charging, full rate otherwise", () => {
+    // Mirrors the pitch damp band (0.5-0.65 of normal): aiming feels calmer
+    // on both axes, base stick behavior without aiming stays as-is.
+    expect(AIM_YAW_DAMP).toBeGreaterThanOrEqual(0.5);
+    expect(AIM_YAW_DAMP).toBeLessThanOrEqual(0.65);
+    expect(yawRateScale(true)).toBe(AIM_YAW_DAMP);
+    expect(yawRateScale(true)).toBeLessThan(1);
+    expect(yawRateScale(false)).toBe(1);
   });
 });

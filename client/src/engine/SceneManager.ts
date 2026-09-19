@@ -20,6 +20,7 @@ import {
   DEATH_BURST_RED,
   DEATH_BURST_YELLOW,
   ICE_SPEED_MULT,
+  IDLE_RECENTER_MOVE_MAX,
   KNOCKBACK_IMPULSE,
   LOCAL_AVATAR_COLOR,
   MOVE_SPEED,
@@ -567,7 +568,11 @@ export class SceneManager {
         ARENA_HALF_SIZE,
       );
     }
-    if (worldMove.lengthSq() > 0.0001) {
+    // Avatar facing tracks movement only above the stick-release threshold
+    // (shared IDLE_RECENTER_MOVE_MAX from config: facing is static at/below
+    // MAX, which is exactly where the idle-recenter gate holds — the recenter
+    // target is a true fixed point only because of this freeze).
+    if (worldMove.lengthSq() > IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX) {
       const targetYaw = Math.atan2(worldMove.x, worldMove.z);
       this.avatar.rotation.y = targetYaw;
     }
@@ -706,7 +711,8 @@ export class SceneManager {
       this.particles.spawn(avatar.position.x, 1.2, avatar.position.z, 16, new THREE.Color(KIND_COLORS.shield));
     } else if (physics !== null) {
       // Impulse knockback dash in the current move (or facing) direction.
-      const direction = worldMove.lengthSq() > 0.0001
+      // Same shared release threshold as the facing freeze above.
+      const direction = worldMove.lengthSq() > IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX
         ? worldMove.clone().normalize()
         : new THREE.Vector3(Math.sin(avatar.rotation.y), 0, Math.cos(avatar.rotation.y));
       physics.applyPlayerImpulse(direction.x * KNOCKBACK_IMPULSE, 2.5, direction.z * KNOCKBACK_IMPULSE);

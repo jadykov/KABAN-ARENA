@@ -29,7 +29,15 @@ export const CAMERA_FOLLOW_HEIGHT = 2.1;
 export const CAMERA_LOOK_AT_HEIGHT = 1.2;
 export const CAMERA_SENSITIVITY = 0.0045;
 export const CAMERA_PITCH_MIN = -0.15;
-export const CAMERA_PITCH_MAX = 0.9;
+// Post-playtest fix (owner: aim-time view was "top-down onto the head"):
+// max 0.45 rad (~25.8 deg) above horizon — tighter than the 4d.2-fix2 0.6
+// cap. All clamp sites (SceneManager RMB look + setCameraAngles, main.ts
+// aim/float pitch, protocol fire payload) share this constant, so they
+// tighten automatically. Worst case at charge zoom (d = 3.2m):
+// elevation = atan((2.1 + sin(0.45)*3.2 - 1.2) / (cos(0.45)*3.2))
+//           = atan(2.2919 / 2.8814) ~= 38.5 deg onto the avatar
+// (was atan(2.7069 / 2.6411) ~= 45.7 deg at 0.6). CAMERA_PITCH_MIN kept.
+export const CAMERA_PITCH_MAX = 0.45;
 
 // Virtual joystick (Q9-A: left side, diameter 120px, transparent look-through).
 export const JOYSTICK_DIAMETER = 120;
@@ -299,7 +307,67 @@ export const FLOAT_DEADZONE = 0.05;
 // AIM_PITCH_DAMP while charging only (normal look untouched, range untouched).
 export const CHARGE_PITCH_EASE_RATE = 3.5;
 export const CHARGE_PITCH_EASE_DONE = 0.01;
-export const AIM_PITCH_DAMP = 0.6;
+// Post-playtest vertical aim sensitivity -30%: 0.6 -> 0.42, so the effective
+// vertical rate AIM_PITCH_RATE * AIM_PITCH_DAMP = 1.6 * 0.42 ~= 0.67 rad/s.
+export const AIM_PITCH_DAMP = 0.42;
+// Stage 4d.2-fix2: yaw damp while charging/aiming so aiming feels calmer on
+// both axes (yaw stays 0.6 of the normal rate; pitch is now 0.42 after the
+// post-playtest vertical-sensitivity cut, i.e. 1.6 * 0.42 ~= 0.67 rad/s).
+// Normal (non-charging) stick rates are untouched — see yawRateScale().
+export const AIM_YAW_DAMP = 0.6;
+// Idle soft-follow (Stage 4d.2-fix2, owner comfort): while playing, NOT
+// charging, with no explicit look input and the avatar moving, the camera
+// yaw eases behind the avatar's movement/facing yaw and the pitch levels
+// toward near-horizon — same exp-ease pattern as the follow camera, no
+// allocations (scalar math only). Any look delta that frame wins outright.
+export const IDLE_FOLLOW_RATE = 2.5;
+export const IDLE_FOLLOW_PITCH = 0.15;
+export const IDLE_FOLLOW_MOVE_MIN = 0.1;
+// Idle-follow stick-forwardness gate (review round-2 FAIL #1): the follow may
+// run only while the move stick points predominantly forward, i.e. the stick
+// angle from forward phi = atan2(moveX, moveY) satisfies |phi| <= this.
+// Rationale: per frame the SceneManager recomputes facing from the
+// just-followed camera yaw as r = c + PI - phi, so with target c + PI the
+// per-frame delta is permanently -phi for ANY held off-forward input
+// (backpedal phi=PI: +/-PI orbit; strafe: 3.85 rad/s). Gating on
+// forwardness leaves only near-forward inputs, where |delta| = |phi| <= the
+// gate, so the camera gently straightens behind a slightly-angled run and
+// backpedal/strafe produce ZERO camera motion. Post-playtest Option A:
+// 0.4 -> 0.8 rad (~45.8 deg) so W+A / W+D diagonals (45 deg) follow too;
+// strafe (90 deg) and backpedal stay outside. The sustained drift at the
+// gate edge is softened by forwardnessRateScale = cos(phi) (1.0 pure
+// forward, ~0.70 at the edge), so edge drift <= RATE * 0.8 * cos(0.8)
+// ~= 1.4 rad/s; pure forward unchanged. Wrap noise stays structurally
+// unreachable (|delta| <= 0.8 < PI). See net/idleFollow.ts.
+export const IDLE_FOLLOW_MAX_STICK_ANGLE = 0.8;
+// Idle recenter stick-release threshold (review FAIL fix: creep-band orbit).
+// The recenter may run ONLY when the avatar facing is static, i.e. when
+// SceneManager.update skips its facing recompute. That skip happens when
+// worldMove.lengthSq() <= 0.0001; for stick mags < 1 |worldMove| == |move|
+// (camera-relative basis is orthonormal, normalization only clamps mags > 1),
+// so the facing-freeze boundary in stick space is |move| <= 0.01 == this
+// constant (squared: 0.01 * 0.01 == the 0.0001 lengthSq threshold, up to 1ulp).
+// This ONE constant is the shared source of truth: SceneManager compares
+// lengthSq() > IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX and the
+// recenter gate + idle timer in net/idleFollow.ts / main.ts compare the
+// stick lengthSq against the same product, so the two can never drift apart.
+// Consequence: the stick band (IDLE_RECENTER_MOVE_MAX, IDLE_FOLLOW_MOVE_MIN)
+// = (0.01, 0.1) is a deliberate dead zone — follow needs mag >= 0.1,
+// recenter needs mag <= 0.01, so a creep-held stick moves NEITHER path.
+export const IDLE_RECENTER_MOVE_MAX = 0.01;
+// Idle recenter after the stick is released (Option A, post-playtest): with
+// the stick at rest (|move| <= IDLE_RECENTER_MOVE_MAX, the shared
+// facing-freeze threshold above — the only band where the avatar facing is
+// static), no look input, not
+// charging, playing, alive — main.ts accumulates idleTimerS per frame (reset
+// to 0 on any stick/look input, on charge start, and on camera-state
+// transitions: welcome / roomFull / leave / reset / teleport / respawn /
+// spectate). Past IDLE_RECENTER_DELAY_S the camera eases toward behind the
+// static last facing at IDLE_RECENTER_RATE_S — a true fixed point (facing
+// does not move while released), so it converges cleanly instead of
+// orbiting. Touching stick/look cancels immediately (no easing that frame).
+export const IDLE_RECENTER_DELAY_S = 0.8;
+export const IDLE_RECENTER_RATE_S = 3.0;
 // Light client-side aim assist (subtle, deterministic, no randomness):
 // living enemy within ASSIST range and inside the aim cone gets a gentle
 // pull toward its center (blend fraction, never a snap). Server authority

@@ -9,6 +9,7 @@ import {
   BALL_MIN_SPEED,
   BALL_MUZZLE_OFFSET,
   BALL_TORSO_OFFSET,
+  CAMERA_PITCH_MAX,
   CHARGE_MAX_S,
   DEFAULT_NICK,
   FULL_DAMAGE,
@@ -215,7 +216,7 @@ export function buildFirePayload(
   const payload: FirePayload = {
     power01: power,
     yaw: Number.isFinite(yaw) ? yaw : 0,
-    pitch: Number.isFinite(pitch) ? Math.max(-0.15, Math.min(0.9, pitch)) : 0.25,
+    pitch: Number.isFinite(pitch) ? Math.max(-0.15, Math.min(CAMERA_PITCH_MAX, pitch)) : 0.25,
     super: superBuff === true,
   };
   if (typeof throwerY === "number" && Number.isFinite(throwerY)) {

@@ -111,11 +111,12 @@ describe("InputController", () => {
     }
   });
 
-  it("delivers non-inverted mouse look: mouse up (negative movementY) is +dy", () => {
-    // Owner playtest: raising the mouse must raise the camera/aim.
-    // Raw movementY is screen-space (up = negative); the controller negates
-    // it so LookDelta.dy stays "up positive" like every stick path, and
-    // SceneManager pitch += dy then looks up.
+  it("passes raw mouse movementY through: mouse away (negative movementY) is -dy", () => {
+    // Stage 4d.2-fix2 (owner playtest): pushing the mouse away must LOWER /
+    // level the camera behind the character instead of raising it into a
+    // top-down head view. Raw movementY is screen-space (away = negative);
+    // the controller passes it through unnegated and SceneManager applies
+    // pitch += dy, so away pitches the camera down/level.
     const keys = new EventTarget();
     const pointers = new EventTarget();
     const input = new InputController();
@@ -134,10 +135,10 @@ describe("InputController", () => {
         pointerType?: string;
       };
       move.movementX = 8;
-      move.movementY = -10; // mouse pushed up
+      move.movementY = -10; // mouse pushed away
       move.pointerType = "mouse";
       keys.dispatchEvent(move);
-      expect(input.consumeLookDelta()).toEqual({ dx: 8, dy: 10 });
+      expect(input.consumeLookDelta()).toEqual({ dx: 8, dy: -10 });
       expect(input.consumeLookDelta()).toEqual({ dx: 0, dy: 0 });
     } finally {
       input.dispose();

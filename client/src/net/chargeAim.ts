@@ -1,4 +1,4 @@
-import { AIM_PITCH_DAMP, CHARGE_PITCH_EASE_DONE, CHARGE_PITCH_EASE_RATE } from "../config";
+import { AIM_PITCH_DAMP, AIM_YAW_DAMP, CHARGE_PITCH_EASE_DONE, CHARGE_PITCH_EASE_RATE } from "../config";
 
 // Charge pitch leveling (owner: camera eases ONCE toward the horizon at aim
 // start, then free aim). Pure state + math so it stays unit-testable; the
@@ -14,11 +14,18 @@ export function beginChargeLevel(): ChargeLevel {
   return { active: true };
 }
 
-// Vertical stick-rate scale: muted wander while charging, full rate
-// otherwise. Yaw is never damped; the pitch RANGE is never touched (aiming
-// down from elevation stays fully possible — only the rate scales).
+// Stick-rate scales while charging/aiming (Stage 4d.2-fix2): both axes run
+// calmer at the damped rate, full rate otherwise. The pitch RANGE is never
+// touched (aiming down from elevation stays fully possible — only rates
+// scale). Yaw damp has its own constant (AIM_YAW_DAMP = 0.6, milder than the
+// post-playtest pitch damp AIM_PITCH_DAMP = 0.42) — same pattern, not the
+// same value.
 export function pitchRateScale(isCharging: boolean): number {
   return isCharging ? AIM_PITCH_DAMP : 1;
+}
+
+export function yawRateScale(isCharging: boolean): number {
+  return isCharging ? AIM_YAW_DAMP : 1;
 }
 
 // One ease step toward the horizon (pitch 0). Returns the updated pitch.
