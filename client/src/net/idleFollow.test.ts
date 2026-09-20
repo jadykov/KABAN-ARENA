@@ -559,11 +559,13 @@ describe("forwardness rate scale (cos softening toward sideways)", () => {
 
 describe("post-shot follow clamp tolerance (F3 fix, option a)", () => {
   it("widens the floor only while below the default band", () => {
-    expect(-CAMERA_PITCH_MAX).toBeLessThan(CAMERA_PITCH_MIN);
-    // Stale mirrored post-shot pitch: the follow call site eases
-    // from here with the widened floor instead of snapping to MIN.
-    expect(tolerantCameraPitchMin(-CAMERA_PITCH_MAX)).toBe(-CAMERA_PITCH_MAX);
-    expect(tolerantCameraPitchMin(-0.2)).toBe(-CAMERA_PITCH_MAX);
+    // Since the 4d.3 downward extension (MIN -0.41) the mirror floor -0.36
+    // sits IN-band: the tolerance triggers only for deeper starts.
+    expect(-CAMERA_PITCH_MAX).toBeGreaterThan(CAMERA_PITCH_MIN);
+    expect(tolerantCameraPitchMin(-CAMERA_PITCH_MAX)).toBe(CAMERA_PITCH_MIN);
+    // Synthetic deep start: the follow call site eases from here with the
+    // widened floor instead of snapping to MIN.
+    expect(tolerantCameraPitchMin(-0.5)).toBe(-CAMERA_PITCH_MAX);
     expect(tolerantCameraPitchMin(-1.0)).toBe(-CAMERA_PITCH_MAX);
   });
 

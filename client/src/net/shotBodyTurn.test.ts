@@ -217,7 +217,7 @@ describe("no-swing owner scenario (run -> charge -> 180 aim flip -> fire -> rele
 describe("vertical aim pitch limit (post-playtest round 2)", () => {
   it("CAMERA_PITCH_MAX is 0.36 (another ~20% down from 0.45)", () => {
     expect(CAMERA_PITCH_MAX).toBeCloseTo(0.36, 12);
-    expect(CAMERA_PITCH_MIN).toBe(-0.15);
+    expect(CAMERA_PITCH_MIN).toBeCloseTo(-0.41, 12);
   });
 
   it("fire payload clamps pitch to the shared constant", () => {

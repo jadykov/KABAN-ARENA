@@ -10,6 +10,7 @@ import {
   SLIPPERY_RADIUS,
   SPAWN_COUNT,
   SPAWN_INSET,
+  TRAMPOLINE_PAD_DIM,
   TRAMPOLINE_RADIUS,
   WALL_FADE_OPACITY,
   WALL_GLASS_OPACITY,
@@ -577,7 +578,8 @@ export class ArenaBuilder {
       new THREE.MeshStandardMaterial({
         color: BASE_PAD,
         emissive: HL_CHARTREUSE,
-        emissiveIntensity: 0.9,
+        // 4d.3 feedback dim (-20% via TRAMPOLINE_PAD_DIM, palette untouched).
+        emissiveIntensity: 0.9 * TRAMPOLINE_PAD_DIM,
         roughness: 0.5,
       }),
     );

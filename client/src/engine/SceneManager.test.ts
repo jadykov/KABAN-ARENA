@@ -19,6 +19,8 @@ import {
   DEATH_BURST_YELLOW,
   FIREFLY_COUNT,
   IDLE_FOLLOW_PITCH,
+  MIRROR_PITCH_MAX,
+  MIRROR_PITCH_MIN,
   NEBULA_COUNT,
   RECOIL_FULL_M,
   WALL_FADE_OPACITY,
@@ -26,6 +28,11 @@ import {
   WALL_HEIGHT,
 } from "../config";
 import { mirrorChargeCameraPitch } from "../net/chargeAim";
+import {
+  FIREFLY_BLINK,
+  FIREFLY_OPACITY,
+  FIREFLY_WANDER,
+} from "../fx/Fireflies";
 import { SceneManager } from "./SceneManager";
 
 const FRAME = 1 / 60;
@@ -62,12 +69,16 @@ describe("SceneManager camera clamp + wall fade", () => {
     expect(Math.abs(camera.z)).toBeLessThanOrEqual(limit + 1e-6);
   });
 
-  it("rests glass at 0.4, fades toward 0.25 when occluded", async () => {
-    // Stage 4d.3 glass semantics: rest is the glass opacity itself (stars
-    // show through), occlusion fades toward MORE transparent — the old
-    // 0.25..1.0 band is now 0.25..0.4, anti-cheat readability kept.
-    expect(WALL_GLASS_OPACITY).toBe(0.4);
-    expect(WALL_FADE_OPACITY).toBe(0.25);
+  it("rests glass at 0.2, fades toward 0.1 when occluded", async () => {
+    // 4d.3 feedback round: the first 0.4 pass still read solid (0.4 over dark
+    // violet blocks ~60% of starlight), so the pair was re-derived as
+    // 0.1..0.2 — clearly glass at rest, more transparent on occlusion. The
+    // fade floor MUST stay <= the glass rest (a fade more opaque than rest
+    // would invert the semantics); boundary readability near camera now
+    // rides on the opaque neon top strips + floor edge, which never fade.
+    expect(WALL_GLASS_OPACITY).toBe(0.2);
+    expect(WALL_FADE_OPACITY).toBe(0.1);
+    expect(WALL_FADE_OPACITY).toBeLessThanOrEqual(WALL_GLASS_OPACITY);
     const manager = await createManager();
     // Open arena center: camera well inside, walls at glass rest opacity.
     manager.teleportSelf(0, 0);
@@ -98,7 +109,7 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
   }
 
   it("renders the 4 walls as transparent glass at the glass rest opacity", async () => {
-    expect(WALL_GLASS_OPACITY).toBe(0.4);
+    expect(WALL_GLASS_OPACITY).toBe(0.2);
     const { scene } = await createManagerWithScene();
     // Walls are the only TRANSPARENT 4-count InstancedMesh on a unit box
     // (platform tops share the 4-count unit-box shape but stay opaque;
@@ -169,8 +180,17 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     expect(lights).toHaveLength(3);
   });
 
-  it("drifts 8 fireflies as one InstancedMesh above head height (1 draw call)", async () => {
-    expect(FIREFLY_COUNT).toBe(8);
+  it("drifts 6 dimmed fireflies as one InstancedMesh (blink subset + wander/hover)", async () => {
+    // 4d.3 feedback round: 8 -> 6, base glow halved, blink + behaviors.
+    expect(FIREFLY_COUNT).toBe(6);
+    expect(FIREFLY_OPACITY).toBe(0.45);
+    // Blink subset is strictly smaller than the swarm (never all at once);
+    // both behavior classes ship (wander + hover).
+    const blinkers = FIREFLY_BLINK.filter((capable) => capable === true);
+    expect(blinkers.length).toBeGreaterThan(0);
+    expect(blinkers.length).toBeLessThan(FIREFLY_COUNT);
+    expect(FIREFLY_WANDER).toContain(true);
+    expect(FIREFLY_WANDER).toContain(false);
     const { manager, scene } = await createManagerWithScene();
     const swarms: THREE.InstancedMesh[] = [];
     scene.traverse((child: THREE.Object3D) => {
@@ -188,6 +208,8 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     const material = swarm.material as THREE.MeshBasicMaterial;
     expect(material.blending).toBe(THREE.AdditiveBlending);
     expect(material.depthWrite).toBe(false);
+    // Feedback dim (-50%): the shared material carries the halved glow.
+    expect(material.opacity).toBeCloseTo(FIREFLY_OPACITY, 10);
     // Run frames so the billboard/bob update writes instance matrices, then
     // verify every firefly hovers above head height (~2.1 capsule top) and
     // inside the arena.
@@ -376,9 +398,10 @@ describe("SceneManager post-shot body turn (owner fix round 2)", () => {
   });
 });
 
-describe("SceneManager pitch clamp (post-playtest round 2: max 0.36)", () => {
-  it("clamps setCameraAngles pitch to the shared CAMERA_PITCH_MAX", async () => {
+describe("SceneManager pitch clamp (4d.3 feedback: down to -0.41, up capped 0.36)", () => {
+  it("clamps setCameraAngles pitch to the shared [MIN, MAX] band", async () => {
     expect(CAMERA_PITCH_MAX).toBeCloseTo(0.36, 12);
+    expect(CAMERA_PITCH_MIN).toBeCloseTo(-0.41, 12);
     const manager = await createManager();
     manager.setCameraAngles(0, 1.0);
     expect(manager.getCameraAngles().pitch).toBeCloseTo(CAMERA_PITCH_MAX, 10);
@@ -386,23 +409,31 @@ describe("SceneManager pitch clamp (post-playtest round 2: max 0.36)", () => {
     expect(manager.getCameraAngles().pitch).toBeCloseTo(CAMERA_PITCH_MIN, 10);
   });
 
-  it("keeps the plain [-0.15, 0.36] band by default (non-charge look paths unchanged)", async () => {
-    expect(CAMERA_PITCH_MIN).toBe(-0.15);
+  it("keeps the plain [-0.41, 0.36] band by default (non-charge look paths unchanged)", async () => {
+    expect(CAMERA_PITCH_MIN).toBeCloseTo(-0.41, 12);
     const manager = await createManager();
-    // Just below MIN still pins to MIN without an override — the mirror band
-    // must never leak into normal look.
+    // -0.2 now aims down freely inside the widened band (was MIN-adjacent).
     manager.setCameraAngles(0, -0.2);
+    expect(manager.getCameraAngles().pitch).toBeCloseTo(-0.2, 10);
+    // Just below the new MIN still pins to MIN without an override — the
+    // mirror band must never leak into normal look.
+    manager.setCameraAngles(0, -0.5);
     expect(manager.getCameraAngles().pitch).toBeCloseTo(CAMERA_PITCH_MIN, 10);
   });
 
-  it("accepts the symmetric mirror band only via the min/max override", async () => {
+  it("accepts the asymmetric mirror band only via the min/max override", async () => {
     const manager = await createManager();
-    // Widest mirror (-0.36) survives with the explicit override ...
-    manager.setCameraAngles(0, -CAMERA_PITCH_MAX, -CAMERA_PITCH_MAX, CAMERA_PITCH_MAX);
-    expect(manager.getCameraAngles().pitch).toBeCloseTo(-CAMERA_PITCH_MAX, 10);
-    // ... but the same value through the default path pins to MIN.
-    manager.setCameraAngles(0, -CAMERA_PITCH_MAX);
-    expect(manager.getCameraAngles().pitch).toBeCloseTo(CAMERA_PITCH_MIN, 10);
+    // Mirror edges (-0.36 / +0.41) survive with the explicit override ...
+    manager.setCameraAngles(0, MIRROR_PITCH_MIN, MIRROR_PITCH_MIN, MIRROR_PITCH_MAX);
+    expect(manager.getCameraAngles().pitch).toBeCloseTo(MIRROR_PITCH_MIN, 10);
+    manager.setCameraAngles(0, MIRROR_PITCH_MAX, MIRROR_PITCH_MIN, MIRROR_PITCH_MAX);
+    expect(manager.getCameraAngles().pitch).toBeCloseTo(MIRROR_PITCH_MAX, 10);
+    // ... but through the default path the high edge pins to MAX and the
+    // low edge pins to MIN.
+    manager.setCameraAngles(0, MIRROR_PITCH_MAX);
+    expect(manager.getCameraAngles().pitch).toBeCloseTo(CAMERA_PITCH_MAX, 10);
+    manager.setCameraAngles(0, MIRROR_PITCH_MIN);
+    expect(manager.getCameraAngles().pitch).toBeCloseTo(MIRROR_PITCH_MIN, 10);
   });
 });
 
@@ -410,7 +441,7 @@ describe("SceneManager resting pitch (fix round 3: 0.15 resting, 0.05 follow pit
   it("pins the resting constants above MIN", () => {
     expect(CAMERA_REST_PITCH).toBeCloseTo(0.15, 12);
     expect(IDLE_FOLLOW_PITCH).toBeCloseTo(0.05, 12);
-    expect(CAMERA_PITCH_MIN).toBe(-0.15);
+    expect(CAMERA_PITCH_MIN).toBeCloseTo(-0.41, 12);
     expect(IDLE_FOLLOW_PITCH).toBeGreaterThan(CAMERA_PITCH_MIN);
     expect(CAMERA_REST_PITCH).toBeGreaterThan(CAMERA_PITCH_MIN);
   });
@@ -449,12 +480,12 @@ describe("SceneManager aim-mirror camera (fix round 3, charge path)", () => {
   it("routes aim-up through the mirror: camera pitch goes NEGATIVE (drops)", async () => {
     const manager = await createManager();
     await convergedAtChargeZoom(manager);
-    // The exact main.ts charge call shape: mirrored pitch + symmetric band.
+    // The exact main.ts charge call shape: mirrored pitch + mirror band.
     manager.setCameraAngles(
       0,
       mirrorChargeCameraPitch(0.3),
-      -CAMERA_PITCH_MAX,
-      CAMERA_PITCH_MAX,
+      MIRROR_PITCH_MIN,
+      MIRROR_PITCH_MAX,
     );
     expect(manager.getCameraAngles().pitch).toBeCloseTo(-0.3, 10);
     expect(manager.getCameraAngles().pitch).toBeLessThan(0);
@@ -467,8 +498,8 @@ describe("SceneManager aim-mirror camera (fix round 3, charge path)", () => {
       manager.setCameraAngles(
         0,
         mirrorChargeCameraPitch(0.3),
-        -CAMERA_PITCH_MAX,
-        CAMERA_PITCH_MAX,
+        MIRROR_PITCH_MIN,
+        MIRROR_PITCH_MAX,
       );
       manager.update(FRAME, NO_MOVE, NO_LOOK);
     }
@@ -495,13 +526,13 @@ describe("SceneManager aim-mirror camera (fix round 3, charge path)", () => {
   it("stays above ground at the widest mirror (charge zoom 3.2m)", async () => {
     const manager = await createManager();
     await convergedAtChargeZoom(manager);
-    // Widest mirror: full-up aim (MAX) -> camera pitch -MAX.
+    // Widest LOW mirror: full-up aim (MAX) -> camera pitch -MAX.
     for (let i = 0; i < 120; i += 1) {
       manager.setCameraAngles(
         0,
         mirrorChargeCameraPitch(CAMERA_PITCH_MAX),
-        -CAMERA_PITCH_MAX,
-        CAMERA_PITCH_MAX,
+        MIRROR_PITCH_MIN,
+        MIRROR_PITCH_MAX,
       );
       manager.update(FRAME, NO_MOVE, NO_LOOK);
     }
@@ -540,7 +571,7 @@ describe("SceneManager airborne flight gate (glide, no bounce mid-air)", () => {
 
   it("a trampoline launch trips the gate naturally", async () => {
     const manager = await createManager();
-    // Pad at (0, 4.2): teleporting over it auto-launches (vy = 10).
+    // Pad at (0, 4.2): teleporting over it auto-launches (vy = 12).
     manager.teleportSelf(0, 4.2);
     expect(manager.isAirborne()).toBe(false);
     // The gate reads post-step velocity but the launch fires after the
@@ -557,7 +588,8 @@ describe("SceneManager aim clamp (F2 fix: stored aim always in-band)", () => {
     const manager = await createManager();
     // A stale mirrored pitch must never lodge in the stored aim (it feeds
     // recoil/spark/muzzle math); the old unclamped setter kept it verbatim.
-    manager.setAimAngles(0.5, -CAMERA_PITCH_MAX);
+    // -0.5 is out of the widened band, so it pins to the new MIN (-0.41).
+    manager.setAimAngles(0.5, -0.5);
     expect(manager.debugGetAimAngles().pitch).toBeCloseTo(CAMERA_PITCH_MIN, 10);
     manager.setAimAngles(0.5, 0.5);
     expect(manager.debugGetAimAngles().pitch).toBeCloseTo(CAMERA_PITCH_MAX, 10);
@@ -572,15 +604,16 @@ describe("SceneManager aim clamp (F2 fix: stored aim always in-band)", () => {
 });
 
 describe("SceneManager out-of-band RMB tolerance (F3 fix)", () => {
-  it("an upward drag from the stale mirrored pitch glides back, never snaps", async () => {
+  it("an upward drag from out-of-band glides back, never snaps", async () => {
     const manager = await createManager();
     manager.teleportSelf(0, 0);
-    // Widest stale mirror, exactly as the charge path leaves it post-shot.
-    manager.setCameraAngles(0, -CAMERA_PITCH_MAX, -CAMERA_PITCH_MAX, CAMERA_PITCH_MAX);
-    expect(manager.getCameraAngles().pitch).toBeCloseTo(-CAMERA_PITCH_MAX, 10);
+    // Synthetic out-of-band start below the widened MIN (shipped mirror
+    // starts bottom out at -0.36, now in-band — the tolerance backstops
+    // deeper starts, so the test drives one explicitly via the override).
+    manager.setCameraAngles(0, -0.5, -0.5, CAMERA_PITCH_MAX);
+    expect(manager.getCameraAngles().pitch).toBeCloseTo(-0.5, 10);
     // Honest guarantee: the clamp provides CONTINUITY (no clamp-induced
-    // jump), so each frame moves by at most the input step |dy| * SENS —
-    // never the 0.21 rad snap the plain clamp produced on frame one.
+    // jump), so each frame moves by at most the input step |dy| * SENS.
     const step = 10 * CAMERA_SENSITIVITY;
     expect(step).toBeLessThan(0.05);
     let previous = manager.getCameraAngles().pitch;
@@ -599,11 +632,12 @@ describe("SceneManager out-of-band RMB tolerance (F3 fix)", () => {
   it("a downward drag from out-of-band holds instead of escaping further", async () => {
     const manager = await createManager();
     manager.teleportSelf(0, 0);
-    manager.setCameraAngles(0, -CAMERA_PITCH_MAX, -CAMERA_PITCH_MAX, CAMERA_PITCH_MAX);
+    manager.setCameraAngles(0, -0.5, -0.5, CAMERA_PITCH_MAX);
     manager.update(FRAME, NO_MOVE, { dx: 0, dy: -10 });
-    // The old plain clamp snapped this to CAMERA_PITCH_MIN in one frame;
-    // the tolerant bound holds the pitch (lower bound = current).
-    expect(manager.getCameraAngles().pitch).toBeCloseTo(-CAMERA_PITCH_MAX, 10);
+    // The old plain clamp snapped an out-of-band start to CAMERA_PITCH_MIN
+    // in one frame; the tolerant bound holds the pitch (lower bound =
+    // current).
+    expect(manager.getCameraAngles().pitch).toBeCloseTo(-0.5, 10);
   });
 
   it("in-band RMB drags behave exactly as before (sign/rate/band untouched)", async () => {

@@ -5,6 +5,8 @@ import {
   CAMERA_PITCH_MIN,
   FLOAT_DEADZONE,
   IDLE_FOLLOW_PITCH,
+  MIRROR_PITCH_MAX,
+  MIRROR_PITCH_MIN,
 } from "./config";
 import { SceneManager } from "./engine/SceneManager";
 import {
@@ -111,8 +113,8 @@ function runChargeFrame(manager: SceneManager, sim: ChargeSim): void {
     manager.setCameraAngles(
       sim.aimYaw,
       mirrorChargeCameraPitch(sim.aimPitch),
-      -CAMERA_PITCH_MAX,
-      CAMERA_PITCH_MAX,
+      MIRROR_PITCH_MIN,
+      MIRROR_PITCH_MAX,
     );
     sim.chargeMirrored = true;
   }
@@ -226,12 +228,12 @@ describe("post-shot tick sim (F3: no snap; follow-while-moving glides back)", ()
     const manager = await createManager();
     manager.teleportSelf(0, 0);
     // End of a full-up charge: the camera holds mirror(MAX) exactly as the
-    // charge write leaves it post-shot (main.ts mirror site, symmetric band).
+    // charge write leaves it post-shot (main.ts mirror site, mirror band).
     manager.setCameraAngles(
       0.5,
       mirrorChargeCameraPitch(CAMERA_PITCH_MAX),
-      -CAMERA_PITCH_MAX,
-      CAMERA_PITCH_MAX,
+      MIRROR_PITCH_MIN,
+      MIRROR_PITCH_MAX,
     );
     expect(manager.getCameraAngles().pitch).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
     // Stick released, no look: the follow gate stays shut (mag 0 < MIN) and
@@ -259,8 +261,8 @@ describe("post-shot tick sim (F3: no snap; follow-while-moving glides back)", ()
     manager.setCameraAngles(
       0.5,
       mirrorChargeCameraPitch(CAMERA_PITCH_MAX),
-      -CAMERA_PITCH_MAX,
-      CAMERA_PITCH_MAX,
+      MIRROR_PITCH_MIN,
+      MIRROR_PITCH_MAX,
     );
     expect(manager.getCameraAngles().pitch).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
     // Running forward: the follow gate runs and eases the stale pitch back
@@ -304,36 +306,49 @@ describe("post-shot tick sim (F3: no snap; follow-while-moving glides back)", ()
     expect(maxStep).toBeLessThanOrEqual(0.05);
   });
 
-  it("pins the F3 contrast: the plain clamp would snap frame one by 0.21 rad", () => {
-    // One eased step from -0.36 moves UP continuously...
-    const easedOnce = stepIdleFollowPitch(-CAMERA_PITCH_MAX, FRAME);
-    expect(easedOnce).toBeGreaterThan(-CAMERA_PITCH_MAX);
-    // ...but the DEFAULT-band clamp (pre-fix wiring) pins it to MIN (-0.15):
-    // a single-frame jump of ~0.21 rad (~12 deg). The sim above never does.
+  it("pins the F3 contrast: the plain clamp snaps a deep start, tolerance glides", () => {
+    // Since the 4d.3 downward extension (MIN -0.41) the shipped mirror floor
+    // -0.36 sits IN-band, so the old 0.21 rad snap class is structurally gone
+    // for mirror starts: even the plain clamp glides from -0.36. The F3
+    // tolerance now backstops deeper (synthetic) starts — pin the contrast
+    // there: one eased step from -0.5 moves UP continuously...
+    const easedOnce = stepIdleFollowPitch(-0.5, FRAME);
+    expect(easedOnce).toBeGreaterThan(-0.5);
+    // ...but the DEFAULT-band clamp (pre-fix wiring) pins it to MIN (-0.41):
+    // a single-frame jump of ~0.09 rad. The tolerant override (-0.36 floor)
+    // never does that — the sim above glides instead.
     expect(Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, easedOnce))).toBeCloseTo(
       CAMERA_PITCH_MIN,
       12,
     );
-    expect(CAMERA_PITCH_MIN - -CAMERA_PITCH_MAX).toBeGreaterThan(0.2);
+    expect(tolerantCameraPitchMin(-0.5)).toBe(-CAMERA_PITCH_MAX);
+    expect(tolerantCameraPitchMin(-CAMERA_PITCH_MAX)).toBe(CAMERA_PITCH_MIN);
   });
 });
 
 describe("welcome tick sim (F3 note: out-of-band normalization + respawn persistence)", () => {
-  it("normalizes a stale mirrored pitch across the camera cut, then copies", async () => {
+  it("passes an in-band stale pitch through, collapses a deep start to MIN", async () => {
     const manager = await createManager();
     manager.teleportSelf(0, 0);
     manager.setCameraAngles(0.7, -CAMERA_PITCH_MAX, -CAMERA_PITCH_MAX, CAMERA_PITCH_MAX);
     // Exact main.ts onWelcome site: normalize into the default band first
-    // (the hover->follow cut hides the step), then copy to aim.
+    // (the hover->follow cut hides the step), then copy to aim. Since the
+    // 4d.3 downward extension the stale mirror -0.36 sits IN-band, so it
+    // passes through unchanged (no normalization step at all).
     const angles = manager.getCameraAngles();
     manager.setCameraAngles(angles.yaw, angles.pitch);
     const normalized = manager.getCameraAngles();
     const aimYaw = normalized.yaw;
     const aimPitch = normalized.pitch;
-    expect(normalized.pitch).toBeCloseTo(CAMERA_PITCH_MIN, 12);
+    expect(normalized.pitch).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
     expect(aimPitch).toBeGreaterThanOrEqual(CAMERA_PITCH_MIN);
     expect(aimPitch).toBeLessThanOrEqual(CAMERA_PITCH_MAX);
     expect(aimYaw).toBeCloseTo(0.7, 12);
+    // A genuinely out-of-band start still collapses to the band edge.
+    manager.setCameraAngles(0.7, -0.5, -0.5, CAMERA_PITCH_MAX);
+    const deep = manager.getCameraAngles();
+    manager.setCameraAngles(deep.yaw, deep.pitch);
+    expect(manager.getCameraAngles().pitch).toBeCloseTo(CAMERA_PITCH_MIN, 12);
   });
 
   it("teleportSelf never touches the camera: mirrored pitch persists through respawn", async () => {
@@ -360,8 +375,8 @@ describe("post-shot note (stale aim holds until the player moves)", () => {
     manager.setCameraAngles(
       0,
       mirrorChargeCameraPitch(CAMERA_PITCH_MAX),
-      -CAMERA_PITCH_MAX,
-      CAMERA_PITCH_MAX,
+      MIRROR_PITCH_MIN,
+      MIRROR_PITCH_MAX,
     );
     let aimPitch = CAMERA_PITCH_MAX; // pre-shot true aim, untouched by the shot
     // Phase 1 (released stick): the follow gate stays shut and the track
@@ -383,9 +398,12 @@ describe("post-shot note (stale aim holds until the player moves)", () => {
     }
     expect(manager.getCameraAngles().pitch).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
     expect(aimPitch).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
-    // Protocol backstop even here: the stale value still sends in-band with
-    // its sign kept (never a mirrored-then-fired shot).
-    expect(buildFirePayload(1, 0, aimPitch, false).pitch).toBeCloseTo(CAMERA_PITCH_MIN, 12);
+    // Protocol backstop: the stale -0.36 sits IN the widened band since 4d.3,
+    // so it sends as-is with its sign kept (never a mirrored-then-fired
+    // shot); only truly out-of-band values collapse to the band edge.
+    expect(buildFirePayload(1, 0, aimPitch, false).pitch).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
+    expect(buildFirePayload(1, 0, -1.0, false).pitch).toBeCloseTo(CAMERA_PITCH_MIN, 12);
+    expect(buildFirePayload(1, 0, 1.4, false).pitch).toBeCloseTo(CAMERA_PITCH_MAX, 12);
     // Phase 2 (running forward): the follow eases, the aim keeps tracking.
     const runGate: IdleFollowGate = { ...idleGate, moveX: 0, moveY: 1 };
     expect(shouldIdleFollow(runGate)).toBe(true);

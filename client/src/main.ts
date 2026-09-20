@@ -16,6 +16,8 @@ import {
   INPUT_SEND_INTERVAL_S,
   LOCAL_AVATAR_COLOR,
   MAX_HEARTS,
+  MIRROR_PITCH_MAX,
+  MIRROR_PITCH_MIN,
   MOVE_STICK_DIAMETER,
   RELOAD_MS,
   ROUND_SECONDS,
@@ -1212,15 +1214,15 @@ async function boot(): Promise<void> {
           Math.hypot(camVector.x, camVector.y) >= FLOAT_DEADZONE;
         aimPitch = stepChargeLevel(chargeLevel, aimPitch, deflected, deltaSeconds);
         // Aim-mirror camera while charging (fix round 3): yaw follows aim
-        // directly, pitch takes the negated aim pitch in the symmetric
-        // [-MAX, +MAX] band (the plain MIN -0.15 would clip the mirror).
-        // The aim pitch itself stays in [MIN, MAX] above; the fire payload
-        // keeps that band too — only the camera mirrors.
+        // directly, pitch takes the negated aim pitch in the asymmetric
+        // [MIRROR_MIN, MIRROR_MAX] band (the plain MIN -0.41 would clip the
+        // mirror). The aim pitch itself stays in [MIN, MAX] above; the fire
+        // payload keeps that band too — only the camera mirrors.
         sceneManager.setCameraAngles(
           aimYaw,
           mirrorChargeCameraPitch(aimPitch),
-          -CAMERA_PITCH_MAX,
-          CAMERA_PITCH_MAX,
+          MIRROR_PITCH_MIN,
+          MIRROR_PITCH_MAX,
         );
         // This charge mirrored the camera at least once: stopCharge must
         // un-mirror the release copy back to true aim (F1).

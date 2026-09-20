@@ -28,7 +28,12 @@ export const CAMERA_CHARGE_DISTANCE = 3.2;
 export const CAMERA_FOLLOW_HEIGHT = 2.1;
 export const CAMERA_LOOK_AT_HEIGHT = 1.2;
 export const CAMERA_SENSITIVITY = 0.0045;
-export const CAMERA_PITCH_MIN = -0.15;
+// Stage 4d.3 feedback (owner: aiming DOWN from elevation needs ~15 deg more):
+// min -0.41 rad (~23.5 deg below horizon) — the old -0.15 extended by +0.26
+// rad (15 deg). All clamp sites (SceneManager RMB look + setCameraAngles,
+// main.ts aim/float pitch, protocol fire payload) share this constant, so
+// they widen automatically. Look-UP stays capped (see CAMERA_PITCH_MAX
+// below); only the downward range grows, for shooting off platforms.
 // Post-playtest fix round 2 (owner: aim-time view still too top-down):
 // max 0.36 rad (~20.6 deg) above horizon — another ~20% down from the 0.45
 // cap. All clamp sites (SceneManager RMB look + setCameraAngles, main.ts
@@ -36,8 +41,18 @@ export const CAMERA_PITCH_MIN = -0.15;
 // tighten automatically. Worst case at charge zoom (d = 3.2m):
 // elevation = atan((2.1 + sin(0.36)*3.2 - 1.2) / (cos(0.36)*3.2))
 //           = atan(2.0273 / 2.9949) ~= 34.1 deg onto the avatar
-// (was atan(2.2919 / 2.8814) ~= 38.5 deg at 0.45). CAMERA_PITCH_MIN kept.
+// (was atan(2.2919 / 2.8814) ~= 38.5 deg at 0.45). Look-up cap kept even
+// after the 4d.3 downward extension (CAMERA_PITCH_MIN -0.41).
+export const CAMERA_PITCH_MIN = -0.41;
 export const CAMERA_PITCH_MAX = 0.36;
+// Charge-mirror camera band (4d.3 feedback, asymmetric by necessity): the aim
+// band is [MIN -0.41, MAX +0.36] and the mirror negates, so the camera band
+// is [-MAX -0.36, -MIN +0.41]. The look-up side stays capped (camera never
+// below -0.36, same as before); the look-down side widens to +0.41 so a full
+// aim-down (-0.41) from elevation mirrors without clipping. High camera, no
+// ground risk (y = avatar.y + 2.1 + sin(0.41)*3.2 ~= avatar.y + 3.4).
+export const MIRROR_PITCH_MIN = -CAMERA_PITCH_MAX;
+export const MIRROR_PITCH_MAX = -CAMERA_PITCH_MIN;
 // Post-playtest fix round 3 (owner: resting view too top-down): default/
 // resting camera pitch 0.15 rad (~8.6 deg above horizon) — ~0.1 rad (~6 deg)
 // closer to the horizon than the old 0.25, opening the distant view. Single
@@ -45,7 +60,7 @@ export const CAMERA_PITCH_MAX = 0.36;
 // and the aim-idle init (main.ts aimPitch start). Worst case at default
 // distance (d = 4m): elevation = atan((2.1 + sin(0.15)*4 - 1.2) /
 // (cos(0.15)*4)) = atan(1.4978 / 3.9551) ~= 20.7 deg onto the avatar
-// (was ~= 26.0 deg at 0.25). Stays well above CAMERA_PITCH_MIN (-0.15).
+// (was ~= 26.0 deg at 0.25). Stays well above CAMERA_PITCH_MIN (-0.41).
 export const CAMERA_REST_PITCH = 0.15;
 
 // Virtual joystick (Q9-A: left side, diameter 120px, transparent look-through).
@@ -94,8 +109,19 @@ export const PLAYER_LINEAR_DAMPING = 2.5;
 // instead of gliding forever — escapable via ICE_ACCEL steering.
 export const ICE_FRICTION = 0.07;
 export const ICE_LINEAR_DAMPING = 1.0;
-export const TRAMPOLINE_IMPULSE = 10;
+// Stage 4d.3 feedback (owner: impulse 10 cannot land the 2.0m towers —
+// verified: Rapier linear damping 2.5 bleeds the launch, damped arrival over
+// the tower footprint peaks below the needed 3.0m body-center). Bumped to 12
+// (band max, still inside QT3-A 8-12): the smallest band value whose damped
+// trajectory arrives over the footprint above 3.0m with margin — see the
+// Arena.test damped-reach proof. Horizontal cruise (~4.5m/s via input
+// steering, which outruns damping) covers pad-edge to footprint in ~0.84s.
+export const TRAMPOLINE_IMPULSE = 12;
 export const TRAMPOLINE_COOLDOWN_S = 0.5;
+// Trampoline pad glow dim (4d.3 feedback: pads read too hot): multiplier on
+// the pad emissive intensity (0.9 x 0.8 = 0.72, -20%). Named constant so the
+// palette stays untouched — the chartreuse pad color itself never changes.
+export const TRAMPOLINE_PAD_DIM = 0.8;
 // Airborne flight gate (hop visuals): enter when |vertical velocity| tops
 // THRESHOLD, exit only after it sits below THRESHOLD*EXIT_FRACTION for
 // EXIT_HOLD_S (two-level gate + hold kills apex flutter: at a jump apex
@@ -276,25 +302,29 @@ export const RAMP_SLAB_THICKNESS = 0.2;
 export const PLATFORM_CAP_DROP = 0.005;
 // Camera-wall occlusion: camera clamped inside HALF + this margin (wall line).
 export const CAMERA_WALL_MARGIN = 0.5;
-// Stage 4d.3 glass walls: the 4 arena walls are transparent "glass" showing
-// the night sky (stars + nebulae stay visible through them). Rest opacity is
-// the UPPER clamp (WALL_GLASS_OPACITY 0.4 — see-through, yet the boundary
-// still reads); while the camera sits low/close behind a wall the opacity
-// eases toward the LOWER clamp (WALL_FADE_OPACITY 0.25 — more transparent so
-// the fighter stays visible, still opaque enough to read the boundary:
-// the anti-cheat intent of the old 0.25..1.0 fade is preserved, only the
-// ceiling dropped from opaque 1.0 to glass 0.4). Same geometry/material,
-// zero extra draw calls, collision unchanged.
-export const WALL_GLASS_OPACITY = 0.4;
-// Faded wall opacity while the camera sits low/close behind a wall.
-export const WALL_FADE_OPACITY = 0.25;
+// Stage 4d.3 glass walls (feedback round: owner says the first 0.4 pass
+// still reads solid — diagnosis: 0.4 over dark violet BASE_WALL blocks ~60%
+// of the starlight, so the wall never reads as glass). Rest opacity is the
+// UPPER clamp (WALL_GLASS_OPACITY 0.2 — clearly see-through: stars + nebulae
+// read through from inside; the boundary still reads via the opaque neon top
+// strips + floor edge, which never fade); while the camera sits low/close
+// behind a wall the opacity eases toward the LOWER clamp (WALL_FADE_OPACITY
+// 0.1 — the fighter stays visible; the 0.25 floor could NOT stay because a
+// fade must be <= the glass rest, so the pair was re-derived honestly as
+// 0.1..0.2). Same geometry/material, zero extra draw calls, collision
+// unchanged. depthWrite stays off so far-sky depth never occludes.
+export const WALL_GLASS_OPACITY = 0.2;
+// Faded wall opacity while the camera sits low/close behind a wall (pairs
+// with WALL_GLASS_OPACITY above — must stay <= the glass rest).
+export const WALL_FADE_OPACITY = 0.1;
 // Stage 4d.3 ambient dressing (zero light cost, +4 draw calls total:
 // fireflies 1 InstancedMesh + NEBULA_COUNT sprites — see SceneManager
-// buildSky and fx/Fireflies for the accounting). Fireflies are 8 glow quads
-// in groups of 1-3 above head height; nebulae are 3 large low-alpha additive
-// sprites behind/above the walls. Textures are cheap procedural canvases
-// (<= 128px, no asset files).
-export const FIREFLY_COUNT = 8;
+// buildSky and fx/Fireflies for the accounting). Fireflies are 6 glow quads
+// (feedback round: 8 -> 6, still grouped 2/3/1) above head height, dimmed
+// -50% vs the 4d.3 pass, with blink + wander/hover behaviors; nebulae are 3
+// large low-alpha additive sprites behind/above the walls. Textures are
+// cheap procedural canvases (<= 128px, no asset files).
+export const FIREFLY_COUNT = 6;
 export const NEBULA_COUNT = 3;
 // Hand-ball prop: the avatar holds a round core in its right hand (no
 // barrel anymore). Throw flick duration (forward snap on release) + held-ball
@@ -363,7 +393,7 @@ export const IDLE_FOLLOW_RATE = 2.5;
 // follow pitch target 0.05 rad (~2.9 deg above horizon) — ~0.1 rad
 // (~6 deg) closer to the horizon than the old 0.15, matching the lowered
 // CAMERA_REST_PITCH above. Stays above CAMERA_PITCH_MIN
-// (-0.15): 0.05 > -0.15, so the shared clamp never fights the target.
+// (-0.41): 0.05 > -0.41, so the shared clamp never fights the target.
 export const IDLE_FOLLOW_PITCH = 0.05;
 export const IDLE_FOLLOW_MOVE_MIN = 0.1;
 // Idle-follow stick-direction gate (review round-2 FAIL #1, widened per owner

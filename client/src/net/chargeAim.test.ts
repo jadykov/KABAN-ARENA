@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AIM_PITCH_DAMP, AIM_YAW_DAMP, CAMERA_PITCH_MAX, CAMERA_PITCH_MIN } from "../config";
+import { AIM_PITCH_DAMP, AIM_YAW_DAMP, CAMERA_PITCH_MAX, CAMERA_PITCH_MIN, MIRROR_PITCH_MAX, MIRROR_PITCH_MIN } from "../config";
 import {
   beginChargeLevel,
   mirrorChargeCameraPitch,
@@ -94,16 +94,21 @@ describe("aim-mirror camera pitch (fix round 3, TPS mirror)", () => {
     expect(mirrorChargeCameraPitch(0)).toBe(0);
   });
 
-  it("is symmetric: aim down -> camera pitch positive (rises)", () => {
+  it("negates the aim pitch within the asymmetric band (look-up capped)", () => {
     expect(mirrorChargeCameraPitch(-0.1)).toBeCloseTo(0.1, 12);
-    expect(mirrorChargeCameraPitch(-CAMERA_PITCH_MIN)).toBeCloseTo(CAMERA_PITCH_MIN, 12);
+    // Full aim-down (-MIN) mirrors to +0.41 unclipped (upper widened 4d.3);
+    // full aim-up (+MAX) still mirrors to exactly the -0.36 floor.
+    expect(mirrorChargeCameraPitch(CAMERA_PITCH_MIN)).toBeCloseTo(MIRROR_PITCH_MAX, 12);
+    expect(mirrorChargeCameraPitch(-CAMERA_PITCH_MIN)).toBeCloseTo(MIRROR_PITCH_MIN, 12);
   });
 
-  it("clamps symmetrically to [-CAMERA_PITCH_MAX, +CAMERA_PITCH_MAX]", () => {
-    expect(mirrorChargeCameraPitch(1.0)).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
-    expect(mirrorChargeCameraPitch(-1.0)).toBeCloseTo(CAMERA_PITCH_MAX, 12);
-    expect(mirrorChargeCameraPitch(CAMERA_PITCH_MAX)).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
-    // The full aim band mirrors inside the symmetric clamp untouched.
+  it("clamps asymmetrically to [MIRROR_PITCH_MIN, MIRROR_PITCH_MAX]", () => {
+    expect(MIRROR_PITCH_MIN).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
+    expect(MIRROR_PITCH_MAX).toBeCloseTo(-CAMERA_PITCH_MIN, 12);
+    expect(mirrorChargeCameraPitch(1.0)).toBeCloseTo(MIRROR_PITCH_MIN, 12);
+    expect(mirrorChargeCameraPitch(-1.0)).toBeCloseTo(MIRROR_PITCH_MAX, 12);
+    expect(mirrorChargeCameraPitch(CAMERA_PITCH_MAX)).toBeCloseTo(MIRROR_PITCH_MIN, 12);
+    // The full aim band mirrors inside the asymmetric clamp untouched.
     expect(mirrorChargeCameraPitch(CAMERA_PITCH_MIN)).toBeCloseTo(-CAMERA_PITCH_MIN, 12);
   });
 
@@ -112,24 +117,32 @@ describe("aim-mirror camera pitch (fix round 3, TPS mirror)", () => {
     expect(mirrorChargeCameraPitch(Number.POSITIVE_INFINITY)).toBe(Number.POSITIVE_INFINITY);
   });
 
-  it("is an exact involution on the symmetric band: mirror(mirror(x)) = x", () => {
-    // In-band the negation never hits either clamp, so the double mirror is
-    // the identity — this is what makes unmirrorChargeCameraPitch exact for
-    // every aim pitch main.ts can hold during charge ([MIN, MAX] subset).
+  it("is an exact involution on the pre-existing band, clips only the new edge", () => {
+    // In-band the negation lands inside the mirror clamp by construction
+    // (-0.36 <-> +0.36 round-trips exactly), so the double mirror is the
+    // identity — this is what makes unmirrorChargeCameraPitch exact for
+    // every aim pitch main.ts held pre-4d.3. The new extension edge is the
+    // single exception, pinned below (bounded 0.05 clip, honest edge).
     const samples = [
       0,
       0.05,
       0.15,
       0.3,
       -0.1,
-      CAMERA_PITCH_MIN,
-      -CAMERA_PITCH_MIN,
+      -0.3,
       CAMERA_PITCH_MAX,
       -CAMERA_PITCH_MAX,
     ];
     for (const x of samples) {
       expect(mirrorChargeCameraPitch(mirrorChargeCameraPitch(x))).toBeCloseTo(x, 12);
     }
+    // Extension edge: full aim-down mirrors to +0.41 unclipped, but the way
+    // back clips to the look-up floor -0.36 (0.05 off true aim, documented in
+    // chargeAim.ts — release reads <=2.9 deg shallower at the extreme edge).
+    expect(mirrorChargeCameraPitch(mirrorChargeCameraPitch(CAMERA_PITCH_MIN))).toBeCloseTo(
+      MIRROR_PITCH_MIN,
+      12,
+    );
   });
 
   it("collapses out-of-band input to the band edge (safe backstop, not a live path)", () => {
@@ -139,7 +152,7 @@ describe("aim-mirror camera pitch (fix round 3, TPS mirror)", () => {
     // the edge (mirror(1.0) = -MAX, covered above); the double application
     // below just mirrors that edge back.
     expect(mirrorChargeCameraPitch(mirrorChargeCameraPitch(1.0))).toBeCloseTo(CAMERA_PITCH_MAX, 12);
-    expect(mirrorChargeCameraPitch(mirrorChargeCameraPitch(-2.5))).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
+    expect(mirrorChargeCameraPitch(mirrorChargeCameraPitch(-2.5))).toBeCloseTo(MIRROR_PITCH_MIN, 12);
   });
 });
 
@@ -150,15 +163,22 @@ describe("unmirror camera->aim pitch (F1 fix, shared helper)", () => {
     expect(unmirrorChargeCameraPitch(0.1)).toBeCloseTo(-0.1, 12);
     expect(unmirrorChargeCameraPitch(0)).toBe(0);
     expect(unmirrorChargeCameraPitch(-CAMERA_PITCH_MAX)).toBeCloseTo(CAMERA_PITCH_MAX, 12);
-    expect(unmirrorChargeCameraPitch(-CAMERA_PITCH_MIN)).toBeCloseTo(CAMERA_PITCH_MIN, 12);
+    expect(unmirrorChargeCameraPitch(-CAMERA_PITCH_MIN)).toBeCloseTo(MIRROR_PITCH_MIN, 12);
   });
 
-  it("round-trips every in-band aim pitch exactly (pins the F1 release path)", () => {
-    const samples = [0, 0.05, 0.15, 0.3, -0.1, CAMERA_PITCH_MIN, CAMERA_PITCH_MAX];
+  it("round-trips the pre-existing band exactly; the new edge clips <=0.05", () => {
+    // Every aim pitch main.ts held pre-4d.3 ([-0.36, +0.36]) round-trips
+    // EXACTLY (pins the F1 release path); the extension edge is the single
+    // documented exception (release reads -0.36 for a -0.41 aim, edge test
+    // above pins the bound).
+    const samples = [0, 0.05, 0.15, 0.3, -0.1, -0.3, CAMERA_PITCH_MAX, -CAMERA_PITCH_MAX];
     for (const aim of samples) {
       const camera = mirrorChargeCameraPitch(aim);
       expect(unmirrorChargeCameraPitch(camera)).toBeCloseTo(aim, 12);
     }
+    const edgeCamera = mirrorChargeCameraPitch(CAMERA_PITCH_MIN);
+    expect(edgeCamera).toBeCloseTo(MIRROR_PITCH_MAX, 12);
+    expect(unmirrorChargeCameraPitch(edgeCamera)).toBeCloseTo(MIRROR_PITCH_MIN, 12);
   });
 
   it("collapses out-of-band input to the edge and passes non-finite through", () => {

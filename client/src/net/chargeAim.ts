@@ -1,9 +1,10 @@
 import {
   AIM_PITCH_DAMP,
   AIM_YAW_DAMP,
-  CAMERA_PITCH_MAX,
   CHARGE_PITCH_EASE_DONE,
   CHARGE_PITCH_EASE_RATE,
+  MIRROR_PITCH_MAX,
+  MIRROR_PITCH_MIN,
 } from "../config";
 
 // Charge pitch leveling (owner: camera eases ONCE toward the horizon at aim
@@ -44,16 +45,19 @@ export function yawRateScale(isCharging: boolean): number {
 // whenever the player aimed up — unusable. The aim pitch itself is untouched
 // (still clamped to [CAMERA_PITCH_MIN, CAMERA_PITCH_MAX] in main.ts, and the
 // fire payload keeps that band); only the CAMERA takes the mirror, clamped
-// symmetrically to [-CAMERA_PITCH_MAX, +CAMERA_PITCH_MAX] — the plain
-// setCameraAngles MIN (-0.15) would clip the mirror, so the charge call site
+// to the ASYMMETRIC band [MIRROR_PITCH_MIN, MIRROR_PITCH_MAX] (-0.36/+0.41
+// since the 4d.3 downward extension: aim-down-full -0.41 mirrors to +0.41
+// unclipped, aim-up-full +0.36 still mirrors to exactly -0.36) — the plain
+// setCameraAngles MIN (-0.41) would clip the mirror, so the charge call site
 // passes the wider band via the min/max override. Ground clearance at the
-// widest mirror (charge zoom d = 3.2m, avatar.y ~= 1.1): camera y =
+// widest LOW mirror (charge zoom d = 3.2m, avatar.y ~= 1.1): camera y =
 // avatar.y + 2.1 + sin(-0.36)*3.2 ~= avatar.y + 0.97 ~= 2.07 — above ground.
-// After the shot the mirrored camera pitch (down to -CAMERA_PITCH_MAX)
+// (The wide HIGH mirror +0.41 only lifts the camera further, no ground risk.)
+// After the shot the mirrored camera pitch (down to MIRROR_PITCH_MIN)
 // survives on the camera: the next idle follow (while moving) eases it back
 // toward IDLE_FOLLOW_PITCH through the widened-band override
 // (tolerantCameraPitchMin in idleFollow.ts — the default-band clamp would
-// snap -0.36 to CAMERA_PITCH_MIN in a single frame), and RMB drags tolerate
+// snap an out-of-band start in a single frame), and RMB drags tolerate
 // the out-of-band start the same way (SceneManager.update bounds the drag
 // against the current pitch). So the return is a smooth exp ease, never a
 // snap — but it DOES need that explicit tolerance at every clamp site.
@@ -64,24 +68,30 @@ export function mirrorChargeCameraPitch(aimPitch: number): number {
     return aimPitch;
   }
   const mirrored = -aimPitch;
-  const clamped = Math.max(-CAMERA_PITCH_MAX, Math.min(CAMERA_PITCH_MAX, mirrored));
+  const clamped = Math.max(MIRROR_PITCH_MIN, Math.min(MIRROR_PITCH_MAX, mirrored));
   return clamped === 0 ? 0 : clamped;
 }
 
 // Shared camera->aim un-mirror (F1 fix): every site that derives the TRUE aim
 // pitch back from the (possibly mirrored) camera pitch goes through here.
-// The mirror is an exact involution on the symmetric band [-CAMERA_PITCH_MAX,
-// +CAMERA_PITCH_MAX]: for x in that band, -x is in the band too, so neither
-// application clamps and mirror(mirror(x)) = -(-x) = x. The aim pitch during
-// charge always lives in [CAMERA_PITCH_MIN, CAMERA_PITCH_MAX] subset of that
-// band (main.ts stick integration clamps it there), so un-mirroring a charge
-// camera pitch recovers the aim EXACTLY (up to float rounding): an aim of
-// +0.3 shows camera -0.3, and unmirror(-0.3) = +0.3. Out-of-band inputs
-// (|x| > CAMERA_PITCH_MAX) collapse to the band edge — reachable only via
-// the (now removed) charge feedback bug, never in the fixed wiring, so the
-// edge collapse is a safe backstop, not a live path. Non-finite passes
-// through like the mirror (call sites treat it as "do not move the aim").
-// Scalar only, no allocations.
+// The mirror is an exact involution on the AIM band [CAMERA_PITCH_MIN,
+// CAMERA_PITCH_MAX]: for an in-band aim x, -x lands inside the MIRROR band
+// [MIRROR_PITCH_MIN, MIRROR_PITCH_MAX] by construction (-0.41 <-> +0.41,
+// +0.36 <-> -0.36), so neither application clamps and
+// mirror(mirror(x)) = -(-x) = x. The aim pitch during charge always lives in
+// [CAMERA_PITCH_MIN, CAMERA_PITCH_MAX] (main.ts stick integration clamps it
+// there), so un-mirroring a charge camera pitch recovers the aim EXACTLY (up
+// to float rounding): an aim of +0.3 shows camera -0.3, and unmirror(-0.3)
+// = +0.3. Out-of-band inputs collapse to the mirror edge — reachable only
+// via the (now removed) charge feedback bug, never in the fixed wiring, so
+// the edge collapse is a safe backstop, not a live path. One honest edge
+// from the 4d.3 asymmetry: a FULL aim-down (-0.41) shows camera +0.41, and
+// un-mirroring clips to -0.36 — the release payload for extreme aim-down
+// shots reads 0.05 rad (~2.9 deg) shallower than the live aim. Bounded,
+// in-band, documented and pinned (chargeAim.test edge case); the whole
+// pre-existing band [-0.36, +0.36] still round-trips EXACTLY. Non-finite
+// passes through like the mirror (call sites treat it as "do not move the
+// aim"). Scalar only, no allocations.
 export function unmirrorChargeCameraPitch(cameraPitch: number): number {
   return mirrorChargeCameraPitch(cameraPitch);
 }

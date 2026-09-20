@@ -577,12 +577,12 @@ export class SceneManager {
     // runs when NOT charging), and zero deltas change yaw/pitch by nothing
     // anyway — idle/follow presets pass through byte-identical.
     // A stale out-of-band pitch (the mirrored charge pitch surviving the
-    // shot, down to -CAMERA_PITCH_MAX) must not snap on the first drag
+    // shot, down to MIRROR_PITCH_MIN) must not snap on the first drag
     // either: the drag is bounded below by min(MIN, current) and above by
-    // max(MAX, current), so dragging from -0.36 glides back continuously (a
-    // downward drag holds the pitch instead of escaping further, an upward
-    // drag re-enters the band smoothly). In-band drags clamp exactly as
-    // before — mouse sign, rate and band untouched.
+    // max(MAX, current), so dragging from an out-of-band start glides back
+    // continuously (a downward drag holds the pitch instead of escaping
+    // further, an upward drag re-enters the band smoothly). In-band drags
+    // clamp exactly as before — mouse sign, rate and band untouched.
     if (look.dx !== 0 || look.dy !== 0) {
       this.yaw -= look.dx * CAMERA_SENSITIVITY;
       this.pitch = THREE.MathUtils.clamp(
@@ -750,7 +750,7 @@ export class SceneManager {
     avatar.position.set(position.x, position.y, position.z);
     // Flight gate for the hop rig: post-step vertical speed past the
     // threshold means trampoline launch / platform drop (glide, no bounce).
-    // Trampoline vy=10 trips it immediately; grounded rest stays ~0; ramp
+    // Trampoline vy=12 trips it immediately; grounded rest stays ~0; ramp
     // climbs (~1.1) never reach the 2.0 entry level.
     this.airborneGate.update(Math.abs(physics.getPlayerVelocity().y), deltaSeconds);
 
@@ -971,8 +971,8 @@ export class SceneManager {
   // yaw and the MIRRORED aim pitch (see mirrorChargeCameraPitch in
   // net/chargeAim.ts) every frame so one right thumb can turn 360 degrees
   // and aiming up drops the camera to look up the shot arc. The optional
-  // min/max override exists ONLY for that mirrored charge path (symmetric
-  // band [-CAMERA_PITCH_MAX, +CAMERA_PITCH_MAX], since the plain MIN -0.15
+  // min/max override exists ONLY for that mirrored charge path (asymmetric
+  // band [MIRROR_PITCH_MIN, MIRROR_PITCH_MAX], since the plain MIN -0.41
   // would clip the mirror); every other caller uses the shared
   // [CAMERA_PITCH_MIN, CAMERA_PITCH_MAX] defaults. No alloc, scalar clamp.
   public setCameraAngles(yaw: number, pitch: number, min = CAMERA_PITCH_MIN, max = CAMERA_PITCH_MAX): void {

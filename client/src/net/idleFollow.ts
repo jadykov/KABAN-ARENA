@@ -146,15 +146,18 @@ export function stepIdleFollowPitch(
 
 // Post-shot follow clamp tolerance (F3 fix, option (a)): the pitch floor to
 // floor to pass as the min override to setCameraAngles at the idle-follow
-// call site. Normally CAMERA_PITCH_MIN (the shared default band). But the
-// mirrored charge pitch (down to -CAMERA_PITCH_MAX) survives the shot on the
-// camera, and the first eased follow frame from that out-of-band start would
-// clamp -0.36 -> CAMERA_PITCH_MIN (-0.15) in ONE frame (~12 deg snap). While the current pitch sits below the
-// default band, return the mirrored-widened floor -CAMERA_PITCH_MAX instead:
-// the exp ease toward IDLE_FOLLOW_PITCH is monotonic, so the pitch glides
-// back continuously and re-enters the default band on its own, at which
-// point this returns MIN again and the plain clamp resumes — no persistent
-// widening, no second easing implementation. Non-finite input returns MIN
+// call site. Normally CAMERA_PITCH_MIN (the shared default band). But a
+// mirrored charge pitch surviving the shot on the camera can sit below the
+// default band, and the first eased follow frame from that out-of-band start
+// would snap to CAMERA_PITCH_MIN in ONE frame. While the current pitch sits
+// below the default band, return the mirrored-widened floor -CAMERA_PITCH_MAX
+// instead: the exp ease toward IDLE_FOLLOW_PITCH is monotonic, so the pitch
+// glides back continuously and re-enters the default band on its own, at
+// which point this returns MIN again and the plain clamp resumes — no
+// persistent widening, no second easing implementation. (Since the 4d.3
+// downward extension the mirror floor -0.36 sits in-band above MIN -0.41, so
+// shipped mirror starts glide without help; this stays as the backstop for
+// any synthetic out-of-band start.) Non-finite input returns MIN
 // (setCameraAngles ignores NaN anyway). Scalar only, no allocations.
 export function tolerantCameraPitchMin(currentPitch: number): number {
   if (Number.isFinite(currentPitch) && currentPitch < CAMERA_PITCH_MIN) {

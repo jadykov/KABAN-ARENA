@@ -3,14 +3,17 @@ import { describe, expect, it } from "vitest";
 import {
   ARENA_HALF_SIZE,
   ICE_FRICTION,
+  MOVE_SPEED,
   OBSTACLE_COUNT,
   PHYSICS_GRAVITY_Y,
   PLATFORM_CAP_DROP,
   PLATFORM_FIGURES,
   PLAYER_FRICTION,
+  PLAYER_LINEAR_DAMPING,
   RAMP_SLOPE_DEG,
   SPAWN_COUNT,
   TRAMPOLINE_IMPULSE,
+  TRAMPOLINE_PAD_DIM,
 } from "../config";
 import type { PhysicsWorld } from "../physics/World";
 import {
@@ -134,26 +137,77 @@ describe("arena obstacle layout (QD5-A + 4d.3 central towers)", () => {
     }
   });
 
-  it("a trampoline bounce clears the doubled top (ballistic proof, impulse stays 10)", () => {
-    // Ideal projectile apex above the launch point: h = v^2 / (2g). Launch
-    // body-center y is worst-case ~1.0 (resting capsule center; the trigger
-    // band fires below TRAMPOLINE_TRIGGER_Y 1.7). Standing on the 2.0m tower
-    // top needs center >= 2.0 + 1.0 (capsule half-height 0.5 + radius 0.5)
-    // = 3.0. Rapier linear damping bleeds some energy, so this test demands
-    // 0.5m of ideal margin, not just bare clearance — no impulse retune
-    // needed (TRAMPOLINE_IMPULSE stays 10, inside the QT3-A 8-12 band).
-    expect(TRAMPOLINE_IMPULSE).toBe(10);
+  it("a trampoline bounce lands on the doubled top (damped reach proof, impulse 12)", () => {
+    // 4d.3 feedback (owner: impulse 10 cannot land the towers) — the old
+    // ideal-apex proof ignored Rapier linear damping (2.5/s), which bleeds
+    // most of the launch: the DAMPED model below matches the shipped
+    // integration (exponential velocity decay at PLAYER_LINEAR_DAMPING).
+    // Damped vertical: y(t) = y0 + (A/d)(1-e^-dt) - (g/d)t, A = v0 + g/d.
+    // Launch body-center y is worst-case 1.0 (resting capsule center; the
+    // trigger band fires below TRAMPOLINE_TRIGGER_Y 1.7). Landing on the
+    // 2.0m tower top needs center >= 2.0 + 1.0 (capsule half-height 0.5 +
+    // radius 0.5) = 3.0. Horizontal cruise holds at MOVE_SPEED (input
+    // steering at 24/s outruns the 2.5/s damping, so cruise speed survives
+    // the flight): pad (0,4.2) to tower footprint edge ~= 3.8m ~= 0.84s.
+    expect(TRAMPOLINE_IMPULSE).toBe(12);
     expect(TRAMPOLINE_IMPULSE).toBeGreaterThanOrEqual(8);
     expect(TRAMPOLINE_IMPULSE).toBeLessThanOrEqual(12);
     const g = Math.abs(PHYSICS_GRAVITY_Y);
-    const apexAboveLaunch = (TRAMPOLINE_IMPULSE * TRAMPOLINE_IMPULSE) / (2 * g);
-    expect(apexAboveLaunch).toBeGreaterThan(5); // 100/19.62 ~= 5.1m.
-    const worstCaseLaunchY = 1.0;
+    const d = PLAYER_LINEAR_DAMPING;
+    const dampedY = (v0: number, t: number): number => {
+      const a = v0 + g / d;
+      return 1.0 + (a / d) * (1 - Math.exp(-d * t)) - ((g / d) * t);
+    };
+    const dampedApexY = (v0: number): number => {
+      const a = v0 + g / d;
+      const tStar = -Math.log((g / d) / a) / d;
+      return dampedY(v0, tStar);
+    };
+    const arriveT = 3.8 / MOVE_SPEED;
+    expect(arriveT).toBeLessThan(0.9);
     const requiredCenterY = 2.0 + 1.0;
-    expect(worstCaseLaunchY + apexAboveLaunch).toBeGreaterThan(requiredCenterY + 0.5);
-    // Even the band floor (8) clears ideally: 64/19.62 ~= 3.26 + 1.0 > 3.0.
-    const floorApex = (8 * 8) / (2 * g);
-    expect(worstCaseLaunchY + floorApex).toBeGreaterThan(requiredCenterY);
+    // Arrival over the footprint clears 3.0 with >= 0.2 margin (3.29m).
+    expect(dampedY(TRAMPOLINE_IMPULSE, arriveT)).toBeGreaterThan(requiredCenterY + 0.2);
+    // 11 falls short of the same bar (2.94m): 12 is the smallest integer in
+    // the 8-12 band that lands the towers with margin.
+    expect(dampedY(11, arriveT)).toBeLessThan(requiredCenterY + 0.2);
+    // Apex still clears with >= 0.5 margin (3.60m).
+    expect(dampedApexY(TRAMPOLINE_IMPULSE)).toBeGreaterThan(requiredCenterY + 0.5);
+  });
+
+  it("dims trampoline pads -20% via the named multiplier (palette untouched)", () => {
+    // 4d.3 feedback: pads read too hot. Emissive is 0.9 x TRAMPOLINE_PAD_DIM
+    // (chartreuse color itself unchanged — palette constants never edited).
+    expect(TRAMPOLINE_PAD_DIM).toBe(0.8);
+    const scene = new THREE.Scene();
+    const builder = new ArenaBuilder();
+    builder.buildVisuals(scene);
+    try {
+      // Pads are the only InstancedMesh on the 0.85-top cylinder (bases use
+      // a 1.0-top cylinder).
+      const pads: THREE.InstancedMesh[] = [];
+      scene.traverse((child: THREE.Object3D) => {
+        if (child instanceof THREE.InstancedMesh) {
+          const geometry = child.geometry;
+          if (
+            geometry instanceof THREE.CylinderGeometry
+            && geometry.parameters.radiusTop === 0.85
+          ) {
+            pads.push(child);
+          }
+        }
+      });
+      expect(pads).toHaveLength(1);
+      const pad = pads[0];
+      if (pad === undefined) {
+        return;
+      }
+      const material = pad.material as THREE.MeshStandardMaterial;
+      expect(material.emissiveIntensity).toBeCloseTo(0.9 * TRAMPOLINE_PAD_DIM, 10);
+      expect(material.emissiveIntensity).toBeCloseTo(0.72, 10);
+    } finally {
+      builder.dispose(scene);
+    }
   });
 
   it("places 4 distinct corner spawns inside the arena", () => {
