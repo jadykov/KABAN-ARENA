@@ -76,11 +76,15 @@ export type CenterItemKind = "super"; // | "pineapple" | "heal" (future)
 // resolvePlayerMove). Heights ignored — balls fly over low blocks only when
 // above hy*2, otherwise they impact. Positions scaled x1.2 with the map
 // (4 -> 4.8, 9 -> 10.8); block half extents unchanged.
+// Stage 4d.3: the 4 CENTRAL blocks (at +-4.8) double to topY 2.0 (mirrors
+// client hy 1.0) — trampoline-only high ground. Balls arcing over at
+// y 1.0-2.0 now impact instead of flying through (intended gameplay change
+// — flag for playtest). The 4 OUTER blocks stay at topY 0.8.
 export const SERVER_OBSTACLES: Array<{ x: number; z: number; hx: number; hz: number; topY: number }> = [
-  { x: 4.8, z: 4.8, hx: 1, hz: 1, topY: 1.0 },
-  { x: -4.8, z: 4.8, hx: 1, hz: 1, topY: 1.0 },
-  { x: 4.8, z: -4.8, hx: 1, hz: 1, topY: 1.0 },
-  { x: -4.8, z: -4.8, hx: 1, hz: 1, topY: 1.0 },
+  { x: 4.8, z: 4.8, hx: 1, hz: 1, topY: 2.0 },
+  { x: -4.8, z: 4.8, hx: 1, hz: 1, topY: 2.0 },
+  { x: 4.8, z: -4.8, hx: 1, hz: 1, topY: 2.0 },
+  { x: -4.8, z: -4.8, hx: 1, hz: 1, topY: 2.0 },
   { x: 10.8, z: 0, hx: 1.5, hz: 0.75, topY: 0.8 },
   { x: -10.8, z: 0, hx: 1.5, hz: 0.75, topY: 0.8 },
   { x: 0, z: 10.8, hx: 0.75, hz: 1.5, topY: 0.8 },

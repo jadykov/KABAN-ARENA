@@ -17,9 +17,13 @@ import {
   DEATH_BURST_ORANGE,
   DEATH_BURST_RED,
   DEATH_BURST_YELLOW,
+  FIREFLY_COUNT,
   IDLE_FOLLOW_PITCH,
+  NEBULA_COUNT,
   RECOIL_FULL_M,
   WALL_FADE_OPACITY,
+  WALL_GLASS_OPACITY,
+  WALL_HEIGHT,
 } from "../config";
 import { mirrorChargeCameraPitch } from "../net/chargeAim";
 import { SceneManager } from "./SceneManager";
@@ -58,13 +62,17 @@ describe("SceneManager camera clamp + wall fade", () => {
     expect(Math.abs(camera.z)).toBeLessThanOrEqual(limit + 1e-6);
   });
 
-  it("fades walls to 0.25 when occluded, restores to 1 otherwise", async () => {
+  it("rests glass at 0.4, fades toward 0.25 when occluded", async () => {
+    // Stage 4d.3 glass semantics: rest is the glass opacity itself (stars
+    // show through), occlusion fades toward MORE transparent — the old
+    // 0.25..1.0 band is now 0.25..0.4, anti-cheat readability kept.
+    expect(WALL_GLASS_OPACITY).toBe(0.4);
     expect(WALL_FADE_OPACITY).toBe(0.25);
     const manager = await createManager();
-    // Open arena center: camera well inside, walls fully opaque.
+    // Open arena center: camera well inside, walls at glass rest opacity.
     manager.teleportSelf(0, 0);
     manager.update(FRAME, NO_MOVE, NO_LOOK);
-    expect(manager.getWallOpacity()).toBe(1);
+    expect(manager.getWallOpacity()).toBeCloseTo(WALL_GLASS_OPACITY, 10);
     // Corner: the raw follow position sits past the wall line, so the
     // camera clamps and the walls fade to the occlusion opacity. The follow
     // camera eases toward its target (CAMERA_SMOOTH_RATE), so pump frames
@@ -74,6 +82,130 @@ describe("SceneManager camera clamp + wall fade", () => {
       manager.update(FRAME, NO_MOVE, NO_LOOK);
     }
     expect(manager.getWallOpacity()).toBeCloseTo(WALL_FADE_OPACITY, 10);
+  });
+});
+
+describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", () => {
+  async function createManagerWithScene(): Promise<{ manager: SceneManager; scene: THREE.Scene }> {
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 200);
+    const manager = new SceneManager(scene, camera);
+    manager.build();
+    const ready = await manager.initPhysics();
+    expect(ready).toBe(true);
+    managers.push(manager);
+    return { manager, scene };
+  }
+
+  it("renders the 4 walls as transparent glass at the glass rest opacity", async () => {
+    expect(WALL_GLASS_OPACITY).toBe(0.4);
+    const { scene } = await createManagerWithScene();
+    // Walls are the only TRANSPARENT 4-count InstancedMesh on a unit box
+    // (platform tops share the 4-count unit-box shape but stay opaque;
+    // strips use a flat 0.08-high box, obstacles come in 8s).
+    const walls: THREE.InstancedMesh[] = [];
+    scene.traverse((child: THREE.Object3D) => {
+      if (child instanceof THREE.InstancedMesh && child.count === 4) {
+        const geometry = child.geometry;
+        const material = child.material as THREE.MeshStandardMaterial;
+        if (
+          geometry instanceof THREE.BoxGeometry
+          && geometry.parameters.width === 1
+          && geometry.parameters.height === 1
+          && material.transparent === true
+        ) {
+          walls.push(child);
+        }
+      }
+    });
+    expect(walls).toHaveLength(1);
+    const wall = walls[0];
+    if (wall === undefined) {
+      return;
+    }
+    const material = wall.material as THREE.MeshStandardMaterial;
+    expect(material.transparent).toBe(true);
+    expect(material.opacity).toBeCloseTo(WALL_GLASS_OPACITY, 10);
+    // depthWrite off: the far sky (stars/nebulae) is never occluded by wall
+    // depth regardless of transparent sort order.
+    expect(material.depthWrite).toBe(false);
+  });
+
+  it("hangs 3 additive nebula sprites behind/above the walls (no new lights)", async () => {
+    expect(NEBULA_COUNT).toBe(3);
+    const { scene } = await createManagerWithScene();
+    const nebulae: THREE.Sprite[] = [];
+    scene.traverse((child: THREE.Object3D) => {
+      if (child instanceof THREE.Sprite && child.name.startsWith("nebula-")) {
+        nebulae.push(child);
+      }
+    });
+    expect(nebulae).toHaveLength(NEBULA_COUNT);
+    for (const sprite of nebulae) {
+      const material = sprite.material as THREE.SpriteMaterial;
+      expect(material.blending).toBe(THREE.AdditiveBlending);
+      expect(material.opacity).toBeLessThanOrEqual(0.22);
+      expect(material.depthWrite).toBe(false);
+      expect(material.fog).toBe(false);
+      // Outside the arena and above the walls: seen THROUGH the glass.
+      expect(Math.max(Math.abs(sprite.position.x), Math.abs(sprite.position.z))).toBeGreaterThan(
+        ARENA_HALF_SIZE,
+      );
+      expect(sprite.position.y).toBeGreaterThan(WALL_HEIGHT);
+      // Cheap procedural textures only (<= 256px, no asset files).
+      const map = material.map;
+      expect(map).not.toBe(null);
+      const width = (map?.image as { width?: number } | undefined)?.width ?? 0;
+      expect(width).toBeGreaterThan(0);
+      expect(width).toBeLessThanOrEqual(256);
+    }
+    // Light budget untouched: 1 dir + 1 ambient + the banner spot exception.
+    const lights: THREE.Light[] = [];
+    scene.traverse((child: THREE.Object3D) => {
+      if (child instanceof THREE.Light) {
+        lights.push(child);
+      }
+    });
+    expect(lights).toHaveLength(3);
+  });
+
+  it("drifts 8 fireflies as one InstancedMesh above head height (1 draw call)", async () => {
+    expect(FIREFLY_COUNT).toBe(8);
+    const { manager, scene } = await createManagerWithScene();
+    const swarms: THREE.InstancedMesh[] = [];
+    scene.traverse((child: THREE.Object3D) => {
+      if (child instanceof THREE.InstancedMesh && child.name === "fireflies") {
+        swarms.push(child);
+      }
+    });
+    expect(swarms).toHaveLength(1);
+    const swarm = swarms[0];
+    if (swarm === undefined) {
+      return;
+    }
+    expect(swarm.count).toBe(FIREFLY_COUNT);
+    expect(swarm.geometry instanceof THREE.PlaneGeometry).toBe(true);
+    const material = swarm.material as THREE.MeshBasicMaterial;
+    expect(material.blending).toBe(THREE.AdditiveBlending);
+    expect(material.depthWrite).toBe(false);
+    // Run frames so the billboard/bob update writes instance matrices, then
+    // verify every firefly hovers above head height (~2.1 capsule top) and
+    // inside the arena.
+    manager.teleportSelf(0, 0);
+    manager.update(FRAME, NO_MOVE, NO_LOOK);
+    manager.update(FRAME, NO_MOVE, NO_LOOK);
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    for (let i = 0; i < FIREFLY_COUNT; i += 1) {
+      swarm.getMatrixAt(i, matrix);
+      matrix.decompose(position, quaternion, scale);
+      expect(position.y).toBeGreaterThan(2.2);
+      expect(position.y).toBeLessThan(4);
+      expect(Math.abs(position.x)).toBeLessThan(ARENA_HALF_SIZE);
+      expect(Math.abs(position.z)).toBeLessThan(ARENA_HALF_SIZE);
+    }
   });
 });
 

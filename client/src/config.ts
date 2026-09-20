@@ -276,8 +276,26 @@ export const RAMP_SLAB_THICKNESS = 0.2;
 export const PLATFORM_CAP_DROP = 0.005;
 // Camera-wall occlusion: camera clamped inside HALF + this margin (wall line).
 export const CAMERA_WALL_MARGIN = 0.5;
+// Stage 4d.3 glass walls: the 4 arena walls are transparent "glass" showing
+// the night sky (stars + nebulae stay visible through them). Rest opacity is
+// the UPPER clamp (WALL_GLASS_OPACITY 0.4 — see-through, yet the boundary
+// still reads); while the camera sits low/close behind a wall the opacity
+// eases toward the LOWER clamp (WALL_FADE_OPACITY 0.25 — more transparent so
+// the fighter stays visible, still opaque enough to read the boundary:
+// the anti-cheat intent of the old 0.25..1.0 fade is preserved, only the
+// ceiling dropped from opaque 1.0 to glass 0.4). Same geometry/material,
+// zero extra draw calls, collision unchanged.
+export const WALL_GLASS_OPACITY = 0.4;
 // Faded wall opacity while the camera sits low/close behind a wall.
 export const WALL_FADE_OPACITY = 0.25;
+// Stage 4d.3 ambient dressing (zero light cost, +4 draw calls total:
+// fireflies 1 InstancedMesh + NEBULA_COUNT sprites — see SceneManager
+// buildSky and fx/Fireflies for the accounting). Fireflies are 8 glow quads
+// in groups of 1-3 above head height; nebulae are 3 large low-alpha additive
+// sprites behind/above the walls. Textures are cheap procedural canvases
+// (<= 128px, no asset files).
+export const FIREFLY_COUNT = 8;
+export const NEBULA_COUNT = 3;
 // Hand-ball prop: the avatar holds a round core in its right hand (no
 // barrel anymore). Throw flick duration (forward snap on release) + held-ball
 // look (radius, right-side chest attach mirroring the old cannon offset).

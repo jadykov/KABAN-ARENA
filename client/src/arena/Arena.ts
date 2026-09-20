@@ -12,6 +12,7 @@ import {
   SPAWN_INSET,
   TRAMPOLINE_RADIUS,
   WALL_FADE_OPACITY,
+  WALL_GLASS_OPACITY,
   WALL_HEIGHT,
   WALL_THICKNESS,
 } from "../config";
@@ -81,16 +82,21 @@ export interface SpawnSpec {
   z: number;
 }
 
-// QD5-A: 8 low symmetric obstacle blocks. Layout is mirror-symmetric on both
-// axes and under 180-degree rotation, so no spawn side has an advantage.
-// Heights stay low (<= 1.0) so the capsule can be knocked over them and the
-// phone camera always sees over them. Positions scaled +20% with the map
-// (4 -> 4.8, 9 -> 10.8); block sizes unchanged (gameplay density kept).
+// QD5-A: 8 symmetric obstacle blocks + Stage 4d.3 central towers. Layout is
+// mirror-symmetric on both axes and under 180-degree rotation, so no spawn
+// side has an advantage. The 4 CENTRAL blocks (at +-4.8) are doubled to
+// hy 1.0 (2.0m full height, topY 2.0 — mirrors server SERVER_OBSTACLES):
+// reachable ONLY via trampoline bounce (no ramps touch them — see the
+// Arena.test trampoline-only pin), so they read as high ground worth
+// fighting for. The 4 OUTER blocks (at +-10.8) stay low (hy 0.4) so the
+// phone camera always sees over the lanes. Positions/half-extents unchanged
+// (gameplay density kept); block sizes scaled +20% with the map long ago
+// (4 -> 4.8, 9 -> 10.8).
 export function getObstacleLayout(): ObstacleSpec[] {
   const corner: ObstacleSpec[] = [];
   for (const sx of [-1, 1]) {
     for (const sz of [-1, 1]) {
-      corner.push({ x: 4.8 * sx, z: 4.8 * sz, hx: 1, hy: 0.5, hz: 1 });
+      corner.push({ x: 4.8 * sx, z: 4.8 * sz, hx: 1, hy: 1.0, hz: 1 });
     }
   }
   return [
@@ -240,7 +246,7 @@ export class ArenaBuilder {
   private readonly disposables: Array<{ dispose(): void }> = [];
   private readonly actors: THREE.Object3D[] = [];
   private wallMaterial: THREE.MeshStandardMaterial | null = null;
-  private wallOpacity = 1;
+  private wallOpacity = WALL_GLASS_OPACITY;
 
   public buildVisuals(scene: THREE.Scene): void {
     this.buildFloor(scene);
@@ -293,14 +299,21 @@ export class ArenaBuilder {
     // so the capsule passes over them freely and never gets stuck on a lip.
   }
 
-  // Camera-wall occlusion: fade the arena walls while the camera sits low
-  // and close behind them (see SceneManager). Transparent + opacity, no
-  // extra lights, no new materials per frame.
+  // Camera-wall occlusion over GLASS walls (Stage 4d.3): the rest state is
+  // the glass opacity itself (WALL_GLASS_OPACITY — transparent, stars show
+  // through); while the camera sits low/close behind a wall the opacity
+  // eases toward WALL_FADE_OPACITY (more transparent so the fighter stays
+  // visible, still opaque enough to read the boundary — anti-cheat intent
+  // kept). Clamp band is [FADE, GLASS]; transparent flips only below 1
+  // (always true for glass — assigned every call, no per-frame churn beyond
+  // the two existing fields). No extra lights, no new materials per frame.
   public setWallOpacity(opacity: number): void {
-    const clamped = Number.isFinite(opacity) ? Math.max(WALL_FADE_OPACITY, Math.min(1, opacity)) : 1;
+    const clamped = Number.isFinite(opacity)
+      ? Math.max(WALL_FADE_OPACITY, Math.min(WALL_GLASS_OPACITY, opacity))
+      : WALL_GLASS_OPACITY;
     this.wallOpacity = clamped;
     if (this.wallMaterial !== null) {
-      this.wallMaterial.transparent = clamped < 1;
+      this.wallMaterial.transparent = true;
       this.wallMaterial.opacity = clamped;
       this.wallMaterial.needsUpdate = false;
     }
@@ -316,7 +329,7 @@ export class ArenaBuilder {
     }
     this.actors.length = 0;
     this.wallMaterial = null;
-    this.wallOpacity = 1;
+    this.wallOpacity = WALL_GLASS_OPACITY;
     for (const tracked of this.disposables) {
       tracked.dispose();
     }
@@ -346,16 +359,31 @@ export class ArenaBuilder {
   }
 
   private buildWalls(scene: THREE.Scene): void {
-    // Four walls as a single InstancedMesh (unit box scaled per instance).
+    // Four glass walls as a single InstancedMesh (unit box scaled per
+    // instance — same geometry, 1 draw call, zero growth vs opaque walls).
+    // Transparent glass (WALL_GLASS_OPACITY rest) shows the night sky through
+    // (stars + nebulae behind stay visible); depthWrite off so the far sky
+    // never gets occluded by the wall depth regardless of sort order
+    // (opaque bodies still blend correctly — they render in the opaque pass
+    // first). Collision unchanged (buildColliders untouched).
     const half = ARENA_HALF_SIZE;
     const t = WALL_THICKNESS;
     const geometry = this.track(new THREE.BoxGeometry(1, 1, 1));
     const material = this.track(
-      new THREE.MeshStandardMaterial({ color: BASE_WALL, roughness: 0.85, metalness: 0.1 }),
+      new THREE.MeshStandardMaterial({
+        color: BASE_WALL,
+        roughness: 0.3,
+        metalness: 0.1,
+        transparent: true,
+        opacity: this.wallOpacity,
+        depthWrite: false,
+      }),
     );
     const walls = new THREE.InstancedMesh(geometry, material, 4);
     this.wallMaterial = material;
-    this.wallMaterial.transparent = this.wallOpacity < 1;
+    // Glass stays transparent in every state (rest and faded differ only in
+    // opacity within [FADE, GLASS] — see setWallOpacity).
+    this.wallMaterial.transparent = true;
     this.wallMaterial.opacity = this.wallOpacity;
     const matrix = new THREE.Matrix4();
     const transforms: Array<{ x: number; z: number; sx: number; sz: number }> = [

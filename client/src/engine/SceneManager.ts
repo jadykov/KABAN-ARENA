@@ -25,6 +25,7 @@ import {
   KNOCKBACK_IMPULSE,
   LOCAL_AVATAR_COLOR,
   MOVE_SPEED,
+  NEBULA_COUNT,
   PARTICLE_BURST_COUNT,
   PLAYER_GROUND_ACCEL,
   PLAYER_ICE_ACCEL,
@@ -45,12 +46,14 @@ import {
   TRAMPOLINE_COOLDOWN_S,
   TRAMPOLINE_TRIGGER_Y,
   WALL_FADE_OPACITY,
+  WALL_GLASS_OPACITY,
   WALL_HEIGHT,
 } from "../config";
 import { ArenaBuilder, getTrampolineAt, isOnSlippery } from "../arena/Arena";
 import { KIND_COLORS, PowerUpPickups, PowerUpState, type PowerUpKind } from "../arena/PowerUps";
 import { BallsPool, SuperCore } from "../fx/Balls";
 import { CameraShake, HitFlash } from "../fx/CameraShake";
+import { Fireflies } from "../fx/Fireflies";
 import {
   AirborneGate,
   applyClothing,
@@ -75,6 +78,8 @@ import {
   ACCENT_FIRE_BURST,
   ACCENT_HIT_BURST,
   ACCENT_HIT_FLASH,
+  ACCENT_ICE_GLOW,
+  ACCENT_OBSTACLE_TINT,
   ACCENT_SPARK,
   ACCENT_SPOT,
   BASE_BG,
@@ -173,6 +178,10 @@ export class SceneManager {
   private hasAim = false;
   private ballsPool: BallsPool | null = null;
   private superCore: SuperCore | null = null;
+  // Stage 4d.3 ambient dressing: 8 glow fireflies as one InstancedMesh
+  // (1 draw call, no lights — see fx/Fireflies). Owned here so build /
+  // update / dispose stay in one place with the other pooled visuals.
+  private fireflies: Fireflies | null = null;
   private charge01 = 0;
   private latestBalls: readonly NetBallSnapshot[] = [];
   private latestSuper: NetSuperSnapshot | null = null;
@@ -291,6 +300,7 @@ export class SceneManager {
     this.avatarVisuals = attachAvatarVisuals(rig, LOCAL_AVATAR_COLOR);
     this.ballsPool = new BallsPool(this.scene);
     this.superCore = new SuperCore(this.scene);
+    this.fireflies = new Fireflies(this.scene);
 
     this.scene.add(this.pickups.object);
     this.scene.add(this.particles.object);
@@ -701,6 +711,10 @@ export class SceneManager {
       }
       this.superCore.update(deltaSeconds);
     }
+    // Stage 4d.3 fireflies: ambient drift every frame in BOTH play and
+    // spectate paths (updateCombat runs in both). Billboard + sine bob,
+    // zero per-frame allocations, no lights, 1 draw call.
+    this.fireflies?.update(deltaSeconds, this.camera);
   }
 
   private updatePhysics(deltaSeconds: number, worldMove: THREE.Vector3): void {
@@ -997,7 +1011,9 @@ export class SceneManager {
     this.cameraSmoothInit = false;
     this.smoothCamPos.set(0, 0, 0);
     this.smoothCamLook.set(0, 0, 0);
-    this.arena.setWallOpacity(1);
+    // Glass rest state (Stage 4d.3): reset restores the glass opacity, never
+    // opaque 1 — the walls are transparent by design.
+    this.arena.setWallOpacity(WALL_GLASS_OPACITY);
     this.avatarVisuals?.reset();
     this.powerState.reset();
     this.pickups.reset();
@@ -1042,6 +1058,10 @@ export class SceneManager {
     if (this.superCore !== null) {
       this.superCore.dispose();
       this.superCore = null;
+    }
+    if (this.fireflies !== null) {
+      this.fireflies.dispose();
+      this.fireflies = null;
     }
     this.charge01 = 0;
     this.latestBalls = [];
@@ -1129,6 +1149,49 @@ export class SceneManager {
     stars.frustumCulled = false;
     scene.add(stars);
     this.disposables.push(starGeometry, starMaterial);
+
+    // Stage 4d.3 nebulae: NEBULA_COUNT large low-alpha additive sprites
+    // behind/above the glass walls (cheap space depth behind the stars —
+    // visible THROUGH the transparent walls from inside the arena). One
+    // shared 128px procedural canvas texture (tinted per-sprite via the
+    // material color: dim violet / muted red / pale violet from the palette
+    // — pink stays banned), static (no per-frame update), no lights.
+    // Draw-call accounting: +NEBULA_COUNT sprites (each sprite = 1 draw
+    // call); with the firefly InstancedMesh (+1) the stage adds exactly 4
+    // draw calls (A6 budget <= 4). Materials + texture tracked in
+    // disposables; the sprites themselves leave with the dispose() sweep.
+    const nebulaTexture = makeNebulaTexture();
+    this.disposables.push(nebulaTexture);
+    const nebulaDefs: ReadonlyArray<{
+      x: number;
+      y: number;
+      z: number;
+      w: number;
+      h: number;
+      color: number;
+      opacity: number;
+    }> = [
+      { x: -48, y: 26, z: -58, w: 52, h: 30, color: ACCENT_ICE_GLOW, opacity: 0.2 },
+      { x: 52, y: 32, z: -28, w: 44, h: 26, color: ACCENT_OBSTACLE_TINT, opacity: 0.16 },
+      { x: 2, y: 30, z: 62, w: 48, h: 28, color: ACCENT_SPARK, opacity: 0.18 },
+    ];
+    nebulaDefs.slice(0, NEBULA_COUNT).forEach((def, index) => {
+      const material = new THREE.SpriteMaterial({
+        map: nebulaTexture,
+        color: def.color,
+        transparent: true,
+        opacity: def.opacity,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        fog: false,
+      });
+      const sprite = new THREE.Sprite(material);
+      sprite.name = `nebula-${index}`;
+      sprite.position.set(def.x, def.y, def.z);
+      sprite.scale.set(def.w, def.h, 1);
+      scene.add(sprite);
+      this.disposables.push(material);
+    });
   }
 
   // Muzzle world position for full-charge sparks (bodyCenter XZ +
@@ -1205,8 +1268,38 @@ export class SceneManager {
     if (wasOutside || lowBehindWall) {
       this.arena.setWallOpacity(WALL_FADE_OPACITY);
     } else {
-      this.arena.setWallOpacity(1);
+      // Glass rest state (Stage 4d.3): the walls idle at glass opacity, never
+      // opaque — the night sky stays visible through them. Fade (above) drops
+      // toward more-transparent only while the camera crowds a wall.
+      this.arena.setWallOpacity(WALL_GLASS_OPACITY);
     }
     this.camera.lookAt(this.smoothCamLook);
   }
+}
+
+// Cheap procedural nebula texture (Stage 4d.3): one shared 128px canvas with
+// a soft radial falloff (well under the 256px cap, no asset files),
+// tinted per-sprite via the SpriteMaterial color. Headless fallback mirrors
+// Balls.makeGlowTexture so vitest (node, no DOM canvas) stays green.
+function makeNebulaTexture(): THREE.Texture {
+  if (typeof document === "undefined") {
+    const pixel = new Uint8Array([255, 255, 255, 255]);
+    const fallback = new THREE.DataTexture(pixel, 1, 1);
+    fallback.needsUpdate = true;
+    return fallback;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = 128;
+  canvas.height = 128;
+  const context = canvas.getContext("2d");
+  if (context !== null) {
+    const gradient = context.createRadialGradient(64, 64, 4, 64, 64, 62);
+    gradient.addColorStop(0, "rgba(255,255,255,0.9)");
+    gradient.addColorStop(0.35, "rgba(255,255,255,0.35)");
+    gradient.addColorStop(0.7, "rgba(255,255,255,0.12)");
+    gradient.addColorStop(1, "rgba(255,255,255,0)");
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 128, 128);
+  }
+  return new THREE.CanvasTexture(canvas);
 }

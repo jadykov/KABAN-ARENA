@@ -1116,3 +1116,91 @@ describe("server movement collision (humans + bots stop/slide, never pass)", () 
     expect(after?.x ?? 99).toBeLessThanOrEqual(3.3 + 1e-6);
   });
 });
+
+// Stage 4d.3 central towers: the 4 blocks at +-4.8 double to topY 2.0
+// (mirrors client hy 1.0). Balls arcing over at y 1.0-2.0 now impact.
+describe("central towers (doubled topY intercepts mid-height shots)", () => {
+  it("doubles ONLY the central 4 obstacle tops (outer untouched)", () => {
+    expect(SERVER_OBSTACLES).toHaveLength(8);
+    const central = SERVER_OBSTACLES.filter((b) => Math.abs(b.x) === 4.8 && Math.abs(b.z) === 4.8);
+    expect(central).toHaveLength(4);
+    for (const block of central) {
+      expect(block.topY).toBe(2.0);
+      expect(block.hx).toBe(1);
+      expect(block.hz).toBe(1);
+    }
+    const outer = SERVER_OBSTACLES.filter((b) => !(Math.abs(b.x) === 4.8 && Math.abs(b.z) === 4.8));
+    expect(outer).toHaveLength(4);
+    for (const block of outer) {
+      expect(block.topY).toBe(0.8);
+    }
+    // Positions mirror the client layout exactly (Arena.getObstacleLayout).
+    expect(SERVER_OBSTACLES.map((b) => `${b.x},${b.z}`).sort()).toEqual(
+      ["4.8,4.8", "-4.8,4.8", "4.8,-4.8", "-4.8,-4.8", "10.8,0", "-10.8,0", "0,10.8", "0,-10.8"].sort(),
+    );
+  });
+
+  it("a flat full-power shot down the central lane dies on the tower (<=8 ticks)", async () => {
+    // Muzzle y is 1.4 (body 1.1 + torso 0.3): above the OLD top 1.0 (used to
+    // fly over) but below the NEW top 2.0, so the doubled tower must
+    // intercept (y ~= 1.5 at the footprint). Wall/ground impact needs ~16
+    // ticks, so death within 8 ticks pins the tower as the killer. Godmode
+    // + off-lane parking rule out victim hits; bots are removed.
+    const room = await playingRoom();
+    removeBots(room);
+    room.state.players.forEach((player: PlayerState): void => {
+      player.invulnUntil = 1e15;
+    });
+    const shooter = getPlayer(room, "s1");
+    const target = getPlayer(room, "s2");
+    if (shooter === undefined || target === undefined) {
+      throw new Error("missing fighters");
+    }
+    shooter.x = 4.8;
+    shooter.z = 0;
+    shooter.reloadUntil = 0;
+    target.x = -12;
+    target.z = -12;
+    // yaw PI fires +Z (dir = (-sin, -cos)): straight down the x=4.8 lane
+    // through the (4.8, 4.8) tower footprint.
+    fireAs(room, "s1", { power01: 1, yaw: Math.PI, pitch: 0.05, super: false });
+    expect(room.state.balls.size).toBe(1);
+    for (let i = 0; i < 8; i += 1) {
+      advance(room, 50);
+      room.tickRoom(50);
+    }
+    expect(room.state.balls.size).toBe(0);
+    expect(target.hp).toBe(100);
+    expect(shooter.hp).toBe(100);
+  });
+
+  it("the same flat shot down the x=0 lane still flies (outer cubes stay low)", async () => {
+    // Outer cube at (0, 10.8) tops out at 0.8: the 1.4m flat shot arcs over
+    // it (y ~= 1.4 at the footprint, well above 0.8) and stays live through
+    // 12 ticks — wall impact needs ~17 ticks, so survival pins the flyover.
+    const room = await playingRoom();
+    removeBots(room);
+    room.state.players.forEach((player: PlayerState): void => {
+      player.invulnUntil = 1e15;
+    });
+    const shooter = getPlayer(room, "s1");
+    const target = getPlayer(room, "s2");
+    if (shooter === undefined || target === undefined) {
+      throw new Error("missing fighters");
+    }
+    shooter.x = 0;
+    shooter.z = 0;
+    shooter.reloadUntil = 0;
+    target.x = -12;
+    target.z = -12;
+    fireAs(room, "s1", { power01: 1, yaw: Math.PI, pitch: 0.05, super: false });
+    expect(room.state.balls.size).toBe(1);
+    for (let i = 0; i < 12; i += 1) {
+      advance(room, 50);
+      room.tickRoom(50);
+    }
+    expect(room.state.balls.size).toBe(1);
+    expect(target.hp).toBe(100);
+    expect(shooter.hp).toBe(100);
+  });
+});

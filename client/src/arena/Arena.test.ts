@@ -4,11 +4,13 @@ import {
   ARENA_HALF_SIZE,
   ICE_FRICTION,
   OBSTACLE_COUNT,
+  PHYSICS_GRAVITY_Y,
   PLATFORM_CAP_DROP,
   PLATFORM_FIGURES,
   PLAYER_FRICTION,
   RAMP_SLOPE_DEG,
   SPAWN_COUNT,
+  TRAMPOLINE_IMPULSE,
 } from "../config";
 import type { PhysicsWorld } from "../physics/World";
 import {
@@ -62,14 +64,12 @@ function createRecordingPhysics(): {
   return { boxes, rotated, physics: fake as unknown as PhysicsWorld };
 }
 
-describe("arena obstacle layout (QD5-A)", () => {
-  it("has 8 low symmetric blocks", () => {
+describe("arena obstacle layout (QD5-A + 4d.3 central towers)", () => {
+  it("keeps 8 mirror-symmetric blocks with the central 4 doubled", () => {
     const specs = getObstacleLayout();
     expect(specs).toHaveLength(OBSTACLE_COUNT);
     expect(OBSTACLE_COUNT).toBe(8);
     for (const spec of specs) {
-      // Low blocks: the phone camera always sees over them.
-      expect(spec.hy * 2).toBeLessThanOrEqual(1.0);
       // Mirror-symmetric on both axes and under 180-degree rotation.
       const mirrors = [
         specs.some((o) => o.x === -spec.x && o.z === spec.z),
@@ -78,6 +78,82 @@ describe("arena obstacle layout (QD5-A)", () => {
       ];
       expect(mirrors).toEqual([true, true, true]);
     }
+    // Stage 4d.3: the 4 CENTRAL towers (at +-4.8) double to hy 1.0 (2.0m
+    // full height, topY 2.0 — mirrors server SERVER_OBSTACLES topY).
+    const central = specs.filter((s) => Math.abs(s.x) === 4.8 && Math.abs(s.z) === 4.8);
+    expect(central).toHaveLength(4);
+    for (const spec of central) {
+      expect(spec.hy).toBe(1.0);
+      expect(spec.hy * 2).toBe(2.0);
+    }
+    // The 4 OUTER blocks stay low so the phone camera sees over the lanes.
+    const outer = specs.filter((s) => !(Math.abs(s.x) === 4.8 && Math.abs(s.z) === 4.8));
+    expect(outer).toHaveLength(4);
+    for (const spec of outer) {
+      expect(spec.hy).toBe(0.4);
+      expect(spec.hy * 2).toBeLessThanOrEqual(1.0);
+    }
+  });
+
+  it("doubles ONLY the central 4 (positions/half-extents unchanged)", () => {
+    const specs = getObstacleLayout();
+    const expected = [
+      { x: 4.8, z: 4.8, hx: 1, hz: 1, hy: 1.0 },
+      { x: -4.8, z: 4.8, hx: 1, hz: 1, hy: 1.0 },
+      { x: 4.8, z: -4.8, hx: 1, hz: 1, hy: 1.0 },
+      { x: -4.8, z: -4.8, hx: 1, hz: 1, hy: 1.0 },
+      { x: 10.8, z: 0, hx: 1.5, hz: 0.75, hy: 0.4 },
+      { x: -10.8, z: 0, hx: 1.5, hz: 0.75, hy: 0.4 },
+      { x: 0, z: 10.8, hx: 0.75, hz: 1.5, hy: 0.4 },
+      { x: 0, z: -10.8, hx: 0.75, hz: 1.5, hy: 0.4 },
+    ];
+    expect(specs).toHaveLength(expected.length);
+    for (const want of expected) {
+      const match = specs.find((s) => s.x === want.x && s.z === want.z);
+      expect(match).toBeDefined();
+      expect(match?.hx).toBe(want.hx);
+      expect(match?.hz).toBe(want.hz);
+      expect(match?.hy).toBe(want.hy);
+    }
+  });
+
+  it("leaves the central towers ramp-free (trampoline-only reachability)", () => {
+    // Ramps serve ONLY the 4 platform figures (exactly one ramp side each);
+    // no ramp slab may sit on/against a central tower, or fighters could
+    // walk up instead of bouncing. Pin by horizontal clearance: every ramp
+    // center stays well clear of every central tower center (ramps hug
+    // their platforms far out, towers sit at +-4.8).
+    const towers = getObstacleLayout().filter((s) => Math.abs(s.x) === 4.8 && Math.abs(s.z) === 4.8);
+    expect(towers).toHaveLength(4);
+    const ramps = getRamps();
+    expect(ramps).toHaveLength(4);
+    for (const tower of towers) {
+      for (const ramp of ramps) {
+        expect(Math.hypot(ramp.x - tower.x, ramp.z - tower.z)).toBeGreaterThan(4);
+      }
+    }
+  });
+
+  it("a trampoline bounce clears the doubled top (ballistic proof, impulse stays 10)", () => {
+    // Ideal projectile apex above the launch point: h = v^2 / (2g). Launch
+    // body-center y is worst-case ~1.0 (resting capsule center; the trigger
+    // band fires below TRAMPOLINE_TRIGGER_Y 1.7). Standing on the 2.0m tower
+    // top needs center >= 2.0 + 1.0 (capsule half-height 0.5 + radius 0.5)
+    // = 3.0. Rapier linear damping bleeds some energy, so this test demands
+    // 0.5m of ideal margin, not just bare clearance — no impulse retune
+    // needed (TRAMPOLINE_IMPULSE stays 10, inside the QT3-A 8-12 band).
+    expect(TRAMPOLINE_IMPULSE).toBe(10);
+    expect(TRAMPOLINE_IMPULSE).toBeGreaterThanOrEqual(8);
+    expect(TRAMPOLINE_IMPULSE).toBeLessThanOrEqual(12);
+    const g = Math.abs(PHYSICS_GRAVITY_Y);
+    const apexAboveLaunch = (TRAMPOLINE_IMPULSE * TRAMPOLINE_IMPULSE) / (2 * g);
+    expect(apexAboveLaunch).toBeGreaterThan(5); // 100/19.62 ~= 5.1m.
+    const worstCaseLaunchY = 1.0;
+    const requiredCenterY = 2.0 + 1.0;
+    expect(worstCaseLaunchY + apexAboveLaunch).toBeGreaterThan(requiredCenterY + 0.5);
+    // Even the band floor (8) clears ideally: 64/19.62 ~= 3.26 + 1.0 > 3.0.
+    const floorApex = (8 * 8) / (2 * g);
+    expect(worstCaseLaunchY + floorApex).toBeGreaterThan(requiredCenterY);
   });
 
   it("places 4 distinct corner spawns inside the arena", () => {
