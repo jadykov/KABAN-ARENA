@@ -3,7 +3,6 @@ import * as THREE from "three";
 import {
   AIM_EXPO,
   AIM_PITCH_RATE,
-  AIM_STICK_DIAMETER,
   AIM_YAW_RATE,
   BALL_GRAVITY,
   CAMERA_PITCH_MAX,
@@ -33,7 +32,7 @@ import { NetworkManager, type RoomSnapshot } from "./net/NetworkManager";
 import { RemoteAvatars } from "./net/RemoteAvatars";
 import { applyAimAssist } from "./net/aimAssist";
 import { beginChargeLevel, mirrorChargeCameraPitch, pitchRateScale, shouldTrackAimFromCamera, stepChargeLevel, unmirrorChargeCameraPitch, yawRateScale, type ChargeLevel } from "./net/chargeAim";
-import { cameraYawBehindFacing, forwardnessRateScale, shouldIdleFollow, shouldIdleRecenter, stepIdleFollowPitch, stepIdleFollowYaw, stepIdleRecenterPitch, stepIdleRecenterYaw, stickAngleFromForward, tolerantCameraPitchMin, type IdleFollowGate, type IdleRecenterGate } from "./net/idleFollow";
+import { cameraYawBehindFacing, forwardnessRateScale, shouldIdleFollow, stepIdleFollowPitch, stepIdleFollowYaw, stickAngleFromForward, tolerantCameraPitchMin, type IdleFollowGate } from "./net/idleFollow";
 import {
   applyExpo,
   buildInputPayload,
@@ -49,6 +48,7 @@ import {
 import { TRAJ_DOT_COUNT, createAim, type TrajSample } from "./ui/aim";
 import { createHud } from "./ui/hud";
 import { createJoystick } from "./ui/joystick";
+import { TouchAimState, isRightHalf } from "./net/touchAim";
 import type { PowerUpKind } from "./arena/PowerUps";
 
 // Debug/playtest power-up grants: physical key positions 1/2/3 on any
@@ -99,19 +99,16 @@ async function boot(): Promise<void> {
   // welcome (hover -> follow transition).
   joystick.element.style.display = "none";
 
-  // R2 minimal charge FSM: right aim stick drives yaw/pitch, hold to charge,
-  // release to fire via sendFire. Gated by isPlaying && !spectating.
+  // R2 minimal charge FSM: FIRE button hold / Space / LMB drive yaw/pitch,
+  // hold to charge, release to fire via sendFire. Gated by isPlaying && !spectating.
   const aimOverlay = createAim(document.body);
   aimOverlay.hide();
-  let aimVector = { x: 0, y: 0 };
-  const aimStick = createJoystick(document.body, {
-    diameter: AIM_STICK_DIAMETER,
-    id: "aim-stick",
-    onMove: (vector): void => {
-      aimVector = { x: applyExpo(vector.x, AIM_EXPO), y: applyExpo(vector.y, AIM_EXPO) };
-    },
-  });
-  aimStick.element.style.display = "none";
+  // Stage 4e mobile scheme (PUBG-style): the fixed aim stick is gone.
+  // Right-half touch drag is free camera (no charge) and the FIRE button hold
+  // charges + aims; both gestures route by pointer id through one shared
+  // TouchAimState (single source of truth, unit-tested in
+  // net/touchAim.test.ts). Desktop mouse/keyboard paths below are untouched.
+  const touchState = new TouchAimState();
 
   const remotes = new RemoteAvatars(engine.scene);
 
@@ -141,11 +138,13 @@ async function boot(): Promise<void> {
   // aim, while a charge with zero ticks (background-tab rAF stall) never
   // mirrored the camera, so the plain copy is already true aim.
   let chargeMirrored = false;
-  // Floating right-thumb aim (Brawl-Stars-like one-thumb flow): pointerdown on
-  // the right half records a floating origin where the thumb landed; drag
-  // offsets map to an expo-shaped vector integrated into aimYaw/aimPitch at
-  // the shared stick rates. The fixed aim stick + FIRE button stay as
-  // fallback visuals calling the same charge FSM (never required).
+  // Floating LMB aim (PC parity): LMB hold on the canvas starts charge at the
+  // press point (floating origin, not a fixed disc); drag offset in px maps
+  // to [-1, 1] over FLOAT_DRAG_RADIUS_PX, then expo + deadzone + yaw/pitch
+  // rates. Touch never charges here — right-half touch drags are free camera
+  // (TouchAimState cam path, no charge) and the left half belongs to the move
+  // stick. Camera mirrors aim pitch while charging (aim-mirror, fix round 3)
+  // so one button hold can turn 360 degrees.
   let floatActive = false;
   let floatPointerId: number | null = null;
   let floatOriginX = 0;
@@ -163,23 +162,6 @@ async function boot(): Promise<void> {
     moveX: 0,
     moveY: 0,
   };
-  // Idle-recenter scratch + timer (post-playtest Option A): the gate object
-  // is mutated every playing frame like idleFollowGate above (no per-frame
-  // object literals); idleTimerS accumulates seconds while the stick is
-  // released with no look input and not charging, reset to 0 otherwise and
-  // on every camera-state transition (welcome / roomFull / leave / reset /
-  // teleport / respawn / spectate / charge start — see each site).
-  const idleRecenterGate: IdleRecenterGate = {
-    playing: false,
-    charging: false,
-    alive: false,
-    lookDx: 0,
-    lookDy: 0,
-    moveX: 0,
-    moveY: 0,
-    idleTimerS: 0,
-  };
-  let idleTimerS = 0;
 
   // Join overlay + FIRE button are declared early so network callbacks can
   // show/hide them (spectators see the plate, fighters see controls).
@@ -239,7 +221,6 @@ async function boot(): Promise<void> {
       // Snapshot-driven teleport/respawn below covers payloads without
       // coords (compat) and any later alive-again transitions.
       joystick.element.style.display = "";
-      aimStick.element.style.display = "";
       fireButton.style.display = "";
       const angles = sceneManager.getCameraAngles();
       // Out-of-band guard (F3 death/disconnect note): a stale mirrored
@@ -254,7 +235,6 @@ async function boot(): Promise<void> {
       aimPitch = normalized.pitch;
       isCharging = false;
       chargeLevel.active = false;
-      idleTimerS = 0;
       sceneManager.cancelShotBodyTurn();
       isReloading = false;
       reloadUntilMs = 0;
@@ -280,7 +260,6 @@ async function boot(): Promise<void> {
       isPlaying = false;
       isCharging = false;
       chargeLevel.active = false;
-      idleTimerS = 0;
       sceneManager.cancelShotBodyTurn();
       isReloading = false;
       sceneManager.setCharge01(0);
@@ -301,7 +280,6 @@ async function boot(): Promise<void> {
       isPlaying = false;
       isCharging = false;
       chargeLevel.active = false;
-      idleTimerS = 0;
       sceneManager.cancelShotBodyTurn();
       isReloading = false;
       hasSuperBuff = false;
@@ -315,7 +293,6 @@ async function boot(): Promise<void> {
       hud.setSuperBadge(false);
       sceneManager.setSpectating(true);
       joystick.element.style.display = "none";
-      aimStick.element.style.display = "none";
       fireButton.style.display = "none";
       hud.setStatus("Disconnected — press Play to rejoin");
       showJoinOverlay();
@@ -361,13 +338,11 @@ async function boot(): Promise<void> {
     if (self !== undefined && isPlaying && self.alive && !sceneManager.isSpectating()) {
       if (lastSelfAlive === false) {
         sceneManager.teleportSelf(self.x, self.z);
-        idleTimerS = 0;
       } else if (lastSelfAlive === null) {
         const local = sceneManager.getAvatarPosition();
         const gap = Math.hypot(self.x - local.x, self.z - local.z);
         if (gap > SELF_RECONCILE_SNAP_M) {
           sceneManager.teleportSelf(self.x, self.z);
-          idleTimerS = 0;
         }
       }
       lastSelfAlive = true;
@@ -485,15 +460,17 @@ async function boot(): Promise<void> {
     }
     isCharging = true;
     chargeStartMs = nowMs;
-    // A new aim takes over the camera: drop any pending idle recenter so the
-    // charge zoom path starts clean (the per-frame loop also holds the timer
-    // at 0 for the whole charge). A re-aim also cancels any pending
-    // post-shot body turn (a fresh shot re-arms it on release).
-    idleTimerS = 0;
+    // Stage 4e: a charge takes over the right half — drop any active
+    // free-camera drag so a second finger cannot swing aim mid-charge (new
+    // right-half downs stay ignored until the charge ends, see camDown).
+    touchState.clearCam();
+    // A new aim takes over the camera: the charge zoom path starts clean. A
+    // re-aim also cancels any pending post-shot body turn (a fresh shot
+    // re-arms it on release).
     chargeMirrored = false;
     sceneManager.cancelShotBodyTurn();
     // One-shot pitch leveling armed: the camera eases toward the horizon
-    // until the first aim-stick deflection takes over (per-frame below).
+    // until the first FIRE-aim deflection takes over (per-frame below).
     chargeLevel = beginChargeLevel();
     // Stage 4d.2: avatar fades from charge start until the actual shot /
     // cancel; zoom starts at default and eases per-frame below.
@@ -509,7 +486,6 @@ async function boot(): Promise<void> {
     }
     isCharging = false;
     chargeLevel.active = false;
-    idleTimerS = 0;
     sceneManager.cancelShotBodyTurn();
     sceneManager.setCharge01(0);
     // Stage 4d.2: cancel returns zoom + opacity (eased, never mid-charge).
@@ -528,10 +504,9 @@ async function boot(): Promise<void> {
     const chargeMs = nowMs - chargeStartMs;
     isCharging = false;
     chargeLevel.active = false;
-    idleTimerS = 0;
     sceneManager.setCharge01(0);
     // Stage 4d.2: the shot (or tap) returns zoom + opacity — held until here,
-    // never reset mid-charge or on aim-stick moves.
+    // never reset mid-charge or on FIRE-aim moves.
     sceneManager.setChargeZoom01(0);
     sceneManager.setChargeTranslucent(false);
     aimOverlay.setCharge01(0);
@@ -555,14 +530,17 @@ async function boot(): Promise<void> {
     if (!isSelfAlive()) {
       return;
     }
-    // Fire-time aim (shared PC + mobile path): with stick and float idle the
-    // shot goes exactly where the camera looks RIGHT NOW (release moment),
-    // never where it looked at charge-start. A deflected stick/float keeps
-    // the live integrated aimYaw/aimPitch below, so mobile aiming works.
+    // Fire-time aim (shared PC + mobile path): with FIRE, float and camera
+    // idle the shot goes exactly where the camera looks RIGHT NOW (release
+    // moment), never where it looked at charge-start. A deflected FIRE/float
+    // vector keeps the live integrated aimYaw/aimPitch below, so aiming works.
     // Light aim assist then gently pulls toward a nearby enemy in the cone.
-    const stickIdle = Math.abs(aimVector.x) < 0.05 && Math.abs(aimVector.y) < 0.05;
+    const fireVec = touchState.fireVector();
+    const camVec = touchState.camVector();
+    const fireIdle = Math.abs(fireVec.x) < 0.05 && Math.abs(fireVec.y) < 0.05;
     const floatIdle = Math.abs(floatVector.x) < 0.05 && Math.abs(floatVector.y) < 0.05;
-    if (stickIdle && floatIdle) {
+    const camIdle = Math.abs(camVec.x) < 0.05 && Math.abs(camVec.y) < 0.05;
+    if (fireIdle && floatIdle && camIdle) {
       const releaseAngles = sceneManager.getCameraAngles();
       aimYaw = releaseAngles.yaw;
       // F1: during charge the camera holds the MIRRORED pitch, so copying it
@@ -571,9 +549,9 @@ async function boot(): Promise<void> {
       // clamp to the aim band. The chargeMirrored flag covers a charge with
       // zero ticks (background-tab rAF stall): the camera was never mirrored,
       // so the plain copy is already true aim. This one site serves ALL
-      // release flows (Space keyup, FIRE/aim-stick pointerup, float LMB
-      // pointerup — the float path zeroes floatVector just before, so it
-      // always lands here) — there is no other camera->aim copy on release.
+      // release flows (Space keyup, FIRE pointerup, float LMB pointerup — the
+      // FIRE and float paths zero their vector just before, so they always
+      // land here) — there is no other camera->aim copy on release.
       const unmirrored = chargeMirrored
         ? unmirrorChargeCameraPitch(releaseAngles.pitch)
         : releaseAngles.pitch;
@@ -605,9 +583,8 @@ async function boot(): Promise<void> {
     // sent upstream every tick, so remotes learn the turn via the existing
     // pass-through, no server change). Skipped while the move stick is held:
     // movement owns yaw then (update() would cancel it next frame anyway).
-    // Camera needs no suppression: follow/recenter read getAvatarFacing()
-    // live and converge behind the shot dir as the body settles (~0.25s,
-    // before the 0.8s recenter delay elapses).
+    // Camera needs no suppression: the follow reads getAvatarFacing()
+    // live and converges behind the shot dir as the body settles (~0.25s).
     const shotMove = input.getMoveVector();
     if (shotMove.x * shotMove.x + shotMove.y * shotMove.y <= IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX) {
       sceneManager.setShotTurnTarget(assisted.yaw);
@@ -630,46 +607,88 @@ async function boot(): Promise<void> {
     reloadUntilMs = nowMs + RELOAD_MS;
   }
 
+  // Stage 4e FIRE (mobile charge + aim, PUBG-style): pointerdown captures the
+  // pointer so the same thumb sliding off the button keeps aiming (all later
+  // routing is by pointer id on window, never by target); release anywhere
+  // fires via stopCharge (tap guard inside), pointercancel discards. There is
+  // deliberately NO pointerleave handler — leaving the button must not
+  // cancel a held charge.
   const handleFirePointerDown = (event: Event): void => {
     event.preventDefault();
     startCharge();
+    // Arm FIRE tracking only for a live charge: a press during reload finds
+    // no charge and tracks nothing (same as the legacy button, which only
+    // held what startCharge accepted).
+    if (!isCharging) {
+      return;
+    }
+    const pointerId = readPointerId(event);
+    const point = readClientPoint(event);
+    if (pointerId === null || point === null) {
+      return;
+    }
+    const capturable = fireButton as unknown as { setPointerCapture?: unknown };
+    if (typeof capturable.setPointerCapture === "function") {
+      try {
+        (capturable as unknown as { setPointerCapture(id: number): void }).setPointerCapture(pointerId);
+      } catch {
+        // Pointer capture unsupported here (some stubs): the window-level
+        // move/up handlers below still route by id, so aiming and release
+        // keep working without it.
+      }
+    }
+    touchState.fireDown({ pointerId, x: point.x, y: point.y });
   };
 
-  const handleFirePointerUp = (): void => {
+  // Window-level FIRE gesture: id-keyed, target-free (capture retargets moves
+  // to the button and they bubble here; without capture the finger's own
+  // element bubbles here) — slide-off keeps aiming, release anywhere fires.
+  const handleFirePointerMove = (event: Event): void => {
+    const pointerId = readPointerId(event);
+    if (pointerId === null || !touchState.isFirePointer(pointerId)) {
+      return;
+    }
+    const point = readClientPoint(event);
+    if (point === null) {
+      return;
+    }
+    event.preventDefault();
+    touchState.fireMove({ pointerId, x: point.x, y: point.y });
+  };
+
+  const handleFirePointerUp = (event: Event): void => {
+    if (!touchState.isFireActive()) {
+      return;
+    }
+    const pointerId = readPointerId(event);
+    if (pointerId !== null && !touchState.isFirePointer(pointerId)) {
+      return;
+    }
+    // The router zeroes the FIRE vector first, so the release resolves from
+    // the mirrored camera exactly like the legacy zero-before-stop ordering.
+    touchState.fireUp(pointerId);
     stopCharge();
   };
 
-  const handleFirePointerCancel = (): void => {
-    cancelCharge();
-  };
-
-  const handleAimPointerDown = (): void => {
-    startCharge();
-  };
-
-  const handleAimPointerUp = (): void => {
-    stopCharge();
-  };
-
-  const handleAimPointerCancel = (): void => {
+  const handleFirePointerCancel = (event: Event): void => {
+    if (!touchState.isFireActive()) {
+      return;
+    }
+    const pointerId = readPointerId(event);
+    if (pointerId !== null && !touchState.isFirePointer(pointerId)) {
+      return;
+    }
+    touchState.fireCancel(pointerId);
     cancelCharge();
   };
 
   fireButton.addEventListener("pointerdown", handleFirePointerDown);
-  fireButton.addEventListener("pointerup", handleFirePointerUp);
-  fireButton.addEventListener("pointercancel", handleFirePointerCancel);
-  fireButton.addEventListener("pointerleave", handleFirePointerCancel);
-  aimStick.element.addEventListener("pointerdown", handleAimPointerDown);
-  aimStick.element.addEventListener("pointerup", handleAimPointerUp);
-  aimStick.element.addEventListener("pointercancel", handleAimPointerCancel);
 
-  // Floating right-half aim zone (touch) + LMB hold (PC): ONE gesture =
-  // press-hold (charge + preview) + drag (aim + camera follow) + release
-  // (fire). Touch: pointerdown on the right half with a floating origin.
-  // PC: LMB down on the canvas starts charge; RMB free-look is kept only
-  // while NOT charging (tick zeroes look deltas during charge). The fixed
-  // stick/FIRE listeners above stay as fallback calling the same FSM.
-  // Strict TS: DOM payloads read through guarded local readers (no `any`).
+  // Floating LMB aim (PC parity): LMB hold on the canvas charges + previews +
+  // aims, release fires. Touch never charges here — right-half touch is free
+  // camera (cam path below), the left half belongs to the move stick. RMB
+  // free-look is kept only while NOT charging (tick zeroes look deltas during
+  // charge). Strict TS: DOM payloads read through guarded local readers.
   function readPointerId(event: Event): number | null {
     const value = (event as unknown as { pointerId?: unknown }).pointerId;
     return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -701,7 +720,7 @@ async function boot(): Promise<void> {
     if (target instanceof HTMLInputElement || target instanceof HTMLButtonElement) {
       return true;
     }
-    return target.closest("#join-overlay,#joystick,#aim-stick,#fire-button") !== null;
+    return target.closest("#join-overlay,#joystick,#fire-button") !== null;
   }
 
   function overlayOpen(): boolean {
@@ -729,29 +748,25 @@ async function boot(): Promise<void> {
       return;
     }
     if (kind.type === "touch") {
-      // Right half only — the left half belongs to the move stick.
-      if (point.x < window.innerWidth / 2) {
-        return;
-      }
-      if (floatActive) {
-        return;
-      }
-    } else {
-      // PC parity via the same path: LMB on the canvas starts charge.
-      // Guard typing/join overlay; RMB stays free-look (InputController).
-      if (kind.button !== 0) {
-        return;
-      }
-      if (overlayOpen()) {
-        return;
-      }
-      if (!(target instanceof HTMLElement) || target !== engine.renderer.domElement) {
-        // Canvas-only so HUD/DOM clicks never charge.
-        return;
-      }
-      if (floatActive) {
-        return;
-      }
+      // Stage 4e: touch never charges here — right-half touch drags are free
+      // camera (cam path below, no charge) and the left half belongs to the
+      // move stick.
+      return;
+    }
+    // PC parity via the same path: LMB on the canvas starts charge.
+    // Guard typing/join overlay; RMB stays free-look (InputController).
+    if (kind.button !== 0) {
+      return;
+    }
+    if (overlayOpen()) {
+      return;
+    }
+    if (!(target instanceof HTMLElement) || target !== engine.renderer.domElement) {
+      // Canvas-only so HUD/DOM clicks never charge.
+      return;
+    }
+    if (floatActive) {
+      return;
     }
     floatActive = true;
     floatPointerId = pointerId;
@@ -813,10 +828,94 @@ async function boot(): Promise<void> {
     cancelCharge();
   };
 
+  // Stage 4e free camera (touch-only, NO charge): touch-drag anywhere on the
+  // RIGHT half (outside HUD buttons) rotates aimYaw/aimPitch at full rate and
+  // the per-frame block below syncs the camera from aim (camera == aim while
+  // idle, so no separate camera state). While charging, new downs are ignored
+  // and any active drag was already dropped by startCharge — a second finger
+  // never swings aim. touch-action:none lives on the canvas; preventDefault
+  // here stops the browser from scrolling/zooming on the widened touch path.
+  const handleCamPointerDown = (event: Event): void => {
+    if (!isPlaying || sceneManager.isSpectating()) {
+      return;
+    }
+    if (isTypingTarget(event)) {
+      return;
+    }
+    const target = (event as unknown as { target?: unknown }).target as EventTarget | null;
+    if (targetOnGameUi(target)) {
+      return;
+    }
+    if (overlayOpen() && target instanceof HTMLElement && target.closest("#join-overlay") !== null) {
+      return;
+    }
+    const pointerId = readPointerId(event);
+    const point = readClientPoint(event);
+    const kind = readPointerKind(event);
+    if (pointerId === null || point === null) {
+      return;
+    }
+    // Touch only: mouse uses LMB-charge parity (float path above) and RMB
+    // free look (InputController).
+    if (kind.type !== "touch") {
+      return;
+    }
+    // Right half only — the left half belongs to the move stick.
+    if (!isRightHalf(point.x, window.innerWidth)) {
+      return;
+    }
+    event.preventDefault();
+    touchState.camDown({ pointerId, x: point.x, y: point.y }, isCharging);
+  };
+
+  const handleCamPointerMove = (event: Event): void => {
+    const pointerId = readPointerId(event);
+    if (pointerId === null || !touchState.isCamPointer(pointerId)) {
+      return;
+    }
+    const point = readClientPoint(event);
+    if (point === null) {
+      return;
+    }
+    event.preventDefault();
+    touchState.camMove({ pointerId, x: point.x, y: point.y });
+  };
+
+  const handleCamPointerUp = (event: Event): void => {
+    if (!touchState.isCamActive()) {
+      return;
+    }
+    const pointerId = readPointerId(event);
+    if (pointerId !== null && !touchState.isCamPointer(pointerId)) {
+      return;
+    }
+    // Finger lifted: no charge calls and no automatic catch-up — the camera
+    // holds until the player moves (follow) or looks again.
+    touchState.camUp(pointerId);
+  };
+
+  const handleCamPointerCancel = (event: Event): void => {
+    if (!touchState.isCamActive()) {
+      return;
+    }
+    const pointerId = readPointerId(event);
+    if (pointerId !== null && !touchState.isCamPointer(pointerId)) {
+      return;
+    }
+    touchState.camCancel(pointerId);
+  };
+
   window.addEventListener("pointerdown", handleFloatPointerDown);
+  window.addEventListener("pointerdown", handleCamPointerDown);
   window.addEventListener("pointermove", handleFloatPointerMove);
+  window.addEventListener("pointermove", handleFirePointerMove);
+  window.addEventListener("pointermove", handleCamPointerMove);
   window.addEventListener("pointerup", handleFloatPointerUp);
+  window.addEventListener("pointerup", handleFirePointerUp);
+  window.addEventListener("pointerup", handleCamPointerUp);
   window.addEventListener("pointercancel", handleFloatPointerCancel);
+  window.addEventListener("pointercancel", handleFirePointerCancel);
+  window.addEventListener("pointercancel", handleCamPointerCancel);
 
   // Async Rapier WASM boot. The scene stays playable on the legacy
   // kinematic path when physics fails — never a fatal error.
@@ -874,11 +973,10 @@ async function boot(): Promise<void> {
       input.reset();
       isCharging = false;
       chargeLevel.active = false;
-      idleTimerS = 0;
       sceneManager.cancelShotBodyTurn();
       isReloading = false;
       reloadUntilMs = 0;
-      aimVector = { x: 0, y: 0 };
+      touchState.reset();
       floatActive = false;
       floatPointerId = null;
       floatVector = { x: 0, y: 0 };
@@ -908,20 +1006,20 @@ async function boot(): Promise<void> {
     window.removeEventListener("keydown", handleKeyDown);
     window.removeEventListener("keyup", handleKeyUp);
     window.removeEventListener("pointerdown", handleFloatPointerDown);
+    window.removeEventListener("pointerdown", handleCamPointerDown);
     window.removeEventListener("pointermove", handleFloatPointerMove);
+    window.removeEventListener("pointermove", handleFirePointerMove);
+    window.removeEventListener("pointermove", handleCamPointerMove);
     window.removeEventListener("pointerup", handleFloatPointerUp);
+    window.removeEventListener("pointerup", handleFirePointerUp);
+    window.removeEventListener("pointerup", handleCamPointerUp);
     window.removeEventListener("pointercancel", handleFloatPointerCancel);
+    window.removeEventListener("pointercancel", handleFirePointerCancel);
+    window.removeEventListener("pointercancel", handleCamPointerCancel);
     playButton.removeEventListener("click", handlePlay);
     fireButton.removeEventListener("pointerdown", handleFirePointerDown);
-    fireButton.removeEventListener("pointerup", handleFirePointerUp);
-    fireButton.removeEventListener("pointercancel", handleFirePointerCancel);
-    fireButton.removeEventListener("pointerleave", handleFirePointerCancel);
-    aimStick.element.removeEventListener("pointerdown", handleAimPointerDown);
-    aimStick.element.removeEventListener("pointerup", handleAimPointerUp);
-    aimStick.element.removeEventListener("pointercancel", handleAimPointerCancel);
     void net.disconnect();
     joystick.destroy();
-    aimStick.destroy();
     aimOverlay.dispose();
     hud.dispose();
     input.dispose();
@@ -994,30 +1092,49 @@ async function boot(): Promise<void> {
     // free-look applies only when NOT charging.
     const look = playing ? (isCharging ? { dx: 0, dy: 0 } : rawLook) : { dx: 0, dy: 0 };
     // R2 aim + charge + reload tick (fighters only, spectators gated out).
-    // Aim rule: a deflected stick/float integrates yaw/pitch at the shared
-    // rate (mobile aiming, also while charging); an idle stick AND idle float
-    // tracks the live camera every frame — but ONLY when not charging
-    // (shouldTrackAimFromCamera: during charge the camera is the mirrored
-    // derived value, so copying it back would sign-flip the aim every frame).
+    // Aim rule: a deflected FIRE/float vector integrates yaw/pitch at the
+    // shared rate (aiming, also while charging); idle FIRE AND idle float AND
+    // idle camera track the live camera every frame — but ONLY when not
+    // charging (shouldTrackAimFromCamera: during charge the camera is the
+    // mirrored derived value, so copying it back would sign-flip the aim).
     // While charging the camera takes the aim yaw and the MIRRORED aim pitch
     // each frame (360-degree one thumb turn, aim-up drops the camera to look
     // up the arc — see mirrorChargeCameraPitch). Charge only drives power
     // (charge01), never direction.
     // Charge leveling: at aim start the pitch eases ONCE toward the horizon
-    // (interrupted by any aim deflection); while charging both stick rates
+    // (interrupted by any aim deflection); while charging both aim rates
     // run damped (calmer aiming, full down-aim range kept).
     if (playing) {
       const pitchScale = pitchRateScale(isCharging);
       const yawScale = yawRateScale(isCharging);
-      if (Math.hypot(aimVector.x, aimVector.y) >= FLOAT_DEADZONE) {
-        aimYaw -= aimVector.x * AIM_YAW_RATE * yawScale * deltaSeconds;
-        const nextPitch = aimPitch + aimVector.y * AIM_PITCH_RATE * pitchScale * deltaSeconds;
+      // Live vector references (mutated in place by the pointer handlers,
+      // never replaced): reading them here allocates nothing per frame.
+      const fireVector = touchState.fireVector();
+      const camVector = touchState.camVector();
+      if (Math.hypot(fireVector.x, fireVector.y) >= FLOAT_DEADZONE) {
+        aimYaw -= fireVector.x * AIM_YAW_RATE * yawScale * deltaSeconds;
+        const nextPitch = aimPitch + fireVector.y * AIM_PITCH_RATE * pitchScale * deltaSeconds;
         aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextPitch));
       }
       if (Math.hypot(floatVector.x, floatVector.y) >= FLOAT_DEADZONE) {
         aimYaw -= floatVector.x * AIM_YAW_RATE * yawScale * deltaSeconds;
         const nextFloatPitch = aimPitch + floatVector.y * AIM_PITCH_RATE * pitchScale * deltaSeconds;
         aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextFloatPitch));
+      }
+      // Stage 4e touch free camera (no charge): the right-half drag vector
+      // integrates into aimYaw/aimPitch with the SAME expo/deadzone/rates as
+      // the paths above — pitchRateScale/yawRateScale return 1 when not
+      // charging, so this is full-rate. The camera then takes aim directly
+      // (default band): camera == aim while idle, so this rotates the view
+      // with zero new state. Suppressed while charging (charge start drops
+      // the drag, new downs are ignored) so a second finger never swings aim.
+      if (!isCharging) {
+        if (Math.hypot(camVector.x, camVector.y) >= FLOAT_DEADZONE) {
+          aimYaw -= camVector.x * AIM_YAW_RATE * yawScale * deltaSeconds;
+          const nextCamPitch = aimPitch + camVector.y * AIM_PITCH_RATE * pitchScale * deltaSeconds;
+          aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextCamPitch));
+          sceneManager.setCameraAngles(aimYaw, aimPitch);
+        }
       }
       // Idle soft-follow (Stage 4d.2-fix2): not charging, no explicit look
       // input, avatar moving with the stick predominantly forward → ease the
@@ -1028,26 +1145,29 @@ async function boot(): Promise<void> {
       // updateCameraTransform while the avatar faces (sin r, cos r) per
       // the movement yaw, so behind requires c = r + PI — raw facing as a
       // target would sit exactly PI away and orbit ~1.3 rev/s). The
-      // forwardness gate (|phi| <= IDLE_FOLLOW_MAX_STICK_ANGLE inside
+      // forwardness gate (|phi| <= IDLE_FOLLOW_MAX_STICK_ANGLE = PI/2 inside
       // shouldIdleFollow) is the orbit invariant: per frame facing is
-      // recomputed as r = c + PI - phi, so only near-forward inputs run the
-      // follow (|delta| <= phi, gentle straightening) while backpedal/strafe
-      // leave the camera untouched. Post-playtest Option A: the gate is
-      // 0.8 rad so W+A / W+D diagonals follow, and the yaw rate is softened
-      // by forwardnessRateScale(phi) = cos(phi) at the call site (edge
-      // drift <= RATE * 0.8 * cos(0.8) ~= 1.4 rad/s; pure forward
-      // unchanged). Pitch levels at the full rate. Gated
+      // recomputed as r = c + PI - phi, so only forward-through-sideways
+      // inputs run the follow (|delta| <= phi <= PI/2, gentle straightening)
+      // while backward-leaning inputs leave the camera untouched. The yaw rate
+      // is softened by forwardnessRateScale(phi) = cos(phi) at the call site
+      // (1.0 pure forward, ~0 at pure sideways; interior peak phi*cos(phi)
+      // ~= 0.56 keeps drift <= RATE * 0.56 ~= 1.4 rad/s). Pitch levels at the
+      // full rate. Gated
       // on rawLook == 0 so an RMB drag always wins; dead/spectating never
       // reach here (playing folds in !spectating, alive folds in the last
       // self snapshot). Runs before the idle-track copy below so aim
       // re-syncs to the followed camera in the same frame. Scalar math,
       // no per-frame allocations beyond the existing getCameraAngles shape
-      // (gate runs through the reused idleFollowGate scratch above).
+      // (gate runs through the reused idleFollowGate scratch above). Stage 4e:
+      // an active free-camera drag counts as look input (same as an RMB drag)
+      // so the follow never fights the finger.
+      const camLook = touchState.isCamActive() ? 1 : 0;
       idleFollowGate.playing = playing;
       idleFollowGate.charging = isCharging;
       idleFollowGate.alive = lastSelfAlive !== false;
-      idleFollowGate.lookDx = rawLook.dx;
-      idleFollowGate.lookDy = rawLook.dy;
+      idleFollowGate.lookDx = rawLook.dx + camLook;
+      idleFollowGate.lookDy = rawLook.dy + camLook;
       idleFollowGate.moveX = move.x;
       idleFollowGate.moveY = move.y;
       if (shouldIdleFollow(idleFollowGate)) {
@@ -1068,88 +1188,28 @@ async function boot(): Promise<void> {
           CAMERA_PITCH_MAX,
         );
       }
-      // Idle recenter (post-playtest Option A, creep-band fix): the stick truly
-      // released (|move| <= IDLE_RECENTER_MOVE_MAX = 0.01, the shared
-      // facing-freeze threshold), no look input, not charging — after
-      // IDLE_RECENTER_DELAY_S ease the camera toward behind the static last
-      // facing (true fixed point: facing does not move while released, so
-      // this converges instead of orbiting) and level the pitch, at
-      // IDLE_RECENTER_RATE_S via the recenter wrappers. The creep band
-      // (0.01, 0.1) is a dead zone by construction: follow needs mag >=
-      // IDLE_FOLLOW_MOVE_MIN (0.1), recenter needs lengthSq <= MAX*MAX, so a
-      // creep-held stick moves NEITHER path.
-      // through the clamped setCameraAngles setter. The timer accumulates
-      // here (scalar, no alloc): any stick lengthSq above MAX*MAX (creep
-      // input included), any look delta, charging, dead, or !playing resets
-      // it to 0 AND fails the gate below, so touching stick/look
-      // mid-recenter cancels immediately with no easing that frame, and a
-      // creep-held stick never accumulates toward the delay. Charge zoom
-      // path untouched (recenter only runs when !charging; startCharge
-      // already zeroed the timer).
-      // Static-facing premise, mirrored from SceneManager.update: facing is
-      // recomputed from camera-relative worldMove whenever its lengthSq tops
-      // IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX, so the timer must
-      // use the SAME product (not IDLE_FOLLOW_MOVE_MIN) or creep input would
-      // accumulate delay while the facing keeps moving underneath.
-      const idleMoveLenSq = move.x * move.x + move.y * move.y;
-      const idleReleaseLenSq = IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX;
-      if (
-        !playing ||
-        isCharging ||
-        lastSelfAlive === false ||
-        rawLook.dx !== 0 ||
-        rawLook.dy !== 0 ||
-        idleMoveLenSq > idleReleaseLenSq
-      ) {
-        idleTimerS = 0;
-      } else {
-        idleTimerS += deltaSeconds;
-      }
-      idleRecenterGate.playing = playing;
-      idleRecenterGate.charging = isCharging;
-      idleRecenterGate.alive = lastSelfAlive !== false;
-      idleRecenterGate.lookDx = rawLook.dx;
-      idleRecenterGate.lookDy = rawLook.dy;
-      idleRecenterGate.moveX = move.x;
-      idleRecenterGate.moveY = move.y;
-      idleRecenterGate.idleTimerS = idleTimerS;
-      if (shouldIdleRecenter(idleRecenterGate)) {
-        const settled = sceneManager.getCameraAngles();
-        sceneManager.setCameraAngles(
-          stepIdleRecenterYaw(
-            settled.yaw,
-            cameraYawBehindFacing(sceneManager.getAvatarFacing()),
-            deltaSeconds,
-          ),
-          stepIdleRecenterPitch(settled.pitch, deltaSeconds),
-          // F3: tolerate a stale mirrored post-shot pitch until it eases
-          // back into the default band (no one-frame snap).
-          tolerantCameraPitchMin(settled.pitch),
-          CAMERA_PITCH_MAX,
-        );
-      }
       // Idle aim-track (F2 fix): skipped entirely while charging — the
       // camera holds the mirrored pitch then, and copying it back would
       // sign-flip aimPitch every frame (30Hz oscillation with the mirror
       // write below). Aim is the source of truth during charge; this copy
-      // only follows non-charge camera moves (RMB free-look).
-      if (
-        shouldTrackAimFromCamera(
-          isCharging,
-          Math.abs(aimVector.x) < 0.05 && Math.abs(aimVector.y) < 0.05,
-          Math.abs(floatVector.x) < 0.05 && Math.abs(floatVector.y) < 0.05,
-        )
-      ) {
+      // only follows non-charge camera moves (RMB free-look). Stage 4e: an
+      // active free-camera drag counts as look (floatIdle=false semantics —
+      // the drag already integrated aim above, so the copy must not run).
+      const fireIdle = Math.abs(fireVector.x) < 0.05 && Math.abs(fireVector.y) < 0.05;
+      const floatIdle = Math.abs(floatVector.x) < 0.05 && Math.abs(floatVector.y) < 0.05;
+      const camIdle = Math.abs(camVector.x) < 0.05 && Math.abs(camVector.y) < 0.05;
+      if (shouldTrackAimFromCamera(isCharging, fireIdle, floatIdle && camIdle)) {
         const cam = sceneManager.getCameraAngles();
         aimYaw = cam.yaw;
         aimPitch = cam.pitch;
       }
       if (isCharging) {
         // One-shot level: no input → ease toward horizon; any deflection
-        // hands control back to the stick instantly (damped rate above).
+        // hands control back to the aim instantly (damped rate above).
         const deflected =
-          Math.hypot(aimVector.x, aimVector.y) >= FLOAT_DEADZONE ||
-          Math.hypot(floatVector.x, floatVector.y) >= FLOAT_DEADZONE;
+          Math.hypot(fireVector.x, fireVector.y) >= FLOAT_DEADZONE ||
+          Math.hypot(floatVector.x, floatVector.y) >= FLOAT_DEADZONE ||
+          Math.hypot(camVector.x, camVector.y) >= FLOAT_DEADZONE;
         aimPitch = stepChargeLevel(chargeLevel, aimPitch, deflected, deltaSeconds);
         // Aim-mirror camera while charging (fix round 3): yaw follows aim
         // directly, pitch takes the negated aim pitch in the symmetric
@@ -1174,7 +1234,7 @@ async function boot(): Promise<void> {
         const charge01 = Math.max(0, Math.min(1, (nowMs - chargeStartMs) / (CHARGE_MAX_S * 1000)));
         sceneManager.setCharge01(charge01);
         // Stage 4d.2: zoom follows charge01 every frame (eased in the scene),
-        // held until stopCharge/cancelCharge — aim-stick moves never reset it.
+        // held until stopCharge/cancelCharge — FIRE-aim moves never reset it.
         sceneManager.setChargeZoom01(charge01);
         aimOverlay.setCharge01(charge01);
       }

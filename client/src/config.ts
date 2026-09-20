@@ -303,9 +303,10 @@ export const TAP_FIRE_MIN_S = 0.08;
 // preview origin and authoritative spawn must stay identical). 0.7m along
 // the aim dir from the body center — just in front of the 0.5m capsule.
 export const BALL_MUZZLE_OFFSET = 0.7;
-// Aim sticks: right side big zone (~160px) for yaw/pitch, left enlarged
-// (~140px) with expo response so small drifts stay precise.
-export const AIM_STICK_DIAMETER = 160;
+// Stage 4e mobile scheme (PUBG-style): no fixed aim stick — the FIRE button
+// hold charges + aims and right-half touch drags rotate the camera, both
+// shaped by AIM_EXPO below. The left stick stays enlarged (~140px) with expo
+// response so small drifts stay precise.
 export const MOVE_STICK_DIAMETER = 140;
 export const AIM_EXPO = 1.4;
 export const AIM_YAW_RATE = 2.4;
@@ -322,7 +323,7 @@ export const FLOAT_DEADZONE = 0.05;
 // the horizon/view direction, then free aim; vertical wander while aiming is
 // slightly damped, but aiming down from elevation stays fully possible).
 // One-shot exp ease toward pitch 0 at charge start (cancelled instantly by
-// any aim-stick/float deflection); afterwards vertical stick rate scales by
+// any FIRE/float/camera deflection); afterwards vertical stick rate scales by
 // AIM_PITCH_DAMP while charging only (normal look untouched, range untouched).
 export const CHARGE_PITCH_EASE_RATE = 3.5;
 export const CHARGE_PITCH_EASE_DONE = 0.01;
@@ -341,66 +342,46 @@ export const AIM_YAW_DAMP = 0.6;
 // allocations (scalar math only). Any look delta that frame wins outright.
 export const IDLE_FOLLOW_RATE = 2.5;
 // Post-playtest fix round 3 (owner: resting view too top-down): idle
-// follow/recenter pitch target 0.05 rad (~2.9 deg above horizon) — ~0.1 rad
+// follow pitch target 0.05 rad (~2.9 deg above horizon) — ~0.1 rad
 // (~6 deg) closer to the horizon than the old 0.15, matching the lowered
-// CAMERA_REST_PITCH above (recenter eases back to near-horizon after a shot,
-// so the two rest levels stay consistent). Stays above CAMERA_PITCH_MIN
+// CAMERA_REST_PITCH above. Stays above CAMERA_PITCH_MIN
 // (-0.15): 0.05 > -0.15, so the shared clamp never fights the target.
 export const IDLE_FOLLOW_PITCH = 0.05;
 export const IDLE_FOLLOW_MOVE_MIN = 0.1;
-// Idle-follow stick-forwardness gate (review round-2 FAIL #1): the follow may
-// run only while the move stick points predominantly forward, i.e. the stick
-// angle from forward phi = atan2(moveX, moveY) satisfies |phi| <= this.
+// Idle-follow stick-direction gate (review round-2 FAIL #1, widened per owner
+// to the maximum safe limit): the follow may run only while the stick angle
+// from forward phi = atan2(moveX, moveY) satisfies |phi| <= this = PI/2, i.e.
+// straight-ahead through diagonals to pure sideways (strafe). Anything
+// leaning backward (> PI/2, backpedal included) never moves the camera.
 // Rationale: per frame the SceneManager recomputes facing from the
 // just-followed camera yaw as r = c + PI - phi, so with target c + PI the
-// per-frame delta is permanently -phi for ANY held off-forward input
-// (backpedal phi=PI: +/-PI orbit; strafe: 3.85 rad/s). Gating on
-// forwardness leaves only near-forward inputs, where |delta| = |phi| <= the
-// gate, so the camera gently straightens behind a slightly-angled run and
-// backpedal/strafe produce ZERO camera motion. Post-playtest Option A:
-// 0.4 -> 0.8 rad (~45.8 deg) so W+A / W+D diagonals (45 deg) follow too;
-// strafe (90 deg) and backpedal stay outside. The sustained drift at the
-// gate edge is softened by forwardnessRateScale = cos(phi) (1.0 pure
-// forward, ~0.70 at the edge), so edge drift <= RATE * 0.8 * cos(0.8)
-// ~= 1.4 rad/s; pure forward unchanged. Wrap noise stays structurally
-// unreachable (|delta| <= 0.8 < PI). See net/idleFollow.ts.
-export const IDLE_FOLLOW_MAX_STICK_ANGLE = 0.8;
-// Idle recenter stick-release threshold (review FAIL fix: creep-band orbit).
-// The recenter may run ONLY when the avatar facing is static, i.e. when
-// SceneManager.update skips its facing recompute. That skip happens when
-// worldMove.lengthSq() <= 0.0001; for stick mags < 1 |worldMove| == |move|
-// (camera-relative basis is orthonormal, normalization only clamps mags > 1),
-// so the facing-freeze boundary in stick space is |move| <= 0.01 == this
-// constant (squared: 0.01 * 0.01 == the 0.0001 lengthSq threshold, up to 1ulp).
-// This ONE constant is the shared source of truth: SceneManager compares
-// lengthSq() > IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX and the
-// recenter gate + idle timer in net/idleFollow.ts / main.ts compare the
-// stick lengthSq against the same product, so the two can never drift apart.
-// Consequence: the stick band (IDLE_RECENTER_MOVE_MAX, IDLE_FOLLOW_MOVE_MIN)
-// = (0.01, 0.1) is a deliberate dead zone — follow needs mag >= 0.1,
-// recenter needs mag <= 0.01, so a creep-held stick moves NEITHER path.
+// per-frame delta is permanently -phi for ANY held off-forward input. With
+// the gate at PI/2 the in-gate |delta| = |phi| <= PI/2 < PI, so the
+// shortest-arc wrap sign can never flip mid-follow — the eternal-spin orbit
+// class is structurally unreachable while moving; out-of-gate inputs produce
+// exactly ZERO camera motion. The sustained in-gate drift is softened by
+// forwardnessRateScale = cos(phi) (1.0 pure forward, ~0 at pure sideways),
+// so sideways holds barely crawl while diagonals follow firmly; the interior
+// peak phi*cos(phi) ~= 0.56 at phi ~= 0.86 keeps drift <= RATE * 0.56
+// ~= 1.4 rad/s. See net/idleFollow.ts.
+export const IDLE_FOLLOW_MAX_STICK_ANGLE = Math.PI / 2;
+// Shared stick-rest threshold (was the idle-recenter release threshold; the
+// recenter gate it was named for is removed — no time-based camera catch-up
+// anymore by owner decision). Kept under its long-standing name as the ONE
+// source of truth for "the stick is effectively released": SceneManager
+// compares worldMove.lengthSq() > IDLE_RECENTER_MOVE_MAX *
+// IDLE_RECENTER_MOVE_MAX to freeze facing (for stick mags < 1 |worldMove| ==
+// |move|, so facing is static at/below 0.01), and main.ts arms the post-shot
+// body turn only at/below the same product. The two can never drift apart.
 export const IDLE_RECENTER_MOVE_MAX = 0.01;
-// Idle recenter after the stick is released (Option A, post-playtest): with
-// the stick at rest (|move| <= IDLE_RECENTER_MOVE_MAX, the shared
-// facing-freeze threshold above — the only band where the avatar facing is
-// static), no look input, not
-// charging, playing, alive — main.ts accumulates idleTimerS per frame (reset
-// to 0 on any stick/look input, on charge start, and on camera-state
-// transitions: welcome / roomFull / leave / reset / teleport / respawn /
-// spectate). Past IDLE_RECENTER_DELAY_S the camera eases toward behind the
-// static last facing at IDLE_RECENTER_RATE_S — a true fixed point (facing
-// does not move while released), so it converges cleanly instead of
-// orbiting. Touching stick/look cancels immediately (no easing that frame).
-export const IDLE_RECENTER_DELAY_S = 0.8;
-export const IDLE_RECENTER_RATE_S = 3.0;
 // Post-shot body turn (owner fix round 2): after a REAL shot the avatar body
 // turns to face the shot direction (it used to stay frozen at the stale run
 // direction, and the camera then re-aligned behind that stale facing — a
 // jarring 180-degree swing). The turn eases avatar.rotation.y toward the
 // shot facing at this exp rate (1/s): rate 12 settles a full PI flip to
-// ~5% residual in ~0.25s (exp(-12*0.25) ~= 0.05), well inside the 0.8s idle
-// recenter delay — so follow/recenter targets, which read the live facing,
-// converge behind the shot direction naturally with no camera suppression.
+// ~5% residual in ~0.25s (exp(-12*0.25) ~= 0.05), so the follow target,
+// which reads the live facing, converges behind the shot direction naturally
+// with no camera suppression.
 // Movement input cancels the turn (the movement writer owns yaw then).
 export const SHOT_BODY_TURN_RATE_S = 12;
 // Post-shot turn completion band (radians): below this wrapped gap the body

@@ -10,7 +10,7 @@ import {
 // start, then free aim). Pure state + math so it stays unit-testable; the
 // per-frame wiring lives in main.ts. No allocations, scalar only.
 
-// One-shot ease state: armed by startCharge, cleared by the first aim-stick
+// One-shot ease state: armed by startCharge, cleared by the first aim
 // deflection, by convergence, or by any charge exit (shot/cancel/reset).
 export interface ChargeLevel {
   active: boolean;
@@ -50,7 +50,7 @@ export function yawRateScale(isCharging: boolean): number {
 // widest mirror (charge zoom d = 3.2m, avatar.y ~= 1.1): camera y =
 // avatar.y + 2.1 + sin(-0.36)*3.2 ~= avatar.y + 0.97 ~= 2.07 — above ground.
 // After the shot the mirrored camera pitch (down to -CAMERA_PITCH_MAX)
-// survives on the camera: the next idle recenter / idle follow eases it back
+// survives on the camera: the next idle follow (while moving) eases it back
 // toward IDLE_FOLLOW_PITCH through the widened-band override
 // (tolerantCameraPitchMin in idleFollow.ts — the default-band clamp would
 // snap -0.36 to CAMERA_PITCH_MIN in a single frame), and RMB drags tolerate

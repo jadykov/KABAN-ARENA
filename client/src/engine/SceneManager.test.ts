@@ -274,7 +274,7 @@ describe("SceneManager pitch clamp (post-playtest round 2: max 0.36)", () => {
   });
 });
 
-describe("SceneManager resting pitch (fix round 3: 0.15, recenter 0.05)", () => {
+describe("SceneManager resting pitch (fix round 3: 0.15 resting, 0.05 follow pitch)", () => {
   it("pins the resting constants above MIN", () => {
     expect(CAMERA_REST_PITCH).toBeCloseTo(0.15, 12);
     expect(IDLE_FOLLOW_PITCH).toBeCloseTo(0.05, 12);

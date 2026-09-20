@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   CAMERA_PITCH_MAX,
   CAMERA_PITCH_MIN,
-  IDLE_RECENTER_DELAY_S,
   SHOT_BODY_TURN_DONE_RAD,
   SHOT_BODY_TURN_RATE_S,
 } from "../config";
@@ -11,11 +10,9 @@ import {
   bodyFacingForShotYaw,
   cameraYawBehindFacing,
   isShotBodyTurnDone,
-  shouldIdleRecenter,
+  shouldIdleFollow,
   stepIdleFollowYaw,
-  stepIdleRecenterYaw,
   stepShotBodyTurnYaw,
-  type IdleRecenterGate,
 } from "./idleFollow";
 import { buildFirePayload, directionFromYawPitch } from "./protocol";
 
@@ -94,8 +91,8 @@ describe("post-shot body turn easing", () => {
       previous = gap;
     }
     expect(previous).toBeLessThan(0.12);
-    // Keeps converging to ~0 given more frames (well before the 0.8s
-    // recenter delay elapses).
+    // Keeps converging to ~0 given more frames (fast enough that any follow
+    // target reading the live facing sees a settled body).
     for (let i = 0; i < 60; i += 1) {
       current = stepShotBodyTurnYaw(current, target, FRAME);
     }
@@ -135,19 +132,18 @@ describe("post-shot body turn easing", () => {
 describe("no-swing owner scenario (run -> charge -> 180 aim flip -> fire -> release)", () => {
   // Honest per-frame model of the shipped loop: the body eases toward the
   // shot facing (SceneManager.update turn branch, stick released) while the
-  // camera recenter gate reads the LIVE facing every frame (main.ts), with
-  // the real idleTimerS accumulation and the real shouldIdleRecenter gate.
+  // released stick keeps the follow gate shut (mag 0 < MIN) — with no
+  // recenter left, nothing moves the camera on its own anymore.
   // Setup mirrors the report: ran facing PI, stopped, charged, flipped the
   // aim 180 deg (camera now at PI = shot yaw), fired, released the stick.
-  function runScenario(withTurn: boolean, frames = 240): { travel: number; finalGap: number } {
+  function runScenario(withTurn: boolean, frames = 240): { travel: number; finalGap: number; bodyYaw: number } {
     const shotYaw = Math.PI;
     const target = bodyFacingForShotYaw(shotYaw); // 0
     let bodyYaw = Math.PI; // stale run facing, frozen while stopped
     let turnActive = withTurn;
     let camYaw = Math.PI; // camera copied the flipped aim during charge
-    let idleTimerS = 0;
     let travel = 0;
-    const gate: IdleRecenterGate = {
+    const gate = {
       playing: true,
       charging: false,
       alive: true,
@@ -155,7 +151,6 @@ describe("no-swing owner scenario (run -> charge -> 180 aim flip -> fire -> rele
       lookDy: 0,
       moveX: 0,
       moveY: 0,
-      idleTimerS: 0,
     };
     for (let i = 0; i < frames; i += 1) {
       // SceneManager.update turn branch (stick released: lengthSq 0 <= MAX^2).
@@ -168,39 +163,42 @@ describe("no-swing owner scenario (run -> charge -> 180 aim flip -> fire -> rele
           bodyYaw = stepped;
         }
       }
-      // main.ts idle timer + recenter block (released stick, no look input).
-      idleTimerS += FRAME;
-      gate.idleTimerS = idleTimerS;
-      if (shouldIdleRecenter(gate)) {
-        const next = stepIdleRecenterYaw(camYaw, cameraYawBehindFacing(bodyYaw), FRAME);
+      // Released stick + no look input: the follow gate stays shut, so the
+      // camera never moves by itself (exact main.ts wiring — no other
+      // automatic camera path exists).
+      if (shouldIdleFollow(gate)) {
+        const next = stepIdleFollowYaw(camYaw, cameraYawBehindFacing(bodyYaw), FRAME);
         travel += Math.abs(next - camYaw);
         camYaw = next;
       }
     }
-    return { travel, finalGap: Math.abs(wrapPi(cameraYawBehindFacing(target) - camYaw)) };
+    return { travel, finalGap: Math.abs(wrapPi(cameraYawBehindFacing(target) - camYaw)), bodyYaw };
   }
 
-  it("with the body turn the camera stays put: travel < 0.2 rad, recenter ends behind the shot dir", () => {
+  it("with the body turn the camera stays put and the body faces the shot", () => {
     const result = runScenario(true);
-    // The camera already sits behind the shot dir (aim ended there) and the
-    // body converges underneath it before the 0.8s recenter delay elapses,
-    // so the recenter target never diverges from the current yaw.
-    expect(result.travel).toBeLessThan(0.2);
+    // The camera already sits behind the shot dir (aim ended there) and
+    // nothing moves it afterwards; the body converges to face the shot.
+    expect(result.travel).toBe(0);
     expect(result.finalGap).toBeLessThan(0.05);
+    expect(Math.abs(wrapPi(result.bodyYaw - 0))).toBeLessThan(0.05);
   });
 
-  it("without-turn control swings the full 180 deg (the bug being fixed)", () => {
+  it("without the turn the camera also stays put (no catch-up by design)", () => {
     const result = runScenario(false);
-    // Stale facing PI keeps the recenter target PI away from the camera, so
-    // the camera swings all the way around to behind the stale facing — and
-    // ends up PI away from behind the shot dir (the jarring swing).
-    expect(result.travel).toBeGreaterThan(2.5);
-    expect(result.finalGap).toBeGreaterThan(2.5);
+    // Stale facing PI cannot swing anything anymore: the camera stays where
+    // the shot left it — which here coincides with behind the shot dir, so
+    // the gap reads the same. The turn's remaining job is body-only (the
+    // body stays stale at PI here; remotes read facing via rotY).
+    expect(result.travel).toBe(0);
+    expect(result.finalGap).toBeLessThan(0.05);
+    expect(Math.abs(wrapPi(result.bodyYaw - Math.PI))).toBeLessThan(1e-9);
   });
 
-  it("ordering: the turn completes before the recenter delay elapses", () => {
-    // A PI flip at rate 12 is inside the DONE band after ~0.5s < 0.8s, so
-    // when the recenter first fires the facing is already settled.
+  it("ordering: the turn settles within half a second, no deadline pressure", () => {
+    // A PI flip at rate 12 is inside the DONE band after ~0.5s: with no
+    // recenter deadline left, this pins the absolute settle speed instead.
+    // Derived: gap_n = PI * exp(-12*n/60) <= 0.01 needs n >= 29.
     const target = bodyFacingForShotYaw(Math.PI);
     let current = Math.PI;
     let settledFrame = -1;
@@ -211,8 +209,8 @@ describe("no-swing owner scenario (run -> charge -> 180 aim flip -> fire -> rele
         break;
       }
     }
-    expect(settledFrame).toBeGreaterThan(0);
-    expect(settledFrame * FRAME).toBeLessThan(IDLE_RECENTER_DELAY_S);
+    expect(settledFrame).toBe(29);
+    expect(settledFrame * FRAME).toBeLessThan(1);
   });
 });
 

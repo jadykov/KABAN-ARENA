@@ -29,10 +29,9 @@ export function computeJoystickVector(
 
 export interface JoystickOptions {
   onMove: (vector: MoveVector) => void;
-  // R2 reuse: optional disc diameter (px) and element id. Defaults keep the
-  // legacy left stick (120px, #joystick) so existing callers/tests are
-  // untouched; pass diameter AIM_STICK_DIAMETER + id "aim-stick" for the
-  // right aim stick (CSS positions #aim-stick on the right side).
+// Reuse: optional disc diameter (px) and element id. Defaults keep the
+// legacy left stick (120px, #joystick) so existing callers/tests are
+// untouched; pass a custom diameter + id for any extra stick.
   diameter?: number;
   id?: string;
 }

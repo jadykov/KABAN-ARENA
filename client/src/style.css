@@ -170,29 +170,6 @@ canvas {
   background: var(--palette-reload);
 }
 
-/* R2 right aim stick: same see-through language as the move stick. */
-#aim-stick {
-  position: fixed;
-  right: 16px;
-  bottom: 116px;
-  z-index: 10;
-  border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.5);
-  background: rgba(255, 255, 255, 0.08);
-  touch-action: none;
-  opacity: 0.4;
-}
-
-#aim-stick-knob {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.35);
-  border: 2px solid rgba(255, 255, 255, 0.6);
-  opacity: 0.55;
-}
-
 #hud-killfeed {
   position: fixed;
   top: 64px;

@@ -5,9 +5,6 @@ import {
   IDLE_FOLLOW_MOVE_MIN,
   IDLE_FOLLOW_PITCH,
   IDLE_FOLLOW_RATE,
-  IDLE_RECENTER_DELAY_S,
-  IDLE_RECENTER_MOVE_MAX,
-  IDLE_RECENTER_RATE_S,
   SHOT_BODY_TURN_DONE_RAD,
   SHOT_BODY_TURN_RATE_S,
 } from "../config";
@@ -46,11 +43,11 @@ export function stickAngleFromForward(moveX: number, moveY: number): number {
 
 // True only when the follow may run this frame: playing, not charging,
 // alive, zero explicit look input (any look delta wins outright — the follow
-// never fights an active RMB drag), the avatar actually moving, AND the move
-// stick predominantly forward (|phi| <= IDLE_FOLLOW_MAX_STICK_ANGLE).
-// The forwardness check is the round-2 orbit invariant: without it the
-// per-frame delta is permanently -phi for any held off-forward input
-// (backpedal/strafe orbit), so those inputs must produce ZERO camera motion.
+// never fights an active RMB drag or a free-camera touch drag), the avatar
+// actually moving, AND the stick angle from forward within the PI/2 gate.
+// The gate is the anti-orbit invariant: without it the per-frame delta is
+// permanently -phi for any held off-forward input, so backward-leaning
+// inputs (> PI/2, backpedal included) must produce ZERO camera motion.
 export function shouldIdleFollow(gate: IdleFollowGate): boolean {
   if (!gate.playing || gate.charging || !gate.alive) {
     return false;
@@ -67,74 +64,21 @@ export function shouldIdleFollow(gate: IdleFollowGate): boolean {
   return stickAngleFromForward(gate.moveX, gate.moveY) <= IDLE_FOLLOW_MAX_STICK_ANGLE;
 }
 
-// Forwardness rate scale (post-playtest Option A): softens the sustained
-// drift at the gate edge by scaling the follow rate with cos(phi) — 1.0 at
-// pure forward, cos(0.8) ~= 0.70 at the 0.8 rad gate edge, so edge drift is
-// bounded by IDLE_FOLLOW_RATE * 0.8 * cos(0.8) ~= 1.4 rad/s while pure
-// forward is unchanged (cos(0) = 1, and delta -> 0 as phi -> 0 so the
-// follow still converges). Input is clamped to [0, MAX] so overshoot
-// angles scale like the edge, never negative; non-finite input yields 0
-// (no motion) so a NaN stick can never drive the camera. Scalar, no alloc.
+// Forwardness rate scale: softens the sustained drift off the forward axis
+// by scaling the follow rate with cos(phi) — 1.0 at pure forward, ~0 at pure
+// sideways (cos(PI/2) ~= 0), so strafe holds barely crawl while diagonals
+// follow firmly and pure forward is unchanged (cos(0) = 1, and delta -> 0 as
+// phi -> 0 so the follow still converges). The interior peak phi*cos(phi)
+// ~= 0.56 bounds sustained drift by IDLE_FOLLOW_RATE * 0.56 ~= 1.4 rad/s.
+// Input is clamped to [0, MAX] so overshoot angles scale like the edge,
+// never negative; non-finite input yields 0 (no motion) so a NaN stick can
+// never drive the camera. Scalar, no alloc.
 export function forwardnessRateScale(phi: number): number {
   if (!Number.isFinite(phi)) {
     return 0;
   }
   const clamped = Math.max(0, Math.min(Math.abs(phi), IDLE_FOLLOW_MAX_STICK_ANGLE));
   return Math.cos(clamped);
-}
-
-// Idle recenter gate (post-playtest Option A, creep-band fix): true only when
-// the stick is TRULY released (stick lengthSq <= IDLE_RECENTER_MOVE_MAX^2,
-// i.e. |move| <= 0.01) — the exact mirror of the SceneManager facing-freeze
-// threshold (worldMove.lengthSq() > MAX*MAX recomputes facing; for stick
-// mags < 1 |worldMove| == |move|, so facing is static exactly where this
-// gate holds). This is deliberately TIGHTER than the follow gate's complement
-// (follow needs |move| >= IDLE_FOLLOW_MOVE_MIN = 0.1): the creep band
-// (0.01, 0.1) is a dead zone where NEITHER path moves the camera, because
-// there facing is recomputed every frame from the just-recentered yaw and the
-// behind-facing target would orbit (at phi=PI up to RATE*PI ~ 9.2 rad/s).
-// With no look input, not charging, playing, alive, AND the main.ts idle
-// timer past IDLE_RECENTER_DELAY_S. The timer itself lives in main.ts
-// (scalar idleTimerS, reset on any stick lengthSq above THIS threshold —
-// creep input included — plus look input, charge start, and camera-state
-// transitions); this predicate only reads it, so it stays pure and
-// unit-testable. Because the avatar is NOT moving while this gate holds,
-// facing is static and the behind-facing target below is a true fixed
-// point — the recenter converges instead of orbiting.
-export interface IdleRecenterGate {
-  playing: boolean;
-  charging: boolean;
-  alive: boolean;
-  lookDx: number;
-  lookDy: number;
-  moveX: number;
-  moveY: number;
-  idleTimerS: number;
-}
-
-export function shouldIdleRecenter(gate: IdleRecenterGate): boolean {
-  if (!gate.playing || gate.charging || !gate.alive) {
-    return false;
-  }
-  if (gate.lookDx !== 0 || gate.lookDy !== 0) {
-    return false;
-  }
-  if (!Number.isFinite(gate.moveX) || !Number.isFinite(gate.moveY)) {
-    return false;
-  }
-  if (!Number.isFinite(gate.idleTimerS)) {
-    return false;
-  }
-  // Static-facing premise: mirror the SceneManager facing-freeze threshold
-  // exactly (lengthSq > MAX*MAX recomputes facing). Strictly-greater rejects
-  // so the boundary |move| == MAX still counts as released, exactly like the
-  // facing freeze (lengthSq == MAX*MAX keeps the old facing).
-  const moveLenSq = gate.moveX * gate.moveX + gate.moveY * gate.moveY;
-  const releaseLenSq = IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX;
-  if (moveLenSq > releaseLenSq) {
-    return false;
-  }
-  return gate.idleTimerS >= IDLE_RECENTER_DELAY_S;
 }
 
 // Camera-behind conversion (4d.2-fix2 review follow-up): the follow camera
@@ -165,8 +109,8 @@ export function cameraYawBehindFacing(facing: number): number {
 // the shortest arc (wrap-safe at +/-PI, same convention as lerpAngle).
 // Non-positive dt, non-positive rate, or non-finite input is a passthrough.
 // The optional rate defaults to IDLE_FOLLOW_RATE: the follow call site
-// passes IDLE_FOLLOW_RATE * forwardnessRateScale(phi) (cos softening at the
-// gate edge), the recenter wrappers below pass IDLE_RECENTER_RATE_S.
+// passes IDLE_FOLLOW_RATE * forwardnessRateScale(phi) (cos softening toward
+// the sideways edge).
 export function stepIdleFollowYaw(
   yaw: number,
   targetYaw: number,
@@ -200,25 +144,12 @@ export function stepIdleFollowPitch(
   return pitch + (IDLE_FOLLOW_PITCH - pitch) * (1 - Math.exp(-rate * deltaSeconds));
 }
 
-// Idle-recenter ease steps (post-playtest Option A): same shortest-arc yaw
-// + near-horizon pitch easing as the follow, but at IDLE_RECENTER_RATE_S.
-// The recenter call site uses these so the rate choice stays documented in
-// one place; they are thin wrappers, not a second easing implementation.
-export function stepIdleRecenterYaw(yaw: number, targetYaw: number, deltaSeconds: number): number {
-  return stepIdleFollowYaw(yaw, targetYaw, deltaSeconds, IDLE_RECENTER_RATE_S);
-}
-
-export function stepIdleRecenterPitch(pitch: number, deltaSeconds: number): number {
-  return stepIdleFollowPitch(pitch, deltaSeconds, IDLE_RECENTER_RATE_S);
-}
-
-// Post-shot recenter/follow clamp tolerance (F3 fix, option (a)): the pitch
+// Post-shot follow clamp tolerance (F3 fix, option (a)): the pitch floor to
 // floor to pass as the min override to setCameraAngles at the idle-follow
-// and idle-recenter call sites. Normally CAMERA_PITCH_MIN (the shared
-// default band). But the mirrored charge pitch (down to -CAMERA_PITCH_MAX)
-// survives the shot on the camera, and the first eased recenter/follow frame
-// from that out-of-band start would clamp -0.36 -> CAMERA_PITCH_MIN (-0.15)
-// in ONE frame (~12 deg snap). While the current pitch sits below the
+// call site. Normally CAMERA_PITCH_MIN (the shared default band). But the
+// mirrored charge pitch (down to -CAMERA_PITCH_MAX) survives the shot on the
+// camera, and the first eased follow frame from that out-of-band start would
+// clamp -0.36 -> CAMERA_PITCH_MIN (-0.15) in ONE frame (~12 deg snap). While the current pitch sits below the
 // default band, return the mirrored-widened floor -CAMERA_PITCH_MAX instead:
 // the exp ease toward IDLE_FOLLOW_PITCH is monotonic, so the pitch glides
 // back continuously and re-enters the default band on its own, at which
@@ -283,11 +214,10 @@ export function beginShotBodyTurn(shotYaw: number): ShotBodyTurn {
 }
 
 // One exp-ease step of the body yaw toward the shot facing along the
-// shortest arc, at SHOT_BODY_TURN_RATE_S (settles a PI flip in ~0.25-0.5s —
-// before the 0.8s idle recenter delay elapses, so the recenter target reads
-// an already-converged facing; even if it fired mid-turn, the live-facing
-// target still converges smoothly). Thin wrapper, not a second easing
-// implementation. Non-positive dt or non-finite input is a passthrough.
+// shortest arc, at SHOT_BODY_TURN_RATE_S (settles a PI flip in ~0.25-0.5s,
+// so a follow target that reads the live facing converges smoothly even if
+// it fires mid-turn). Thin wrapper, not a second easing implementation.
+// Non-positive dt or non-finite input is a passthrough.
 export function stepShotBodyTurnYaw(currentYaw: number, targetYaw: number, deltaSeconds: number): number {
   return stepIdleFollowYaw(currentYaw, targetYaw, deltaSeconds, SHOT_BODY_TURN_RATE_S);
 }

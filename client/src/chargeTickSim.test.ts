@@ -5,8 +5,6 @@ import {
   CAMERA_PITCH_MIN,
   FLOAT_DEADZONE,
   IDLE_FOLLOW_PITCH,
-  IDLE_RECENTER_DELAY_S,
-  RELOAD_MS,
 } from "./config";
 import { SceneManager } from "./engine/SceneManager";
 import {
@@ -19,12 +17,10 @@ import {
 } from "./net/chargeAim";
 import {
   shouldIdleFollow,
-  shouldIdleRecenter,
-  stepIdleRecenterPitch,
-  stepIdleRecenterYaw,
+  stepIdleFollowPitch,
+  stepIdleFollowYaw,
   tolerantCameraPitchMin,
   type IdleFollowGate,
-  type IdleRecenterGate,
 } from "./net/idleFollow";
 import { buildFirePayload } from "./net/protocol";
 
@@ -36,9 +32,7 @@ import { buildFirePayload } from "./net/protocol";
 // the REAL SceneManager plus the REAL helpers main.ts calls — no re-made
 // easing, no copied clamp logic. If main.ts changes order or arguments, the
 // comments here say exactly which site to re-check. The one deliberate
-// simplification: sticks are (0,0) throughout (idle-aim flows under review),
-// and idleTimerS is set explicitly instead of accumulated (accumulation is
-// unit-covered by the shouldIdleRecenter gate tests).
+// simplification: sticks are (0,0) throughout (idle-aim flows under review).
 const FRAME = 1 / 60;
 const NO_MOVE = { x: 0, y: 0 };
 
@@ -86,7 +80,7 @@ function idleChargeSim(aimYaw: number, aimPitch: number): ChargeSim {
 
 // One charge tick in exact main.ts order:
 // 1. stick/float integration (idle vectors below FLOAT_DEADZONE -> no-op);
-// 2. idle-follow + idle-recenter gates (must stay shut while charging);
+// 2. idle-follow gate (must stay shut while charging; no recenter exists);
 // 3. idle aim-track copy (F2: shouldTrackAimFromCamera -> skipped in charge);
 // 4. charge block: one-shot level step + mirrored camera write + flag;
 // 5. aim feed: setAimAngles.
@@ -105,8 +99,6 @@ function runChargeFrame(manager: SceneManager, sim: ChargeSim): void {
     moveY: 0,
   };
   expect(shouldIdleFollow(followGate)).toBe(false);
-  const recenterGate: IdleRecenterGate = { ...followGate, idleTimerS: 0 };
-  expect(shouldIdleRecenter(recenterGate)).toBe(false);
   const stickIdle = Math.abs(sim.aimVector.x) < 0.05 && Math.abs(sim.aimVector.y) < 0.05;
   const floatIdle = Math.abs(sim.floatVector.x) < 0.05 && Math.abs(sim.floatVector.y) < 0.05;
   if (shouldTrackAimFromCamera(sim.isCharging, stickIdle, floatIdle)) {
@@ -229,8 +221,8 @@ describe("release tick sim (F1: payload pitch = true aim, sign correct)", () => 
   });
 });
 
-describe("post-shot tick sim (F3: smooth return to rest, no snap)", () => {
-  it("eases from the mirrored value to 0.05 with per-frame steps <= 0.05 rad", async () => {
+describe("post-shot tick sim (F3: no snap; follow-while-moving glides back)", () => {
+  it("holds the mirrored pitch with a released stick (no catch-up by design)", async () => {
     const manager = await createManager();
     manager.teleportSelf(0, 0);
     // End of a full-up charge: the camera holds mirror(MAX) exactly as the
@@ -242,10 +234,10 @@ describe("post-shot tick sim (F3: smooth return to rest, no snap)", () => {
       CAMERA_PITCH_MAX,
     );
     expect(manager.getCameraAngles().pitch).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
-    // Stick released, past the recenter delay (main.ts accumulates idleTimerS
-    // to IDLE_RECENTER_DELAY_S; the sim starts there — accumulation itself is
-    // unit-covered by the shouldIdleRecenter gate tests).
-    const gate: IdleRecenterGate = {
+    // Stick released, no look: the follow gate stays shut (mag 0 < MIN) and
+    // no recenter exists anymore — nothing in main.ts moves the camera, so
+    // the stale pitch simply persists until the player moves or looks.
+    const gate: IdleFollowGate = {
       playing: true,
       charging: false,
       alive: true,
@@ -253,9 +245,36 @@ describe("post-shot tick sim (F3: smooth return to rest, no snap)", () => {
       lookDy: 0,
       moveX: 0,
       moveY: 0,
-      idleTimerS: IDLE_RECENTER_DELAY_S,
     };
-    expect(shouldIdleRecenter(gate)).toBe(true);
+    expect(shouldIdleFollow(gate)).toBe(false);
+    for (let i = 0; i < 120; i += 1) {
+      expect(manager.getCameraAngles().pitch).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
+      expect(manager.getCameraAngles().yaw).toBeCloseTo(0.5, 12);
+    }
+  });
+
+  it("follow-while-moving eases from the mirrored value to 0.05 with per-frame steps <= 0.05 rad", async () => {
+    const manager = await createManager();
+    manager.teleportSelf(0, 0);
+    manager.setCameraAngles(
+      0.5,
+      mirrorChargeCameraPitch(CAMERA_PITCH_MAX),
+      -CAMERA_PITCH_MAX,
+      CAMERA_PITCH_MAX,
+    );
+    expect(manager.getCameraAngles().pitch).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
+    // Running forward: the follow gate runs and eases the stale pitch back
+    // through the F3 tolerant min override (exact main.ts follow site).
+    const gate: IdleFollowGate = {
+      playing: true,
+      charging: false,
+      alive: true,
+      lookDx: 0,
+      lookDy: 0,
+      moveX: 0,
+      moveY: 1,
+    };
+    expect(shouldIdleFollow(gate)).toBe(true);
     // Isolate pitch: the yaw target is the current yaw (no yaw motion).
     const targetYaw = manager.getCameraAngles().yaw;
     let previous = manager.getCameraAngles().pitch;
@@ -264,10 +283,10 @@ describe("post-shot tick sim (F3: smooth return to rest, no snap)", () => {
     let frames = 0;
     for (; frames < 600; frames += 1) {
       const settled = manager.getCameraAngles();
-      // Exact main.ts recenter site, including the F3 tolerant min override.
+      // Exact main.ts follow site, including the F3 tolerant min override.
       manager.setCameraAngles(
-        stepIdleRecenterYaw(settled.yaw, targetYaw, FRAME),
-        stepIdleRecenterPitch(settled.pitch, FRAME),
+        stepIdleFollowYaw(settled.yaw, targetYaw, FRAME),
+        stepIdleFollowPitch(settled.pitch, FRAME),
         tolerantCameraPitchMin(settled.pitch),
         CAMERA_PITCH_MAX,
       );
@@ -287,7 +306,7 @@ describe("post-shot tick sim (F3: smooth return to rest, no snap)", () => {
 
   it("pins the F3 contrast: the plain clamp would snap frame one by 0.21 rad", () => {
     // One eased step from -0.36 moves UP continuously...
-    const easedOnce = stepIdleRecenterPitch(-CAMERA_PITCH_MAX, FRAME);
+    const easedOnce = stepIdleFollowPitch(-CAMERA_PITCH_MAX, FRAME);
     expect(easedOnce).toBeGreaterThan(-CAMERA_PITCH_MAX);
     // ...but the DEFAULT-band clamp (pre-fix wiring) pins it to MIN (-0.15):
     // a single-frame jump of ~0.21 rad (~12 deg). The sim above never does.
@@ -322,22 +341,20 @@ describe("welcome tick sim (F3 note: out-of-band normalization + respawn persist
     manager.teleportSelf(0, 0);
     manager.setCameraAngles(0.7, -CAMERA_PITCH_MAX, -CAMERA_PITCH_MAX, CAMERA_PITCH_MAX);
     // Authoritative placement (welcome spawn / respawn / snap) moves the
-    // body only — the stale pitch survives and is eased back by the F3
-    // recenter path (previous describe), never snapped.
+    // body only — the stale pitch survives until the player moves or looks
+    // (no automatic catch-up), never snapped.
     manager.teleportSelf(3, -2);
     expect(manager.getCameraAngles().pitch).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
     expect(manager.getCameraAngles().yaw).toBeCloseTo(0.7, 12);
   });
 });
 
-describe("post-shot safety note (aim-track vs recenter ordering)", () => {
-  it("stale tracking is safe because reload outlasts the recenter delay", async () => {
+describe("post-shot note (stale aim holds until the player moves)", () => {
+  it("stale tracking holds with a released stick; moving forward glides it back in-band", async () => {
     // After the shot (not charging, sticks idle) the plain track copy runs
-    // again, so the LOCAL aim follows the stale mirrored camera until the
-    // recenter converges. Ordering pin: a new charge is impossible before
-    // RELOAD_MS, while the recenter starts easing after IDLE_RECENTER_DELAY_S
-    // — by reload end the camera (and the tracking aim) are back in-band.
-    expect(RELOAD_MS).toBeGreaterThan(IDLE_RECENTER_DELAY_S * 1000);
+    // again, so the LOCAL aim follows the stale mirrored camera — and with
+    // no recenter left, nothing returns it automatically. Only running
+    // forward (follow gate) eases the camera back while the aim tracks.
     const manager = await createManager();
     manager.teleportSelf(0, 0);
     manager.setCameraAngles(
@@ -347,36 +364,44 @@ describe("post-shot safety note (aim-track vs recenter ordering)", () => {
       CAMERA_PITCH_MAX,
     );
     let aimPitch = CAMERA_PITCH_MAX; // pre-shot true aim, untouched by the shot
-    // Phase 1 (0..0.8s): recenter gate shut; the track copy follows stale.
+    // Phase 1 (released stick): the follow gate stays shut and the track
+    // copy follows stale — the camera never moves on its own.
+    const idleGate: IdleFollowGate = {
+      playing: true,
+      charging: false,
+      alive: true,
+      lookDx: 0,
+      lookDy: 0,
+      moveX: NO_MOVE.x,
+      moveY: NO_MOVE.y,
+    };
     for (let i = 0; i < 48; i += 1) {
-      const gate: IdleRecenterGate = {
-        playing: true,
-        charging: false,
-        alive: true,
-        lookDx: 0,
-        lookDy: 0,
-        moveX: NO_MOVE.x,
-        moveY: NO_MOVE.y,
-        idleTimerS: i * FRAME,
-      };
-      expect(shouldIdleRecenter(gate)).toBe(false);
+      expect(shouldIdleFollow(idleGate)).toBe(false);
       if (shouldTrackAimFromCamera(false, true, true)) {
         aimPitch = manager.getCameraAngles().pitch;
       }
     }
+    expect(manager.getCameraAngles().pitch).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
     expect(aimPitch).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
     // Protocol backstop even here: the stale value still sends in-band with
     // its sign kept (never a mirrored-then-fired shot).
     expect(buildFirePayload(1, 0, aimPitch, false).pitch).toBeCloseTo(CAMERA_PITCH_MIN, 12);
-    // Phase 2 (0.8s..2.5s = reload end): recenter eases, aim keeps tracking.
+    // Phase 2 (running forward): the follow eases, the aim keeps tracking.
+    const runGate: IdleFollowGate = { ...idleGate, moveX: 0, moveY: 1 };
+    expect(shouldIdleFollow(runGate)).toBe(true);
+    let maxStep = 0;
+    let previous = manager.getCameraAngles().pitch;
     for (let i = 0; i < 150; i += 1) {
       const settled = manager.getCameraAngles();
       manager.setCameraAngles(
-        stepIdleRecenterYaw(settled.yaw, settled.yaw, FRAME),
-        stepIdleRecenterPitch(settled.pitch, FRAME),
+        stepIdleFollowYaw(settled.yaw, settled.yaw, FRAME),
+        stepIdleFollowPitch(settled.pitch, FRAME),
         tolerantCameraPitchMin(settled.pitch),
         CAMERA_PITCH_MAX,
       );
+      const stepped = manager.getCameraAngles().pitch;
+      maxStep = Math.max(maxStep, Math.abs(stepped - previous));
+      previous = stepped;
       if (shouldTrackAimFromCamera(false, true, true)) {
         aimPitch = manager.getCameraAngles().pitch;
       }
@@ -385,5 +410,6 @@ describe("post-shot safety note (aim-track vs recenter ordering)", () => {
     expect(camPitch).toBeGreaterThanOrEqual(CAMERA_PITCH_MIN);
     expect(aimPitch).toBeGreaterThanOrEqual(CAMERA_PITCH_MIN);
     expect(camPitch).toBeCloseTo(IDLE_FOLLOW_PITCH, 2);
+    expect(maxStep).toBeLessThanOrEqual(0.05);
   });
 });

@@ -565,7 +565,7 @@ export class SceneManager {
     // charging, so without this gate update() would re-clamp the mirror to
     // MIN every frame. The clamp still owns every real RMB drag (which only
     // runs when NOT charging), and zero deltas change yaw/pitch by nothing
-    // anyway — idle/follow/recenter presets pass through byte-identical.
+    // anyway — idle/follow presets pass through byte-identical.
     // A stale out-of-band pitch (the mirrored charge pitch surviving the
     // shot, down to -CAMERA_PITCH_MAX) must not snap on the first drag
     // either: the drag is bounded below by min(MIN, current) and above by
@@ -610,15 +610,16 @@ export class SceneManager {
     }
     // Avatar facing tracks movement only above the stick-release threshold
     // (shared IDLE_RECENTER_MOVE_MAX from config: facing is static at/below
-    // MAX, which is exactly where the idle-recenter gate holds — the recenter
-    // target is a true fixed point only because of this freeze). Post-shot
+    // MAX, which is exactly where released-stick camera paths hold — the
+    // follow gate needs |move| >= IDLE_FOLLOW_MOVE_MIN, so a released stick
+    // moves neither writer). Post-shot
     // body turn (owner fix round 2): when the stick is released and a turn is
     // armed, the SAME rotation.y eases toward the shot facing instead — same
     // shortest-arc exp pattern, scalar only, no allocations. Resumed movement
     // cancels the turn outright (the movement writer owns yaw then), so the
-    // two writers never fight. Camera needs no suppression: follow/recenter
-    // read getAvatarFacing() live and converge behind the shot dir as the
-    // body settles (~0.25s, before the 0.8s recenter delay elapses).
+    // two writers never fight. Camera needs no suppression: the follow reads
+    // getAvatarFacing() live and converges behind the shot dir as the body
+    // settles (~0.25s).
     const releaseLenSq = IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX;
     if (worldMove.lengthSq() > releaseLenSq) {
       const targetYaw = Math.atan2(worldMove.x, worldMove.z);
