@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  CAMERA_PITCH_MAX,
+  CAMERA_PITCH_MIN,
   IDLE_FOLLOW_MAX_STICK_ANGLE,
   IDLE_FOLLOW_MOVE_MIN,
   IDLE_FOLLOW_PITCH,
@@ -18,6 +20,7 @@ import {
   stepIdleRecenterPitch,
   stepIdleRecenterYaw,
   stickAngleFromForward,
+  tolerantCameraPitchMin,
   type IdleRecenterGate,
 } from "./idleFollow";
 import { worldMoveFromYaw } from "./protocol";
@@ -619,5 +622,30 @@ describe("idle recenter gate (Option A)", () => {
     expect(stepIdleRecenterPitch(0.4, 0)).toBe(0.4);
     expect(stepIdleRecenterPitch(0.4, -FRAME)).toBe(0.4);
     expect(stepIdleRecenterPitch(Number.NaN, FRAME)).toBeNaN();
+  });
+});
+
+describe("post-shot recenter/follow clamp tolerance (F3 fix, option a)", () => {
+  it("widens the floor only while below the default band", () => {
+    expect(-CAMERA_PITCH_MAX).toBeLessThan(CAMERA_PITCH_MIN);
+    // Stale mirrored post-shot pitch: the recenter/follow call sites ease
+    // from here with the widened floor instead of snapping to MIN.
+    expect(tolerantCameraPitchMin(-CAMERA_PITCH_MAX)).toBe(-CAMERA_PITCH_MAX);
+    expect(tolerantCameraPitchMin(-0.2)).toBe(-CAMERA_PITCH_MAX);
+    expect(tolerantCameraPitchMin(-1.0)).toBe(-CAMERA_PITCH_MAX);
+  });
+
+  it("keeps the default floor at and inside the band", () => {
+    expect(tolerantCameraPitchMin(CAMERA_PITCH_MIN)).toBe(CAMERA_PITCH_MIN);
+    expect(tolerantCameraPitchMin(0)).toBe(CAMERA_PITCH_MIN);
+    expect(tolerantCameraPitchMin(0.05)).toBe(CAMERA_PITCH_MIN);
+    expect(tolerantCameraPitchMin(CAMERA_PITCH_MAX)).toBe(CAMERA_PITCH_MIN);
+    expect(tolerantCameraPitchMin(1.0)).toBe(CAMERA_PITCH_MIN);
+  });
+
+  it("returns the default floor for non-finite input (setCameraAngles ignores NaN anyway)", () => {
+    expect(tolerantCameraPitchMin(Number.NaN)).toBe(CAMERA_PITCH_MIN);
+    expect(tolerantCameraPitchMin(Number.POSITIVE_INFINITY)).toBe(CAMERA_PITCH_MIN);
+    expect(tolerantCameraPitchMin(Number.NEGATIVE_INFINITY)).toBe(CAMERA_PITCH_MIN);
   });
 });

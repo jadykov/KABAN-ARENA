@@ -4,6 +4,7 @@ import {
   CROSSHAIR_IDLE_COLOR,
   CROSSHAIR_RELOAD_COLOR,
   CROSSHAIR_SUPER_COLOR,
+  TRAJ_DOT_LIT_BOOST,
 } from "../config";
 import { HL_CHARTREUSE_CSS } from "../palette";
 
@@ -30,6 +31,24 @@ export interface TrajSample {
 export const TRAJ_DOT_COUNT = 5;
 export const POWER_BAR_WIDTH_PX = 120;
 export const RELOAD_BAR_WIDTH_PX = 120;
+
+// Progressive charge glow (post-playtest fix round 3): dot i lights once the
+// charge fraction reaches its threshold (i+1)/N, one by one as the shot
+// charges. Pure + unit-testable; the per-frame painter below reads it.
+// Dots are a local-only DOM overlay (created per client in createAim, fed
+// from the local charge path in main.ts — remotes/spectators never touch
+// them), so no spectator/remote handling is needed.
+export function trajDotLitThreshold(index: number, count: number = TRAJ_DOT_COUNT): number {
+  const safeCount = Number.isFinite(count) && count > 0 ? Math.floor(count) : TRAJ_DOT_COUNT;
+  return (index + 1) / safeCount;
+}
+
+export function isTrajDotLit(index: number, charge01: number, count: number = TRAJ_DOT_COUNT): boolean {
+  if (!Number.isFinite(charge01)) {
+    return false;
+  }
+  return charge01 >= trajDotLitThreshold(index, count);
+}
 
 // Throw-polish aim: tiny symbolic center dot (4px, 40% opacity) + 5
 // trajectory dots + Worms-style power bar (120px, bottom-center, charge
@@ -115,7 +134,17 @@ export function createAim(parent: HTMLElement): AimHandle {
       traj.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
       const fade = 1 - i * 0.12;
       const baseOpacity = (0.15 + 0.85 * charge) * fade;
-      traj.style.opacity = hidden ? "0" : baseOpacity.toFixed(3);
+      // Progressive glow: a lit dot paints at base x TRAJ_DOT_LIT_BOOST
+      // (clamped to 1) — subtle one-by-one brightening with charge. Same
+      // pooled divs, opacity scalar only: no new elements, no lights, no
+      // draw-call growth, no per-frame allocations beyond the existing style
+      // writes. Cancel/reset feeds charge 0 + setTrajectory(null), so every
+      // dot falls back to base automatically. Dots are white-on-dark, so
+      // opacity IS the brightness channel (a brightness() filter would be a
+      // no-op on white — deliberately not used).
+      const lit = isTrajDotLit(i, charge, trajDots.length);
+      const boosted = lit ? Math.min(1, baseOpacity * TRAJ_DOT_LIT_BOOST) : baseOpacity;
+      traj.style.opacity = hidden ? "0" : boosted.toFixed(3);
       traj.style.background = color;
     }
     dot.style.background = superMode ? CROSSHAIR_SUPER_COLOR : CROSSHAIR_IDLE_COLOR;

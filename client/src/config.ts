@@ -29,15 +29,24 @@ export const CAMERA_FOLLOW_HEIGHT = 2.1;
 export const CAMERA_LOOK_AT_HEIGHT = 1.2;
 export const CAMERA_SENSITIVITY = 0.0045;
 export const CAMERA_PITCH_MIN = -0.15;
-// Post-playtest fix (owner: aim-time view was "top-down onto the head"):
-// max 0.45 rad (~25.8 deg) above horizon — tighter than the 4d.2-fix2 0.6
+// Post-playtest fix round 2 (owner: aim-time view still too top-down):
+// max 0.36 rad (~20.6 deg) above horizon — another ~20% down from the 0.45
 // cap. All clamp sites (SceneManager RMB look + setCameraAngles, main.ts
 // aim/float pitch, protocol fire payload) share this constant, so they
 // tighten automatically. Worst case at charge zoom (d = 3.2m):
-// elevation = atan((2.1 + sin(0.45)*3.2 - 1.2) / (cos(0.45)*3.2))
-//           = atan(2.2919 / 2.8814) ~= 38.5 deg onto the avatar
-// (was atan(2.7069 / 2.6411) ~= 45.7 deg at 0.6). CAMERA_PITCH_MIN kept.
-export const CAMERA_PITCH_MAX = 0.45;
+// elevation = atan((2.1 + sin(0.36)*3.2 - 1.2) / (cos(0.36)*3.2))
+//           = atan(2.0273 / 2.9949) ~= 34.1 deg onto the avatar
+// (was atan(2.2919 / 2.8814) ~= 38.5 deg at 0.45). CAMERA_PITCH_MIN kept.
+export const CAMERA_PITCH_MAX = 0.36;
+// Post-playtest fix round 3 (owner: resting view too top-down): default/
+// resting camera pitch 0.15 rad (~8.6 deg above horizon) — ~0.1 rad (~6 deg)
+// closer to the horizon than the old 0.25, opening the distant view. Single
+// source of truth for the spawn/reset pitch (SceneManager initial + reset)
+// and the aim-idle init (main.ts aimPitch start). Worst case at default
+// distance (d = 4m): elevation = atan((2.1 + sin(0.15)*4 - 1.2) /
+// (cos(0.15)*4)) = atan(1.4978 / 3.9551) ~= 20.7 deg onto the avatar
+// (was ~= 26.0 deg at 0.25). Stays well above CAMERA_PITCH_MIN (-0.15).
+export const CAMERA_REST_PITCH = 0.15;
 
 // Virtual joystick (Q9-A: left side, diameter 120px, transparent look-through).
 export const JOYSTICK_DIAMETER = 120;
@@ -219,6 +228,15 @@ export const BALL_GRAVITY = 3.5;
 // from the old absolute height); on platforms it tracks the elevation.
 export const BALL_TORSO_OFFSET = 0.3;
 export const TRAJ_PREVIEW_DT_S = 0.12;
+// Post-playtest fix round 3 (owner: charge feedback): trajectory-preview dot
+// progressive glow. Dot i (of TRAJ_DOT_COUNT, see ui/aim.ts) counts as lit
+// once charge01 >= (i+1)/N; a lit dot paints at base opacity x this boost
+// (clamped to 1) — subtle, slightly brighter one by one, never distracting.
+// DOM opacity scalar on the already-pooled dot divs only: no new lights, no
+// new elements, no draw-call growth (dots are a DOM overlay, zero WebGL
+// cost), no per-frame allocations. Charge cancel/reset feeds charge01 0 +
+// setTrajectory(null), which returns every dot to base automatically.
+export const TRAJ_DOT_LIT_BOOST = 1.6;
 export const MAX_LIVE_BALLS = 12;
 export const MAX_HALVES = 8;
 export const SUPER_SPAWN_S = 45;
@@ -295,8 +313,9 @@ export const AIM_PITCH_RATE = 1.6;
 // Floating right-thumb aim zone (Brawl-Stars-like one-thumb flow): pointerdown
 // anywhere on the right half starts charge at the touch point (floating
 // origin, not a fixed disc); drag offset in px maps to [-1, 1] over this
-// radius, then expo + deadzone + yaw/pitch rates above. Camera copies aim
-// while charging so one thumb can turn 360 degrees.
+// radius, then expo + deadzone + yaw/pitch rates above. Camera mirrors aim
+// pitch while charging (aim-mirror, fix round 3) so one thumb can turn
+// 360 degrees.
 export const FLOAT_DRAG_RADIUS_PX = 80;
 export const FLOAT_DEADZONE = 0.05;
 // Charge pitch leveling (owner: at aim start the camera eases ONCE toward
@@ -321,7 +340,13 @@ export const AIM_YAW_DAMP = 0.6;
 // toward near-horizon — same exp-ease pattern as the follow camera, no
 // allocations (scalar math only). Any look delta that frame wins outright.
 export const IDLE_FOLLOW_RATE = 2.5;
-export const IDLE_FOLLOW_PITCH = 0.15;
+// Post-playtest fix round 3 (owner: resting view too top-down): idle
+// follow/recenter pitch target 0.05 rad (~2.9 deg above horizon) — ~0.1 rad
+// (~6 deg) closer to the horizon than the old 0.15, matching the lowered
+// CAMERA_REST_PITCH above (recenter eases back to near-horizon after a shot,
+// so the two rest levels stay consistent). Stays above CAMERA_PITCH_MIN
+// (-0.15): 0.05 > -0.15, so the shared clamp never fights the target.
+export const IDLE_FOLLOW_PITCH = 0.05;
 export const IDLE_FOLLOW_MOVE_MIN = 0.1;
 // Idle-follow stick-forwardness gate (review round-2 FAIL #1): the follow may
 // run only while the move stick points predominantly forward, i.e. the stick
@@ -368,6 +393,20 @@ export const IDLE_RECENTER_MOVE_MAX = 0.01;
 // orbiting. Touching stick/look cancels immediately (no easing that frame).
 export const IDLE_RECENTER_DELAY_S = 0.8;
 export const IDLE_RECENTER_RATE_S = 3.0;
+// Post-shot body turn (owner fix round 2): after a REAL shot the avatar body
+// turns to face the shot direction (it used to stay frozen at the stale run
+// direction, and the camera then re-aligned behind that stale facing — a
+// jarring 180-degree swing). The turn eases avatar.rotation.y toward the
+// shot facing at this exp rate (1/s): rate 12 settles a full PI flip to
+// ~5% residual in ~0.25s (exp(-12*0.25) ~= 0.05), well inside the 0.8s idle
+// recenter delay — so follow/recenter targets, which read the live facing,
+// converge behind the shot direction naturally with no camera suppression.
+// Movement input cancels the turn (the movement writer owns yaw then).
+export const SHOT_BODY_TURN_RATE_S = 12;
+// Post-shot turn completion band (radians): below this wrapped gap the body
+// is snapped to the target and the turn deactivates. 0.01 rad (~0.6 deg) is
+// invisible on the avatar and leaves the camera-behind target aligned.
+export const SHOT_BODY_TURN_DONE_RAD = 0.01;
 // Light client-side aim assist (subtle, deterministic, no randomness):
 // living enemy within ASSIST range and inside the aim cone gets a gentle
 // pull toward its center (blend fraction, never a snap). Server authority

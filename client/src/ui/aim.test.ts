@@ -1,7 +1,19 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { CROSSHAIR_CHARGING_COLOR, CROSSHAIR_FULL_COLOR, CROSSHAIR_RELOAD_COLOR } from "../config";
+import {
+  CROSSHAIR_CHARGING_COLOR,
+  CROSSHAIR_FULL_COLOR,
+  CROSSHAIR_RELOAD_COLOR,
+  TRAJ_DOT_LIT_BOOST,
+} from "../config";
 import { HL_CHARTREUSE_CSS } from "../palette";
-import { POWER_BAR_WIDTH_PX, RELOAD_BAR_WIDTH_PX, TRAJ_DOT_COUNT, createAim } from "./aim";
+import {
+  POWER_BAR_WIDTH_PX,
+  RELOAD_BAR_WIDTH_PX,
+  TRAJ_DOT_COUNT,
+  createAim,
+  isTrajDotLit,
+  trajDotLitThreshold,
+} from "./aim";
 
 // Minimal DOM stub: vitest runs in node (no jsdom installed, no installs
 // allowed), and createAim only needs createElement/style/dataset/appendChild.
@@ -227,6 +239,157 @@ describe("createAim honest trajectory preview", () => {
       expect(dots[3]?.style.opacity).not.toBe("0");
       handle.setTrajectory(null);
       expect(dots[0]?.style.transform).not.toBe("translate(10.0px, -20.0px)");
+    } finally {
+      handle.dispose();
+    }
+  });
+});
+
+// Fix round 3: trajectory dots light up slightly brighter ONE BY ONE as the
+// shot charges — dot i lights when charge01 reaches (i+1)/N. Opacity scalar
+// on the pooled divs only (white-on-dark, so opacity is the brightness
+// channel); no new elements, no lights, no draw-call growth.
+describe("trajectory dots progressive glow (fix round 3)", () => {
+  // Painter contract mirror (constant-referenced, not hardcoded): base =
+  // (0.15 + 0.85*charge) * (1 - i*0.12); lit -> min(1, base * BOOST).
+  function expectedOpacity(index: number, charge: number): string {
+    const fade = 1 - index * 0.12;
+    const base = (0.15 + 0.85 * charge) * fade;
+    const lit = charge >= (index + 1) / TRAJ_DOT_COUNT;
+    return (lit ? Math.min(1, base * TRAJ_DOT_LIT_BOOST) : base).toFixed(3);
+  }
+
+  function visibleSamples(): Array<{ x: number; y: number; visible: boolean }> {
+    return [
+      { x: 10, y: -20, visible: true },
+      { x: 20, y: -35, visible: true },
+      { x: 30, y: -45, visible: true },
+      { x: 40, y: -50, visible: true },
+      { x: 50, y: -52, visible: true },
+    ];
+  }
+
+  it("lights dot i exactly when charge01 reaches (i+1)/N, one by one", () => {
+    expect(TRAJ_DOT_LIT_BOOST).toBeCloseTo(1.6, 12);
+    for (let i = 0; i < TRAJ_DOT_COUNT; i += 1) {
+      const threshold = (i + 1) / TRAJ_DOT_COUNT;
+      expect(trajDotLitThreshold(i)).toBeCloseTo(threshold, 12);
+      // Just below the threshold the dot stays dark ...
+      expect(isTrajDotLit(i, threshold - 1e-3)).toBe(false);
+      // ... at and above it the dot is lit (boundary inclusive).
+      expect(isTrajDotLit(i, threshold)).toBe(true);
+      expect(isTrajDotLit(i, threshold + 0.2)).toBe(true);
+    }
+    // At charge 0 nothing is lit; at full charge everything is.
+    for (let i = 0; i < TRAJ_DOT_COUNT; i += 1) {
+      expect(isTrajDotLit(i, 0)).toBe(false);
+      expect(isTrajDotLit(i, 1)).toBe(true);
+    }
+    // Non-finite charge never lights a dot.
+    expect(isTrajDotLit(0, Number.NaN)).toBe(false);
+  });
+
+  it("boosts lit dots to min(1, base x BOOST), leaves unlit dots at base (charge 0.35)", () => {
+    const parent = new FakeElement();
+    const handle = createAim(asHtml(parent));
+    try {
+      const el = handle.el as unknown as FakeElement;
+      handle.setCharge01(0.35);
+      handle.setTrajectory(visibleSamples());
+      const dots = el.querySelectorAll(".traj-dot");
+      expect(dots).toHaveLength(TRAJ_DOT_COUNT);
+      // Dot 0 (threshold 0.2) is lit, dot 1 (threshold 0.4) is not.
+      expect(dots[0]?.style.opacity).toBe(expectedOpacity(0, 0.35));
+      expect(dots[1]?.style.opacity).toBe(expectedOpacity(1, 0.35));
+      // Spot pins: base 0.4475 -> lit 0.716 vs unlit 0.394 (subtle, distinct).
+      expect(dots[0]?.style.opacity).toBe("0.716");
+      expect(dots[1]?.style.opacity).toBe("0.394");
+      expect(Number(dots[0]?.style.opacity)).toBeGreaterThan(Number(dots[1]?.style.opacity));
+      // Dots 2-4 (thresholds 0.6/0.8/1.0) stay at base too.
+      for (const i of [2, 3, 4]) {
+        expect(dots[i]?.style.opacity).toBe(expectedOpacity(i, 0.35));
+      }
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("flips exactly one dot across its threshold (0.59 -> 0.61 on dot 2, threshold 0.6)", () => {
+    const parent = new FakeElement();
+    const handle = createAim(asHtml(parent));
+    try {
+      const el = handle.el as unknown as FakeElement;
+      handle.setTrajectory(visibleSamples());
+      handle.setCharge01(0.59);
+      const before = el.querySelectorAll(".traj-dot").map((dot) => dot.style.opacity);
+      handle.setCharge01(0.61);
+      const after = el.querySelectorAll(".traj-dot").map((dot) => dot.style.opacity);
+      // Dot 2 crosses 0.6: base "0.495" -> boosted "0.813" (~x1.6 step).
+      expect(before[2]).toBe(expectedOpacity(2, 0.59));
+      expect(before[2]).toBe("0.495");
+      expect(after[2]).toBe(expectedOpacity(2, 0.61));
+      expect(after[2]).toBe("0.813");
+      expect(Number(after[2]) / Number(before[2])).toBeCloseTo(TRAJ_DOT_LIT_BOOST, 1);
+      // Neighbors keep their state: dot 1 stays lit, dot 3 stays unlit.
+      expect(before[1]).toBe(expectedOpacity(1, 0.59));
+      expect(after[1]).toBe(expectedOpacity(1, 0.61));
+      expect(Number(after[1])).toBeGreaterThan(Number(before[1]));
+      expect(after[3]).toBe(expectedOpacity(3, 0.61));
+      expect(Number(after[3])).toBeLessThan(Number(after[2]));
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("returns every dot to base on cancel/reset (charge 0 + setTrajectory(null))", () => {
+    const parent = new FakeElement();
+    const handle = createAim(asHtml(parent));
+    const freshParent = new FakeElement();
+    const fresh = createAim(asHtml(freshParent));
+    try {
+      const el = handle.el as unknown as FakeElement;
+      // Charge hard with the real arc, several dots lit ...
+      handle.setCharge01(0.9);
+      handle.setTrajectory(visibleSamples());
+      const lit = el.querySelectorAll(".traj-dot").map((dot) => dot.style.opacity);
+      expect(Number(lit[0])).toBeGreaterThan(Number(expectedOpacity(1, 0)));
+      // ... then the cancelCharge/stopCharge path: charge 0 + null samples.
+      handle.setCharge01(0);
+      handle.setTrajectory(null);
+      const reset = el.querySelectorAll(".traj-dot").map((dot) => dot.style.opacity);
+      const freshBase = (fresh.el as unknown as FakeElement)
+        .querySelectorAll(".traj-dot")
+        .map((dot) => dot.style.opacity);
+      expect(reset).toEqual(freshBase);
+      for (let i = 0; i < TRAJ_DOT_COUNT; i += 1) {
+        expect(reset[i]).toBe(expectedOpacity(i, 0));
+      }
+    } finally {
+      handle.dispose();
+      fresh.dispose();
+    }
+  });
+
+  it("reuses the same pooled divs across repaints (no new elements)", () => {
+    const parent = new FakeElement();
+    const handle = createAim(asHtml(parent));
+    try {
+      const el = handle.el as unknown as FakeElement;
+      const first = el.querySelectorAll(".traj-dot");
+      expect(first).toHaveLength(TRAJ_DOT_COUNT);
+      // Many repaint cycles: charge sweep + trajectory swaps + super toggle.
+      for (const charge of [0, 0.2, 0.45, 0.7, 1, 0.33, 0]) {
+        handle.setCharge01(charge);
+        handle.setTrajectory(visibleSamples());
+        handle.setSuper(charge > 0.5);
+      }
+      handle.setTrajectory(null);
+      handle.setSuper(false);
+      const after = el.querySelectorAll(".traj-dot");
+      expect(after).toHaveLength(TRAJ_DOT_COUNT);
+      for (let i = 0; i < TRAJ_DOT_COUNT; i += 1) {
+        expect(after[i]).toBe(first[i]);
+      }
     } finally {
       handle.dispose();
     }

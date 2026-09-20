@@ -1,4 +1,6 @@
 import {
+  CAMERA_PITCH_MAX,
+  CAMERA_PITCH_MIN,
   IDLE_FOLLOW_MAX_STICK_ANGLE,
   IDLE_FOLLOW_MOVE_MIN,
   IDLE_FOLLOW_PITCH,
@@ -6,6 +8,8 @@ import {
   IDLE_RECENTER_DELAY_S,
   IDLE_RECENTER_MOVE_MAX,
   IDLE_RECENTER_RATE_S,
+  SHOT_BODY_TURN_DONE_RAD,
+  SHOT_BODY_TURN_RATE_S,
 } from "../config";
 
 // Idle soft-follow camera (Stage 4d.2-fix2, owner comfort): while playing,
@@ -206,4 +210,102 @@ export function stepIdleRecenterYaw(yaw: number, targetYaw: number, deltaSeconds
 
 export function stepIdleRecenterPitch(pitch: number, deltaSeconds: number): number {
   return stepIdleFollowPitch(pitch, deltaSeconds, IDLE_RECENTER_RATE_S);
+}
+
+// Post-shot recenter/follow clamp tolerance (F3 fix, option (a)): the pitch
+// floor to pass as the min override to setCameraAngles at the idle-follow
+// and idle-recenter call sites. Normally CAMERA_PITCH_MIN (the shared
+// default band). But the mirrored charge pitch (down to -CAMERA_PITCH_MAX)
+// survives the shot on the camera, and the first eased recenter/follow frame
+// from that out-of-band start would clamp -0.36 -> CAMERA_PITCH_MIN (-0.15)
+// in ONE frame (~12 deg snap). While the current pitch sits below the
+// default band, return the mirrored-widened floor -CAMERA_PITCH_MAX instead:
+// the exp ease toward IDLE_FOLLOW_PITCH is monotonic, so the pitch glides
+// back continuously and re-enters the default band on its own, at which
+// point this returns MIN again and the plain clamp resumes — no persistent
+// widening, no second easing implementation. Non-finite input returns MIN
+// (setCameraAngles ignores NaN anyway). Scalar only, no allocations.
+export function tolerantCameraPitchMin(currentPitch: number): number {
+  if (Number.isFinite(currentPitch) && currentPitch < CAMERA_PITCH_MIN) {
+    return -CAMERA_PITCH_MAX;
+  }
+  return CAMERA_PITCH_MIN;
+}
+
+// Post-shot body turn (owner fix round 2): after a REAL shot the avatar body
+// turns to FACE THE SHOT DIRECTION. Yaw convention, re-derived from the
+// shipped code (do not flip the sign):
+// - Fire payload yaw vs ball dir: protocol.directionFromYawPitch(yaw, pitch)
+//   (protocol.ts) returns dir = (-sin yaw * cosP, sinP, -cos yaw * cosP);
+//   the server spawns from the identical formula (server hits.muzzleForShot,
+//   dirX = -sin(yaw)*cosP, dirZ = -cos(yaw)*cosP, "must stay identical to
+//   client directionFromYawPitch"). So the ball's horizontal direction is
+//   -(sin shotYaw, cos shotYaw).
+// - Body facing: SceneManager.update writes avatar.rotation.y =
+//   atan2(worldMove.x, worldMove.z) (SceneManager.ts movement writer), i.e.
+//   the facing dir is (sin r, cos r) — confirmed by the knockback fallback
+//   dir (sin(avatar.rotation.y), cos(avatar.rotation.y)) in collectPowerUp.
+// Hence the target body facing r satisfies (sin r, cos r) = ball dir, i.e.
+// r = shotYaw + PI (wrapped to [-PI, PI]). For aimYaw = 0 the ball flies
+// toward -Z and the body ends facing (0, -1) = rotation.y PI. Scalar math,
+// no allocations.
+
+// Shot yaw (fire payload / camera yaw at release) -> body facing that looks
+// along the shot direction. Wrapped to [-PI, PI]; non-finite passes through
+// (call sites treat it as "do not arm").
+export function bodyFacingForShotYaw(shotYaw: number): number {
+  if (!Number.isFinite(shotYaw)) {
+    return shotYaw;
+  }
+  const twoPi = Math.PI * 2;
+  let behind = (shotYaw + Math.PI) % twoPi;
+  if (behind > Math.PI) {
+    behind -= twoPi;
+  } else if (behind < -Math.PI) {
+    behind += twoPi;
+  }
+  return behind;
+}
+
+// Minimal turn state (target + active flag): the turn writes through the SAME
+// avatar.rotation.y the movement writer owns (which is also the rotY value
+// synced upstream every tick), so no new synced state is needed.
+export interface ShotBodyTurn {
+  active: boolean;
+  target: number;
+}
+
+export function beginShotBodyTurn(shotYaw: number): ShotBodyTurn {
+  if (!Number.isFinite(shotYaw)) {
+    return { active: false, target: 0 };
+  }
+  return { active: true, target: bodyFacingForShotYaw(shotYaw) };
+}
+
+// One exp-ease step of the body yaw toward the shot facing along the
+// shortest arc, at SHOT_BODY_TURN_RATE_S (settles a PI flip in ~0.25-0.5s —
+// before the 0.8s idle recenter delay elapses, so the recenter target reads
+// an already-converged facing; even if it fired mid-turn, the live-facing
+// target still converges smoothly). Thin wrapper, not a second easing
+// implementation. Non-positive dt or non-finite input is a passthrough.
+export function stepShotBodyTurnYaw(currentYaw: number, targetYaw: number, deltaSeconds: number): number {
+  return stepIdleFollowYaw(currentYaw, targetYaw, deltaSeconds, SHOT_BODY_TURN_RATE_S);
+}
+
+// Completion check: the wrapped gap is inside SHOT_BODY_TURN_DONE_RAD, so
+// the owner (SceneManager.update) can snap + deactivate. Non-finite input
+// never counts as done (a NaN gap must not kill the turn silently — the
+// step above already passes NaN through unchanged).
+export function isShotBodyTurnDone(currentYaw: number, targetYaw: number): boolean {
+  if (!Number.isFinite(currentYaw) || !Number.isFinite(targetYaw)) {
+    return false;
+  }
+  const twoPi = Math.PI * 2;
+  let delta = (targetYaw - currentYaw) % twoPi;
+  if (delta > Math.PI) {
+    delta -= twoPi;
+  } else if (delta < -Math.PI) {
+    delta += twoPi;
+  }
+  return Math.abs(delta) <= SHOT_BODY_TURN_DONE_RAD;
 }

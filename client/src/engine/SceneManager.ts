@@ -10,6 +10,7 @@ import {
   CAMERA_LOOK_AT_HEIGHT,
   CAMERA_PITCH_MAX,
   CAMERA_PITCH_MIN,
+  CAMERA_REST_PITCH,
   CAMERA_SENSITIVITY,
   CAMERA_SMOOTH_RATE,
   CAMERA_WALL_MARGIN,
@@ -65,6 +66,11 @@ import {
 import { ParticlePool } from "../fx/Particles";
 import { PhysicsWorld, type Vector3Like } from "../physics/World";
 import type { NetBallSnapshot, NetSuperSnapshot } from "../net/protocol";
+import {
+  bodyFacingForShotYaw,
+  isShotBodyTurnDone,
+  stepShotBodyTurnYaw,
+} from "../net/idleFollow";
 import {
   ACCENT_FIRE_BURST,
   ACCENT_HIT_BURST,
@@ -123,7 +129,7 @@ export class SceneManager {
   private readonly airborneGate = new AirborneGate();
   private shieldBubble: THREE.Mesh | null = null;
   private yaw = 0;
-  private pitch = 0.25;
+  private pitch = CAMERA_REST_PITCH;
   private built = false;
 
   private readonly arena = new ArenaBuilder();
@@ -145,6 +151,16 @@ export class SceneManager {
   // Movement/physics inputs are ignored until Play (see update()).
   private spectating = false;
   private spectatorTime = 0;
+  // Post-shot body turn (owner fix round 2): after a REAL shot the body eases
+  // from the stale run facing toward the shot direction (same
+  // avatar.rotation.y the movement writer owns — which is also the rotY
+  // value main.ts sends upstream every tick, so remotes learn the turn via
+  // the existing pass-through with no server change). Armed by
+  // setShotTurnTarget from main.ts stopCharge; eased in update() ONLY while
+  // the stick is released (movement input cancels it — the movement writer
+  // owns yaw then). Scalar pair, no allocations.
+  private shotTurnActive = false;
+  private shotTurnTarget = 0;
 
   // Stage 4d.1 hand-ball combat: held core + face on the local avatar,
   // pooled balls and the SUPER core from the latest authoritative snapshot.
@@ -153,7 +169,7 @@ export class SceneManager {
   // main.ts). The body keeps facing movement; the aim feeds the recoil kick
   // dir, the spark emitter and the trajectory preview (no barrel to aim).
   private aimYaw = 0;
-  private aimPitch = 0.25;
+  private aimPitch = CAMERA_REST_PITCH;
   private hasAim = false;
   private ballsPool: BallsPool | null = null;
   private superCore: SuperCore | null = null;
@@ -315,6 +331,9 @@ export class SceneManager {
   // avatar visible again for the follow camera (4m, FOV 75).
   public setSpectating(value: boolean): void {
     this.spectating = value;
+    // Any spectate transition drops a pending post-shot turn (no body while
+    // watching; a returning fighter re-arms only via a fresh real shot).
+    this.shotTurnActive = false;
     if (this.avatar !== null) {
       this.avatar.visible = !value;
     }
@@ -421,13 +440,18 @@ export class SceneManager {
 
   // Fire-direction feed (called every frame from main.ts with the live
   // aimYaw/aimPitch). Stored only — feeds the recoil kick dir, the spark
-  // emitter and muzzle math. No alloc, two numbers.
+  // emitter and muzzle math. The pitch is clamped to the shared aim band
+  // [CAMERA_PITCH_MIN, CAMERA_PITCH_MAX]: the stored aim must never hold an
+  // out-of-band value (a stale mirrored camera pitch could only arrive here
+  // via the removed charge feedback copy — main.ts never sends out-of-band
+  // aim anymore, and the fire payload is clamped again at send in
+  // protocol.buildFirePayload). No alloc, two numbers.
   public setAimAngles(yaw: number, pitch: number): void {
     if (!Number.isFinite(yaw) || !Number.isFinite(pitch)) {
       return;
     }
     this.aimYaw = yaw;
-    this.aimPitch = pitch;
+    this.aimPitch = THREE.MathUtils.clamp(pitch, CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
     this.hasAim = true;
   }
 
@@ -535,12 +559,28 @@ export class SceneManager {
       return;
     }
     // Hold-right-mouse-button rotation: deltas orbit the follow camera.
-    this.yaw -= look.dx * CAMERA_SENSITIVITY;
-    this.pitch = THREE.MathUtils.clamp(
-      this.pitch + look.dy * CAMERA_SENSITIVITY,
-      CAMERA_PITCH_MIN,
-      CAMERA_PITCH_MAX,
-    );
+    // Gated on non-zero input so a preset pitch outside the plain band (the
+    // mirrored charge pitch via the setCameraAngles min/max override)
+    // survives frames with no look input — main.ts zeroes look deltas while
+    // charging, so without this gate update() would re-clamp the mirror to
+    // MIN every frame. The clamp still owns every real RMB drag (which only
+    // runs when NOT charging), and zero deltas change yaw/pitch by nothing
+    // anyway — idle/follow/recenter presets pass through byte-identical.
+    // A stale out-of-band pitch (the mirrored charge pitch surviving the
+    // shot, down to -CAMERA_PITCH_MAX) must not snap on the first drag
+    // either: the drag is bounded below by min(MIN, current) and above by
+    // max(MAX, current), so dragging from -0.36 glides back continuously (a
+    // downward drag holds the pitch instead of escaping further, an upward
+    // drag re-enters the band smoothly). In-band drags clamp exactly as
+    // before — mouse sign, rate and band untouched.
+    if (look.dx !== 0 || look.dy !== 0) {
+      this.yaw -= look.dx * CAMERA_SENSITIVITY;
+      this.pitch = THREE.MathUtils.clamp(
+        this.pitch + look.dy * CAMERA_SENSITIVITY,
+        Math.min(CAMERA_PITCH_MIN, this.pitch),
+        Math.max(CAMERA_PITCH_MAX, this.pitch),
+      );
+    }
 
     // Movement is camera-relative so WASD never breaks while rotating.
     const forward = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
@@ -571,10 +611,27 @@ export class SceneManager {
     // Avatar facing tracks movement only above the stick-release threshold
     // (shared IDLE_RECENTER_MOVE_MAX from config: facing is static at/below
     // MAX, which is exactly where the idle-recenter gate holds — the recenter
-    // target is a true fixed point only because of this freeze).
-    if (worldMove.lengthSq() > IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX) {
+    // target is a true fixed point only because of this freeze). Post-shot
+    // body turn (owner fix round 2): when the stick is released and a turn is
+    // armed, the SAME rotation.y eases toward the shot facing instead — same
+    // shortest-arc exp pattern, scalar only, no allocations. Resumed movement
+    // cancels the turn outright (the movement writer owns yaw then), so the
+    // two writers never fight. Camera needs no suppression: follow/recenter
+    // read getAvatarFacing() live and converge behind the shot dir as the
+    // body settles (~0.25s, before the 0.8s recenter delay elapses).
+    const releaseLenSq = IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX;
+    if (worldMove.lengthSq() > releaseLenSq) {
       const targetYaw = Math.atan2(worldMove.x, worldMove.z);
       this.avatar.rotation.y = targetYaw;
+      this.shotTurnActive = false;
+    } else if (this.shotTurnActive) {
+      const stepped = stepShotBodyTurnYaw(this.avatar.rotation.y, this.shotTurnTarget, deltaSeconds);
+      if (isShotBodyTurnDone(stepped, this.shotTurnTarget)) {
+        this.avatar.rotation.y = this.shotTurnTarget;
+        this.shotTurnActive = false;
+      } else {
+        this.avatar.rotation.y = stepped;
+      }
     }
 
     this.powerState.update(deltaSeconds);
@@ -789,6 +846,9 @@ export class SceneManager {
     }
     this.avatar.position.set(x, SELF_SPAWN_Y, z);
     this.avatar.rotation.y = 0;
+    // Authoritative placement (spawn/respawn/snap) invalidates any pending
+    // post-shot turn target — a fresh facing starts here.
+    this.shotTurnActive = false;
     this.resetHop();
     this.hopPrev.set(x, SELF_SPAWN_Y, z);
     // A teleport zeroes body velocity (physics.reset) — never airborne.
@@ -847,6 +907,32 @@ export class SceneManager {
     return this.avatar?.rotation.y ?? 0;
   }
 
+  // Post-shot body turn arming (called from main.ts stopCharge on a REAL shot
+  // only — never on cancel-without-shot): the body will ease toward facing
+  // the shot direction (bodyFacingForShotYaw: shot yaw + PI, matching the
+  // fire-payload/ball-dir convention). No-op on non-finite yaw or while
+  // spectating (no body). If the player is already holding move, update()
+  // cancels the turn on the next frame and the movement writer wins — the
+  // call site additionally skips arming while deflected (belt and braces).
+  public setShotTurnTarget(shotYaw: number): void {
+    if (!Number.isFinite(shotYaw) || this.avatar === null || this.spectating) {
+      return;
+    }
+    this.shotTurnTarget = bodyFacingForShotYaw(shotYaw);
+    this.shotTurnActive = true;
+  }
+
+  // Turn cancel (charge restarts, cancels, camera-state transitions, death —
+  // mirrors where main.ts resets idleTimerS). Scalar flag flip, no alloc.
+  public cancelShotBodyTurn(): void {
+    this.shotTurnActive = false;
+  }
+
+  // Turn state for tests/telemetry.
+  public isShotBodyTurnActive(): boolean {
+    return this.shotTurnActive;
+  }
+
   // Fire feedback (hit attempt): flash + particles + light shake without
   // touching shield charges — authorititative damage stays server-side.
   public playFireFeedback(): void {
@@ -859,15 +945,29 @@ export class SceneManager {
     return { yaw: this.yaw, pitch: this.pitch };
   }
 
-  // Floating-aim camera follow: while charging, the camera copies the live
-  // aim yaw/pitch every frame so one right thumb can turn 360 degrees.
-  // No alloc, pitch clamped to the shared camera band. Idle path untouched.
-  public setCameraAngles(yaw: number, pitch: number): void {
+  // Stored fire-direction feed for tests/telemetry (mirrors
+  // debugGetCameraPosition): the clamped aim written by setAimAngles, i.e.
+  // what recoil/spark/muzzle math actually reads — not the live camera.
+  public debugGetAimAngles(): { yaw: number; pitch: number } {
+    return { yaw: this.aimYaw, pitch: this.aimPitch };
+  }
+
+  // Floating-aim camera follow: while charging, the camera takes the live aim
+  // yaw and the MIRRORED aim pitch (see mirrorChargeCameraPitch in
+  // net/chargeAim.ts) every frame so one right thumb can turn 360 degrees
+  // and aiming up drops the camera to look up the shot arc. The optional
+  // min/max override exists ONLY for that mirrored charge path (symmetric
+  // band [-CAMERA_PITCH_MAX, +CAMERA_PITCH_MAX], since the plain MIN -0.15
+  // would clip the mirror); every other caller uses the shared
+  // [CAMERA_PITCH_MIN, CAMERA_PITCH_MAX] defaults. No alloc, scalar clamp.
+  public setCameraAngles(yaw: number, pitch: number, min = CAMERA_PITCH_MIN, max = CAMERA_PITCH_MAX): void {
     if (!Number.isFinite(yaw) || !Number.isFinite(pitch)) {
       return;
     }
+    const lo = Number.isFinite(min) ? min : CAMERA_PITCH_MIN;
+    const hi = Number.isFinite(max) ? max : CAMERA_PITCH_MAX;
     this.yaw = yaw;
-    this.pitch = THREE.MathUtils.clamp(pitch, CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
+    this.pitch = THREE.MathUtils.clamp(pitch, Math.min(lo, hi), Math.max(lo, hi));
   }
 
   public getFenceSlotCount(): number {
@@ -876,19 +976,21 @@ export class SceneManager {
 
   public reset(): void {
     this.yaw = 0;
-    this.pitch = 0.25;
+    this.pitch = CAMERA_REST_PITCH;
     this.trampolineCooldown = 0;
     this.speedWasActive = false;
     this.events.length = 0;
     this.charge01 = 0;
     this.chargeZoom01 = 0;
+    this.shotTurnActive = false;
+    this.shotTurnTarget = 0;
     this.cameraDistance = CAMERA_FOLLOW_DISTANCE;
     this.latestBalls = [];
     this.latestSuper = null;
     this.hasAim = false;
     this.sparkTimer = 0;
     this.aimYaw = 0;
-    this.aimPitch = 0.25;
+    this.aimPitch = CAMERA_REST_PITCH;
     this.recoilGraceLeftS = 0;
     this.airborneGate.reset();
     this.cameraSmoothInit = false;

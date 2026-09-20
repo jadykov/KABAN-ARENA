@@ -8,6 +8,7 @@ import {
   BALL_GRAVITY,
   CAMERA_PITCH_MAX,
   CAMERA_PITCH_MIN,
+  CAMERA_REST_PITCH,
   CHARGE_MAX_S,
   FLOAT_DEADZONE,
   FLOAT_DRAG_RADIUS_PX,
@@ -31,8 +32,8 @@ import { SceneManager } from "./engine/SceneManager";
 import { NetworkManager, type RoomSnapshot } from "./net/NetworkManager";
 import { RemoteAvatars } from "./net/RemoteAvatars";
 import { applyAimAssist } from "./net/aimAssist";
-import { beginChargeLevel, pitchRateScale, stepChargeLevel, yawRateScale, type ChargeLevel } from "./net/chargeAim";
-import { cameraYawBehindFacing, forwardnessRateScale, shouldIdleFollow, shouldIdleRecenter, stepIdleFollowPitch, stepIdleFollowYaw, stepIdleRecenterPitch, stepIdleRecenterYaw, stickAngleFromForward, type IdleFollowGate, type IdleRecenterGate } from "./net/idleFollow";
+import { beginChargeLevel, mirrorChargeCameraPitch, pitchRateScale, shouldTrackAimFromCamera, stepChargeLevel, unmirrorChargeCameraPitch, yawRateScale, type ChargeLevel } from "./net/chargeAim";
+import { cameraYawBehindFacing, forwardnessRateScale, shouldIdleFollow, shouldIdleRecenter, stepIdleFollowPitch, stepIdleFollowYaw, stepIdleRecenterPitch, stepIdleRecenterYaw, stickAngleFromForward, tolerantCameraPitchMin, type IdleFollowGate, type IdleRecenterGate } from "./net/idleFollow";
 import {
   applyExpo,
   buildInputPayload,
@@ -130,10 +131,16 @@ async function boot(): Promise<void> {
   let reloadUntilMs = 0;
   let hasSuperBuff = false;
   let aimYaw = 0;
-  let aimPitch = 0.25;
+  let aimPitch = CAMERA_REST_PITCH;
   // One-shot charge pitch leveling (owner: camera eases to horizon at aim
   // start, then free aim): armed in startCharge, cleared on any exit below.
   let chargeLevel: ChargeLevel = { active: false };
+  // True once the per-frame charge block has written the mirrored camera
+  // pitch at least once during the CURRENT charge (reset in startCharge).
+  // stopCharge reads it: a mirrored camera must be un-mirrored back to true
+  // aim, while a charge with zero ticks (background-tab rAF stall) never
+  // mirrored the camera, so the plain copy is already true aim.
+  let chargeMirrored = false;
   // Floating right-thumb aim (Brawl-Stars-like one-thumb flow): pointerdown on
   // the right half records a floating origin where the thumb landed; drag
   // offsets map to an expo-shaped vector integrated into aimYaw/aimPitch at
@@ -235,11 +242,20 @@ async function boot(): Promise<void> {
       aimStick.element.style.display = "";
       fireButton.style.display = "";
       const angles = sceneManager.getCameraAngles();
-      aimYaw = angles.yaw;
-      aimPitch = angles.pitch;
+      // Out-of-band guard (F3 death/disconnect note): a stale mirrored
+      // charge pitch (down to -CAMERA_PITCH_MAX) can survive a disconnect /
+      // rejoin on the camera (applySnapshot never touches it). Normalize the
+      // camera into the default band here — the hover->follow cut hides the
+      // step — so aim starts in-band and the plain per-frame track below
+      // cannot re-corrupt it.
+      sceneManager.setCameraAngles(angles.yaw, angles.pitch);
+      const normalized = sceneManager.getCameraAngles();
+      aimYaw = normalized.yaw;
+      aimPitch = normalized.pitch;
       isCharging = false;
       chargeLevel.active = false;
       idleTimerS = 0;
+      sceneManager.cancelShotBodyTurn();
       isReloading = false;
       reloadUntilMs = 0;
       sceneManager.setCharge01(0);
@@ -265,6 +281,7 @@ async function boot(): Promise<void> {
       isCharging = false;
       chargeLevel.active = false;
       idleTimerS = 0;
+      sceneManager.cancelShotBodyTurn();
       isReloading = false;
       sceneManager.setCharge01(0);
       sceneManager.setChargeZoom01(0);
@@ -285,6 +302,7 @@ async function boot(): Promise<void> {
       isCharging = false;
       chargeLevel.active = false;
       idleTimerS = 0;
+      sceneManager.cancelShotBodyTurn();
       isReloading = false;
       hasSuperBuff = false;
       sceneManager.setCharge01(0);
@@ -356,6 +374,7 @@ async function boot(): Promise<void> {
     } else if (self !== undefined && isPlaying) {
       if (lastSelfAlive === true && self.alive === false && !sceneManager.isSpectating()) {
         sceneManager.spawnDeathBurst(self.x, 1.2, self.z);
+        sceneManager.cancelShotBodyTurn();
       }
       lastSelfAlive = false;
     }
@@ -468,8 +487,11 @@ async function boot(): Promise<void> {
     chargeStartMs = nowMs;
     // A new aim takes over the camera: drop any pending idle recenter so the
     // charge zoom path starts clean (the per-frame loop also holds the timer
-    // at 0 for the whole charge).
+    // at 0 for the whole charge). A re-aim also cancels any pending
+    // post-shot body turn (a fresh shot re-arms it on release).
     idleTimerS = 0;
+    chargeMirrored = false;
+    sceneManager.cancelShotBodyTurn();
     // One-shot pitch leveling armed: the camera eases toward the horizon
     // until the first aim-stick deflection takes over (per-frame below).
     chargeLevel = beginChargeLevel();
@@ -488,6 +510,7 @@ async function boot(): Promise<void> {
     isCharging = false;
     chargeLevel.active = false;
     idleTimerS = 0;
+    sceneManager.cancelShotBodyTurn();
     sceneManager.setCharge01(0);
     // Stage 4d.2: cancel returns zoom + opacity (eased, never mid-charge).
     sceneManager.setChargeZoom01(0);
@@ -542,7 +565,20 @@ async function boot(): Promise<void> {
     if (stickIdle && floatIdle) {
       const releaseAngles = sceneManager.getCameraAngles();
       aimYaw = releaseAngles.yaw;
-      aimPitch = releaseAngles.pitch;
+      // F1: during charge the camera holds the MIRRORED pitch, so copying it
+      // back raw sign-inverts the shot. Un-mirror through the shared helper
+      // (exact involution on the band — see unmirrorChargeCameraPitch) and
+      // clamp to the aim band. The chargeMirrored flag covers a charge with
+      // zero ticks (background-tab rAF stall): the camera was never mirrored,
+      // so the plain copy is already true aim. This one site serves ALL
+      // release flows (Space keyup, FIRE/aim-stick pointerup, float LMB
+      // pointerup — the float path zeroes floatVector just before, so it
+      // always lands here) — there is no other camera->aim copy on release.
+      const unmirrored = chargeMirrored
+        ? unmirrorChargeCameraPitch(releaseAngles.pitch)
+        : releaseAngles.pitch;
+      aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, unmirrored));
+      chargeMirrored = false;
     }
     const power01 = chargeToPower01(chargeMs / 1000);
     const selfPos = sceneManager.getAvatarPosition();
@@ -563,6 +599,19 @@ async function boot(): Promise<void> {
       super: hasSuperBuff,
       throwerY: selfPos.y,
     });
+    // Post-shot body turn (owner fix round 2): after a REAL shot the body
+    // turns to face the shot direction (setShotTurnTarget eases the SAME
+    // avatar.rotation.y the movement writer owns — which is also the rotY
+    // sent upstream every tick, so remotes learn the turn via the existing
+    // pass-through, no server change). Skipped while the move stick is held:
+    // movement owns yaw then (update() would cancel it next frame anyway).
+    // Camera needs no suppression: follow/recenter read getAvatarFacing()
+    // live and converge behind the shot dir as the body settles (~0.25s,
+    // before the 0.8s recenter delay elapses).
+    const shotMove = input.getMoveVector();
+    if (shotMove.x * shotMove.x + shotMove.y * shotMove.y <= IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX) {
+      sceneManager.setShotTurnTarget(assisted.yaw);
+    }
     // Instant local feedback (<1 frame, zero network wait): pooled flash AT
     // the hand (bodyCenter XZ + dir*0.7, y = bodyY + torso offset) so the eye
     // sees the shot leave the hand before the server round-trip. The
@@ -826,6 +875,7 @@ async function boot(): Promise<void> {
       isCharging = false;
       chargeLevel.active = false;
       idleTimerS = 0;
+      sceneManager.cancelShotBodyTurn();
       isReloading = false;
       reloadUntilMs = 0;
       aimVector = { x: 0, y: 0 };
@@ -940,16 +990,19 @@ async function boot(): Promise<void> {
     const rawLook = input.consumeLookDelta();
     const playing = isPlaying && !sceneManager.isSpectating();
     const move = playing ? rawMove : { x: 0, y: 0 };
-    // While charging the camera follows aim (one-thumb 360 turn); RMB
+    // While charging the camera mirrors aim (one-thumb 360 turn); RMB
     // free-look applies only when NOT charging.
     const look = playing ? (isCharging ? { dx: 0, dy: 0 } : rawLook) : { dx: 0, dy: 0 };
     // R2 aim + charge + reload tick (fighters only, spectators gated out).
     // Aim rule: a deflected stick/float integrates yaw/pitch at the shared
     // rate (mobile aiming, also while charging); an idle stick AND idle float
-    // tracks the live camera every frame — even mid-charge — so
-    // release-moment aim never drifts from what the player sees. While
-    // charging the camera copies aimYaw/aimPitch each frame (360-degree one
-    // thumb turn). Charge only drives power (charge01), never direction.
+    // tracks the live camera every frame — but ONLY when not charging
+    // (shouldTrackAimFromCamera: during charge the camera is the mirrored
+    // derived value, so copying it back would sign-flip the aim every frame).
+    // While charging the camera takes the aim yaw and the MIRRORED aim pitch
+    // each frame (360-degree one thumb turn, aim-up drops the camera to look
+    // up the arc — see mirrorChargeCameraPitch). Charge only drives power
+    // (charge01), never direction.
     // Charge leveling: at aim start the pitch eases ONCE toward the horizon
     // (interrupted by any aim deflection); while charging both stick rates
     // run damped (calmer aiming, full down-aim range kept).
@@ -1009,6 +1062,10 @@ async function boot(): Promise<void> {
             followRate,
           ),
           stepIdleFollowPitch(followed.pitch, deltaSeconds),
+          // F3: tolerate a stale mirrored post-shot pitch until it eases
+          // back into the default band (no one-frame snap).
+          tolerantCameraPitchMin(followed.pitch),
+          CAMERA_PITCH_MAX,
         );
       }
       // Idle recenter (post-playtest Option A, creep-band fix): the stick truly
@@ -1065,13 +1122,23 @@ async function boot(): Promise<void> {
             deltaSeconds,
           ),
           stepIdleRecenterPitch(settled.pitch, deltaSeconds),
+          // F3: tolerate a stale mirrored post-shot pitch until it eases
+          // back into the default band (no one-frame snap).
+          tolerantCameraPitchMin(settled.pitch),
+          CAMERA_PITCH_MAX,
         );
       }
+      // Idle aim-track (F2 fix): skipped entirely while charging — the
+      // camera holds the mirrored pitch then, and copying it back would
+      // sign-flip aimPitch every frame (30Hz oscillation with the mirror
+      // write below). Aim is the source of truth during charge; this copy
+      // only follows non-charge camera moves (RMB free-look).
       if (
-        Math.abs(aimVector.x) < 0.05 &&
-        Math.abs(aimVector.y) < 0.05 &&
-        Math.abs(floatVector.x) < 0.05 &&
-        Math.abs(floatVector.y) < 0.05
+        shouldTrackAimFromCamera(
+          isCharging,
+          Math.abs(aimVector.x) < 0.05 && Math.abs(aimVector.y) < 0.05,
+          Math.abs(floatVector.x) < 0.05 && Math.abs(floatVector.y) < 0.05,
+        )
       ) {
         const cam = sceneManager.getCameraAngles();
         aimYaw = cam.yaw;
@@ -1084,8 +1151,20 @@ async function boot(): Promise<void> {
           Math.hypot(aimVector.x, aimVector.y) >= FLOAT_DEADZONE ||
           Math.hypot(floatVector.x, floatVector.y) >= FLOAT_DEADZONE;
         aimPitch = stepChargeLevel(chargeLevel, aimPitch, deflected, deltaSeconds);
-        // Camera follows aim while charging (per-frame, no alloc).
-        sceneManager.setCameraAngles(aimYaw, aimPitch);
+        // Aim-mirror camera while charging (fix round 3): yaw follows aim
+        // directly, pitch takes the negated aim pitch in the symmetric
+        // [-MAX, +MAX] band (the plain MIN -0.15 would clip the mirror).
+        // The aim pitch itself stays in [MIN, MAX] above; the fire payload
+        // keeps that band too — only the camera mirrors.
+        sceneManager.setCameraAngles(
+          aimYaw,
+          mirrorChargeCameraPitch(aimPitch),
+          -CAMERA_PITCH_MAX,
+          CAMERA_PITCH_MAX,
+        );
+        // This charge mirrored the camera at least once: stopCharge must
+        // un-mirror the release copy back to true aim (F1).
+        chargeMirrored = true;
       }
       // Aim feed every frame (recoil kick dir + spark emitter; body keeps
       // movement yaw — no barrel to track since 4d.1).

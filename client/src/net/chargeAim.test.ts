@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { AIM_PITCH_DAMP, AIM_YAW_DAMP, CAMERA_PITCH_MAX, CAMERA_PITCH_MIN } from "../config";
-import { beginChargeLevel, pitchRateScale, stepChargeLevel, yawRateScale } from "./chargeAim";
+import {
+  beginChargeLevel,
+  mirrorChargeCameraPitch,
+  pitchRateScale,
+  shouldTrackAimFromCamera,
+  stepChargeLevel,
+  unmirrorChargeCameraPitch,
+  yawRateScale,
+} from "./chargeAim";
 
 const FRAME = 1 / 60;
 
@@ -77,5 +85,104 @@ describe("charge yaw damping (horizontal rate scale, 4d.2-fix2)", () => {
     expect(yawRateScale(true)).toBe(AIM_YAW_DAMP);
     expect(yawRateScale(true)).toBeLessThan(1);
     expect(yawRateScale(false)).toBe(1);
+  });
+});
+
+describe("aim-mirror camera pitch (fix round 3, TPS mirror)", () => {
+  it("negates the aim pitch: aim up -> camera pitch negative (drops)", () => {
+    expect(mirrorChargeCameraPitch(0.3)).toBeCloseTo(-0.3, 12);
+    expect(mirrorChargeCameraPitch(0)).toBe(0);
+  });
+
+  it("is symmetric: aim down -> camera pitch positive (rises)", () => {
+    expect(mirrorChargeCameraPitch(-0.1)).toBeCloseTo(0.1, 12);
+    expect(mirrorChargeCameraPitch(-CAMERA_PITCH_MIN)).toBeCloseTo(CAMERA_PITCH_MIN, 12);
+  });
+
+  it("clamps symmetrically to [-CAMERA_PITCH_MAX, +CAMERA_PITCH_MAX]", () => {
+    expect(mirrorChargeCameraPitch(1.0)).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
+    expect(mirrorChargeCameraPitch(-1.0)).toBeCloseTo(CAMERA_PITCH_MAX, 12);
+    expect(mirrorChargeCameraPitch(CAMERA_PITCH_MAX)).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
+    // The full aim band mirrors inside the symmetric clamp untouched.
+    expect(mirrorChargeCameraPitch(CAMERA_PITCH_MIN)).toBeCloseTo(-CAMERA_PITCH_MIN, 12);
+  });
+
+  it("passes non-finite input through (call sites treat it as no-move)", () => {
+    expect(mirrorChargeCameraPitch(Number.NaN)).toBeNaN();
+    expect(mirrorChargeCameraPitch(Number.POSITIVE_INFINITY)).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("is an exact involution on the symmetric band: mirror(mirror(x)) = x", () => {
+    // In-band the negation never hits either clamp, so the double mirror is
+    // the identity — this is what makes unmirrorChargeCameraPitch exact for
+    // every aim pitch main.ts can hold during charge ([MIN, MAX] subset).
+    const samples = [
+      0,
+      0.05,
+      0.15,
+      0.3,
+      -0.1,
+      CAMERA_PITCH_MIN,
+      -CAMERA_PITCH_MIN,
+      CAMERA_PITCH_MAX,
+      -CAMERA_PITCH_MAX,
+    ];
+    for (const x of samples) {
+      expect(mirrorChargeCameraPitch(mirrorChargeCameraPitch(x))).toBeCloseTo(x, 12);
+    }
+  });
+
+  it("collapses out-of-band input to the band edge (safe backstop, not a live path)", () => {
+    // Unreachable in the fixed wiring (aim is always in [MIN, MAX] once the
+    // F2 feedback copy is gone); documents the honest semantic instead of
+    // pretending the involution holds everywhere. Single application pins to
+    // the edge (mirror(1.0) = -MAX, covered above); the double application
+    // below just mirrors that edge back.
+    expect(mirrorChargeCameraPitch(mirrorChargeCameraPitch(1.0))).toBeCloseTo(CAMERA_PITCH_MAX, 12);
+    expect(mirrorChargeCameraPitch(mirrorChargeCameraPitch(-2.5))).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
+  });
+});
+
+describe("unmirror camera->aim pitch (F1 fix, shared helper)", () => {
+  it("recovers the true aim pitch from the mirrored camera pitch", () => {
+    // Aim +0.3 shows camera -0.3 while charging; release must read +0.3.
+    expect(unmirrorChargeCameraPitch(-0.3)).toBeCloseTo(0.3, 12);
+    expect(unmirrorChargeCameraPitch(0.1)).toBeCloseTo(-0.1, 12);
+    expect(unmirrorChargeCameraPitch(0)).toBe(0);
+    expect(unmirrorChargeCameraPitch(-CAMERA_PITCH_MAX)).toBeCloseTo(CAMERA_PITCH_MAX, 12);
+    expect(unmirrorChargeCameraPitch(-CAMERA_PITCH_MIN)).toBeCloseTo(CAMERA_PITCH_MIN, 12);
+  });
+
+  it("round-trips every in-band aim pitch exactly (pins the F1 release path)", () => {
+    const samples = [0, 0.05, 0.15, 0.3, -0.1, CAMERA_PITCH_MIN, CAMERA_PITCH_MAX];
+    for (const aim of samples) {
+      const camera = mirrorChargeCameraPitch(aim);
+      expect(unmirrorChargeCameraPitch(camera)).toBeCloseTo(aim, 12);
+    }
+  });
+
+  it("collapses out-of-band input to the edge and passes non-finite through", () => {
+    expect(unmirrorChargeCameraPitch(1.0)).toBeCloseTo(-CAMERA_PITCH_MAX, 12);
+    expect(unmirrorChargeCameraPitch(Number.NaN)).toBeNaN();
+    expect(unmirrorChargeCameraPitch(Number.POSITIVE_INFINITY)).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("idle aim-track gate (F2 fix)", () => {
+  it("never tracks while charging, even with both sticks idle", () => {
+    // The old wiring copied camera->aim unconditionally here: while charging
+    // the camera holds mirror(aim), so the copy fed -aim back into aim and
+    // the next mirror flipped it again (~30Hz oscillation).
+    expect(shouldTrackAimFromCamera(true, true, true)).toBe(false);
+    expect(shouldTrackAimFromCamera(true, false, true)).toBe(false);
+    expect(shouldTrackAimFromCamera(true, true, false)).toBe(false);
+    expect(shouldTrackAimFromCamera(true, false, false)).toBe(false);
+  });
+
+  it("tracks only when not charging with both sticks idle (RMB look path)", () => {
+    expect(shouldTrackAimFromCamera(false, true, true)).toBe(true);
+    expect(shouldTrackAimFromCamera(false, false, true)).toBe(false);
+    expect(shouldTrackAimFromCamera(false, true, false)).toBe(false);
+    expect(shouldTrackAimFromCamera(false, false, false)).toBe(false);
   });
 });
