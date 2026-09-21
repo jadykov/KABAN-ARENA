@@ -4,9 +4,9 @@
 // covered by server room tests + live playtest, not unit mocks.
 
 import { describe, expect, it } from "vitest";
-import { BALL_FIRST_TICK_HOLD_S, GUEST_NICK_PREFIX, HIT_DAMAGE, MAX_HEARTS, TRAJ_PREVIEW_DT_S } from "../config";
+import { BALL_FIRST_TICK_HOLD_S, BALL_HIT_PLAYER_MESSAGE, GUEST_NICK_PREFIX, HIT_DAMAGE, MAX_HEARTS, TRAJ_PREVIEW_DT_S } from "../config";
 import { expSmoothFactor, lerp, lerpAngle, RemoteTrack } from "./interpolation";
-import { decodeSnapshot } from "./NetworkManager";
+import { decodeBallHitPlayer, decodeSnapshot } from "./NetworkManager";
 import {
   buildFirePayload,
   buildGuestNick,
@@ -361,5 +361,37 @@ describe("RemoteTrack (snap on sight/teleport, ease otherwise)", () => {
       track.update(target, 1 / 60);
     }
     expect(track.x).toBeCloseTo(2, 1);
+  });
+});
+
+describe("ball-hit-player decode (blood trigger)", () => {
+  it("pins the mirrored message name", () => {
+    // Server BALL_HIT_PLAYER_MESSAGE must carry the same wire string.
+    expect(BALL_HIT_PLAYER_MESSAGE).toBe("ball-hit-player");
+  });
+
+  it("decodes ids + impact position + super flag", () => {
+    expect(decodeBallHitPlayer({ ballId: "b1", victimId: "s2", x: 1, y: 1.4, z: 2, super: true })).toEqual({
+      ballId: "b1",
+      victimId: "s2",
+      x: 1,
+      y: 1.4,
+      z: 2,
+      super: true,
+    });
+    // super defaults to false unless exactly true.
+    expect(
+      decodeBallHitPlayer({ ballId: "b1", victimId: "s2", x: 1, y: 1.4, z: 2 }),
+    ).toEqual({ ballId: "b1", victimId: "s2", x: 1, y: 1.4, z: 2, super: false });
+  });
+
+  it("rejects garbage with null (no phantom bursts)", () => {
+    expect(decodeBallHitPlayer(null)).toBe(null);
+    expect(decodeBallHitPlayer(undefined)).toBe(null);
+    expect(decodeBallHitPlayer({})).toBe(null);
+    expect(decodeBallHitPlayer({ ballId: "b1" })).toBe(null);
+    expect(decodeBallHitPlayer({ ballId: "", victimId: "s2", x: 1, y: 1.4, z: 2 })).toBe(null);
+    expect(decodeBallHitPlayer({ ballId: "b1", victimId: "s2", x: Number.NaN, y: 1.4, z: 2 })).toBe(null);
+    expect(decodeBallHitPlayer({ ballId: "b1", victimId: "s2", x: 1, y: 1.4, z: Number.POSITIVE_INFINITY })).toBe(null);
   });
 });

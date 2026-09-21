@@ -151,28 +151,6 @@ export class RemoteAvatars {
     }
   }
 
-  // Living non-self positions for client-side aim assist target picking.
-  // Carries the eased body-center Y (server player.y) so the assist aims at
-  // the target's real height (tower tops included — bug 2 elevation fix).
-  public livingPositions(
-    selfId: string | null,
-  ): Array<{ sessionId: string; x: number; z: number; alive: boolean; y: number }> {
-    const out: Array<{ sessionId: string; x: number; z: number; alive: boolean; y: number }> = [];
-    for (const [sessionId, entry] of this.entries) {
-      if (sessionId === selfId || !entry.rig.visible) {
-        continue;
-      }
-      out.push({
-        sessionId,
-        x: entry.group.position.x,
-        z: entry.group.position.z,
-        alive: true,
-        y: entry.group.position.y,
-      });
-    }
-    return out;
-  }
-
   private createEntry(snapshot: NetPlayerSnapshot): RemoteEntry {
     const group = new THREE.Group();
     // Per-entry geometry clone: two-tone clothing is baked as vertex colors,

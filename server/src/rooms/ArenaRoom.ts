@@ -4,6 +4,7 @@ import {
   BALL_GRAVITY,
   BALL_GROUND_Y,
   BALL_HIT_RADIUS,
+  BALL_HIT_PLAYER_MESSAGE,
   BODY_CENTER_Y,
   BOT_NAMES,
   BOT_SPEED,
@@ -857,6 +858,18 @@ export class ArenaRoom extends Room<ArenaState> {
             this.respawnAt.set(victim.sessionId, now + RESPAWN_DELAY_MS);
           }
         }
+        // Blood-FX trigger: damage registered on a player — clients show the
+        // red hit burst ONLY for this event. Environmental deaths (boundary,
+        // block, pool overflow) broadcast nothing. Position is the ball spot
+        // at hit (post-integration); payload stays minimal (ids + position).
+        this.broadcast(BALL_HIT_PLAYER_MESSAGE, {
+          ballId,
+          victimId: victim.sessionId,
+          x: ball.x,
+          y: ball.y,
+          z: ball.z,
+          super: ball.super,
+        });
         dead.push(ballId);
       }
     });

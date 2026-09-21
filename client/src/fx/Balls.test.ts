@@ -1,12 +1,13 @@
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";
-import { BALL_MUZZLE_OFFSET, BALL_TORSO_OFFSET, MAX_LIVE_BALLS, SELF_SPAWN_Y } from "../config";
+import { BALL_MUZZLE_OFFSET, BALL_TORSO_OFFSET, LOCAL_AVATAR_COLOR, MAX_LIVE_BALLS, SELF_SPAWN_Y } from "../config";
 import { directionFromYawPitch, muzzleForShot, type NetBallSnapshot } from "../net/protocol";
 import {
   BALL_BASALT_COLOR,
   BALL_CAP_COLOR,
   BALL_RADIUS,
   BallsPool,
+  ENV_PUFF_COLOR,
   MUZZLE_FLASH_LIFE_S,
   SUPER_BALL_COLOR,
   SUPER_CORE_INNER_RADIUS,
@@ -261,6 +262,61 @@ describe("BallsPool muzzle flash", () => {
       const colors = visible.map((sprite) => (sprite.material as THREE.SpriteMaterial).color.getHex());
       expect(colors).toContain(TRAIL_GOLD_COLOR);
       expect(colors).toContain(TRAIL_SUPER_COLOR);
+    } finally {
+      pool.dispose();
+    }
+  });
+});
+
+// Bug round 3 (blood only on player damage): environmental vanishes pop a
+// small NEUTRAL puff, never the thrower color; marked player hits skip it.
+describe("BallsPool impact differentiation (blood only on player damage)", () => {
+  it("environmental vanish pops a NEUTRAL puff, never owner-red", () => {
+    // The old code tinted the vanish puff with the ball color, so every wall
+    // hit by the reddish local fighter read as blood.
+    expect(LOCAL_AVATAR_COLOR).not.toBe(ENV_PUFF_COLOR);
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      pool.render([makeBall("b1", false, LOCAL_AVATAR_COLOR)]);
+      pool.render([]);
+      pool.update(1 / 60);
+      const lit = puffSprites(scene).filter((sprite) => sprite.visible);
+      expect(lit.length).toBeGreaterThan(0);
+      for (const sprite of lit) {
+        expect((sprite.material as THREE.SpriteMaterial).color.getHex()).toBe(ENV_PUFF_COLOR);
+      }
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  it("markPlayerHit suppresses the neutral vanish puff (blood covers it)", () => {
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      pool.render([makeBall("b1", false, LOCAL_AVATAR_COLOR)]);
+      // The server player-hit event lands ahead of the snapshot that drops
+      // the ball: mark first, then vanish.
+      pool.markPlayerHit("b1");
+      pool.render([]);
+      pool.update(1 / 60);
+      expect(puffSprites(scene).filter((sprite) => sprite.visible)).toHaveLength(0);
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  it("markPlayerHit ignores garbage and never leaks", () => {
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      pool.markPlayerHit("");
+      // Unknown ids vanish neutrally (no phantom suppression).
+      pool.render([makeBall("b1", false)]);
+      pool.render([]);
+      pool.update(1 / 60);
+      expect(puffSprites(scene).filter((sprite) => sprite.visible).length).toBeGreaterThan(0);
     } finally {
       pool.dispose();
     }

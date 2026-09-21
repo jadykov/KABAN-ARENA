@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Client } from "colyseus";
 import { SchemaSerializer } from "colyseus";
 import {
+  BALL_HIT_PLAYER_MESSAGE,
   BALL_MUZZLE_OFFSET,
   BALL_TORSO_OFFSET,
   BODY_CENTER_Y,
@@ -1629,5 +1630,121 @@ describe("server elevation (tower tops walkable, ground impenetrable)", () => {
     expect(bodyCenterYAtExpanded(6.0, 4.8, 0.5)).toBeCloseTo(3.1, 10);
     expect(bodyCenterYAtExpanded(7.5, 4.8, 0.5)).toBeCloseTo(1.1, 10);
     expect(bodyCenterYAtExpanded(0, 0, 0.5)).toBeCloseTo(1.1, 10);
+  });
+});
+
+// Bug round 3 (blood only on player damage): the room broadcasts
+// BALL_HIT_PLAYER_MESSAGE exactly on the findBallVictim damage path —
+// environmental deaths (tower/block, ground/boundary, overflow) stay silent.
+describe("ball-hit-player broadcast (blood only on player damage)", () => {
+  function captureBroadcasts(room: ArenaRoom): Array<{ type: string; message: unknown }> {
+    const out: Array<{ type: string; message: unknown }> = [];
+    const recorder = (type: string, message?: unknown): void => {
+      out.push({ type, message });
+    };
+    (room as unknown as { broadcast: (type: string, message?: unknown) => void }).broadcast = recorder;
+    return out;
+  }
+
+  function hitMessages(captured: Array<{ type: string; message: unknown }>): unknown[] {
+    return captured
+      .filter((entry) => entry.type === BALL_HIT_PLAYER_MESSAGE)
+      .map((entry) => entry.message);
+  }
+
+  it("pins the mirrored message name", () => {
+    // Client BALL_HIT_PLAYER_MESSAGE must carry the same wire string.
+    expect(BALL_HIT_PLAYER_MESSAGE).toBe("ball-hit-player");
+  });
+
+  it("broadcasts ids + impact position when a ball damages a player", async () => {
+    const room = await playingRoom();
+    const { target } = isolateDuel(room);
+    const captured = captureBroadcasts(room);
+    fireAs(room, "s1", { power01: 1, yaw: 0, pitch: 0.1, super: false });
+    expect(room.state.balls.size).toBe(1);
+    for (let i = 0; i < 60 && target.hp === 100; i += 1) {
+      advance(room, 50);
+      room.tickRoom(50);
+    }
+    expect(target.hp).toBe(100 - FULL_DAMAGE);
+    const hits = hitMessages(captured);
+    expect(hits).toHaveLength(1);
+    const body = (typeof hits[0] === "object" && hits[0] !== null ? hits[0] : {}) as Record<string, unknown>;
+    const ballId = body["ballId"];
+    expect(typeof ballId === "string" && (ballId as string).length > 0).toBe(true);
+    expect(body["victimId"]).toBe("s2");
+    const hx = body["x"];
+    const hy = body["y"];
+    const hz = body["z"];
+    expect(typeof hx === "number" && Number.isFinite(hx as number)).toBe(true);
+    expect(typeof hy === "number" && Number.isFinite(hy as number)).toBe(true);
+    expect(typeof hz === "number" && Number.isFinite(hz as number)).toBe(true);
+    expect(body["super"]).toBe(false);
+    // Impact position is at the victim: isolateDuel parks the target at
+    // (0, -3) with body-center y 1.1, and the hit triggers within the 0.9m
+    // ball-hit radius of that point.
+    expect(Math.hypot((hx as number) - 0, (hz as number) - -3)).toBeLessThanOrEqual(0.91);
+    expect(Math.abs((hy as number) - 1.1)).toBeLessThanOrEqual(0.9);
+  });
+
+  it("tower/block impact broadcasts nothing", async () => {
+    // Same flat lane as the central-tower test: the doubled (4.8, 4.8) tower
+    // intercepts, and godmode rules out victim hits — pure block death.
+    const room = await playingRoom();
+    removeBots(room);
+    room.state.players.forEach((player: PlayerState): void => {
+      player.invulnUntil = 1e15;
+    });
+    const shooter = getPlayer(room, "s1");
+    const target = getPlayer(room, "s2");
+    if (shooter === undefined || target === undefined) {
+      throw new Error("missing fighters");
+    }
+    shooter.x = 4.8;
+    shooter.z = 0;
+    shooter.reloadUntil = 0;
+    target.x = -12;
+    target.z = -12;
+    const captured = captureBroadcasts(room);
+    fireAs(room, "s1", { power01: 1, yaw: Math.PI, pitch: 0.05, super: false });
+    expect(room.state.balls.size).toBe(1);
+    for (let i = 0; i < 8; i += 1) {
+      advance(room, 50);
+      room.tickRoom(50);
+    }
+    expect(room.state.balls.size).toBe(0);
+    expect(hitMessages(captured)).toHaveLength(0);
+  });
+
+  it("ground/boundary impact broadcasts nothing", async () => {
+    // Open x=0 lane: the flat shot clears the low outer cube and dies on the
+    // far boundary — no victim anywhere near the flight line.
+    const room = await playingRoom();
+    removeBots(room);
+    room.state.players.forEach((player: PlayerState): void => {
+      player.invulnUntil = 1e15;
+    });
+    const shooter = getPlayer(room, "s1");
+    const target = getPlayer(room, "s2");
+    if (shooter === undefined || target === undefined) {
+      throw new Error("missing fighters");
+    }
+    shooter.x = 0;
+    shooter.z = 0;
+    shooter.reloadUntil = 0;
+    target.x = -12;
+    target.z = -12;
+    const captured = captureBroadcasts(room);
+    fireAs(room, "s1", { power01: 1, yaw: Math.PI, pitch: 0.05, super: false });
+    expect(room.state.balls.size).toBe(1);
+    for (let i = 0; i < 30; i += 1) {
+      advance(room, 50);
+      room.tickRoom(50);
+    }
+    expect(room.state.balls.size).toBe(0);
+    expect(target.hp).toBe(100);
+    expect(shooter.hp).toBe(100);
+    expect(hitMessages(captured)).toHaveLength(0);
   });
 });

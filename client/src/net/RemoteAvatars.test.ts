@@ -118,25 +118,3 @@ describe("RemoteAvatars airborne glide (climb -> lean, no bounce)", () => {
   });
 });
 
-describe("RemoteAvatars livingPositions carries replicated height (bug 2)", () => {
-  it("exposes the eased body-center Y for aim-assist targeting", () => {
-    const scene = new THREE.Scene();
-    const avatars = new RemoteAvatars(scene);
-    try {
-      // A remote standing on a 2.0m tower (server y = 3.1): after the ease
-      // converges, livingPositions must report tower height, not 1.1.
-      for (let i = 0; i < 120; i += 1) {
-        avatars.sync([makeSnapshot({ sessionId: "r1", x: 4.8, z: 4.8, y: 3.1 })], null, FRAME);
-      }
-      const positions = avatars.livingPositions(null);
-      expect(positions).toHaveLength(1);
-      expect(positions[0]?.sessionId).toBe("r1");
-      expect(positions[0]?.y ?? 0).toBeGreaterThan(2.5);
-      expect(positions[0]?.y ?? 0).toBeCloseTo(3.1, 1);
-      // Self is excluded, spectators never list.
-      expect(avatars.livingPositions("r1")).toHaveLength(0);
-    } finally {
-      avatars.dispose();
-    }
-  });
-});

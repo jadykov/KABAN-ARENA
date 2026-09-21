@@ -16,6 +16,7 @@ import {
   CAMERA_WALL_MARGIN,
   BALL_MUZZLE_OFFSET,
   BALL_TORSO_OFFSET,
+  BLOOD_BURST_COUNT,
   CHARGE_MOVE_MULT,
   DEATH_BURST_COUNT,
   DEATH_BURST_ORANGE,
@@ -507,6 +508,28 @@ export class SceneManager {
 
   public getAliveParticleCount(): number {
     return this.particles.aliveCount;
+  }
+
+  // Player-hit blood burst (bug round 3): red particles ONLY for the server
+  // "ball-hit-player" event (see notifyBallHit below). Environmental vanishes
+  // never reach here — BallsPool pops a small neutral puff for those instead.
+  // No alloc, no lights, one shared Points draw call via the ParticlePool.
+  public spawnBallHitBurst(x: number, y: number, z: number, superShot: boolean): void {
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+      return;
+    }
+    const count = superShot ? PARTICLE_BURST_COUNT : BLOOD_BURST_COUNT;
+    const color = superShot ? ACCENT_FIRE_BURST : ACCENT_HIT_BURST;
+    this.particles.spawn(x, y, z, count, new THREE.Color(color));
+  }
+
+  // Server player-hit entry point: marks the ball so its snapshot vanish
+  // skips the neutral env puff, then pops the red burst at the impact
+  // position. Safe in playing + spectator contexts (updateCombat renders
+  // balls and ticks particles in both).
+  public notifyBallHit(ballId: string, x: number, y: number, z: number, superShot: boolean): void {
+    this.ballsPool?.markPlayerHit(ballId);
+    this.spawnBallHitBurst(x, y, z, superShot);
   }
 
   public getWallOpacity(): number {

@@ -5,7 +5,7 @@
 // at any time and picks up the current phase from the first snapshot.
 
 import { Client, Room } from "colyseus.js";
-import { ROOM_NAME } from "../config";
+import { BALL_HIT_PLAYER_MESSAGE, ROOM_NAME } from "../config";
 import {
   buildFirePayload,
   normalizeNick,
@@ -41,6 +41,7 @@ export interface NetworkEvents {
   onSpectator(sessionId: string): void;
   onRoomFull(message: string): void;
   onKillfeed(message: string): void;
+  onBallHit(info: BallHitInfo): void;
   onLeave(): void;
   onError(message: string): void;
 }
@@ -183,6 +184,46 @@ export function decodeSnapshot(state: unknown, selfId: string | null = null): Ro
   };
 }
 
+// Server player-hit event (blood trigger): broadcast ONLY when a ball
+// registers damage on a player — never for wall/block/floor/boundary deaths.
+// Tolerant decode: garbage yields null (never a crash, never a phantom burst).
+export interface BallHitInfo {
+  ballId: string;
+  victimId: string;
+  x: number;
+  y: number;
+  z: number;
+  super: boolean;
+}
+
+export function decodeBallHitPlayer(payload: unknown): BallHitInfo | null {
+  if (typeof payload !== "object" || payload === null) {
+    return null;
+  }
+  const body = payload as Record<string, unknown>;
+  const ballId = body["ballId"];
+  const victimId = body["victimId"];
+  const x = body["x"];
+  const y = body["y"];
+  const z = body["z"];
+  if (typeof ballId !== "string" || ballId === "") {
+    return null;
+  }
+  if (typeof victimId !== "string" || victimId === "") {
+    return null;
+  }
+  if (typeof x !== "number" || !Number.isFinite(x)) {
+    return null;
+  }
+  if (typeof y !== "number" || !Number.isFinite(y)) {
+    return null;
+  }
+  if (typeof z !== "number" || !Number.isFinite(z)) {
+    return null;
+  }
+  return { ballId, victimId, x, y, z, super: body["super"] === true };
+}
+
 export class NetworkManager {
   private readonly serverUrl: string;
   private readonly events: NetworkEvents;
@@ -265,6 +306,12 @@ export class NetworkManager {
       const message = toString(body.message, "");
       if (message !== "") {
         this.events.onKillfeed(message);
+      }
+    });
+    room.onMessage(BALL_HIT_PLAYER_MESSAGE, (payload: unknown): void => {
+      const info = decodeBallHitPlayer(payload);
+      if (info !== null) {
+        this.events.onBallHit(info);
       }
     });
     room.onLeave((): void => {

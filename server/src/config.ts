@@ -191,6 +191,12 @@ export const RAMP_ENTRY_TOL = 0.3;
 // state, no snap-up from the ground beside a solid — that path fails the
 // feet match by metres, not microns).
 export const SUPPORT_STICK_TOL = 0.05;
+// Player-hit broadcast (blood FX trigger): when a ball registers damage on a
+// player, the room broadcasts BALL_HIT_PLAYER_MESSAGE with the ball/victim
+// ids + impact position. Environmental deaths (wall/block/floor/boundary,
+// pool overflow) broadcast nothing, so clients show red blood ONLY on real
+// hits. Mirrored by client BALL_HIT_PLAYER_MESSAGE (both must stay identical).
+export const BALL_HIT_PLAYER_MESSAGE = "ball-hit-player";
 // Charging slow-down mirror (client CHARGE_MOVE_MULT): aiming/charging
 // fighters move at half speed, server and client alike.
 export const CHARGE_MOVE_MULT = 0.5;

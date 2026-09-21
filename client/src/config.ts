@@ -445,23 +445,15 @@ export const SHOT_BODY_TURN_RATE_S = 12;
 // is snapped to the target and the turn deactivates. 0.01 rad (~0.6 deg) is
 // invisible on the avatar and leaves the camera-behind target aligned.
 export const SHOT_BODY_TURN_DONE_RAD = 0.01;
-// Light client-side aim assist (subtle, deterministic, no randomness):
-// living enemy within ASSIST range and inside the aim cone gets a gentle
-// pull toward its center (blend fraction, never a snap). Server authority
-// unchanged (server BALL_HIT_RADIUS 0.9 kept); assist only nudges the
-// release-time yaw/pitch in buildFirePayload path.
-export const AIM_ASSIST_MAX_DIST_M = 18;
-export const AIM_ASSIST_CONE_DEG = 12;
-export const AIM_ASSIST_BLEND = 0.5;
-// Assist target hysteresis (preview-jitter fix): the tracked target sticks
-// until a rival beats its cone angle by this margin — near-tied candidates
-// stop alternating every 100ms refresh. Pure + zero-alloc (see aimAssist).
-export const AIM_ASSIST_STICKY_MARGIN_DEG = 2;
-// Assist acquisition dead zone: a NEW target must sit inside this fraction
-// of the cone to steal the solve, while the tracked target holds until the
-// full cone edge. Kills cone-edge enter/exit tremor without touching the
-// tracked-target feel.
-export const AIM_ASSIST_ACQUIRE_FRACTION = 0.75;
+// Player-hit blood FX (bug round 3): the server broadcasts
+// BALL_HIT_PLAYER_MESSAGE only when a ball registers damage on a player
+// (mirror of server src/config.ts — the two strings must stay identical).
+// Clients spawn the red hit burst ONLY for this event; balls that vanish
+// without it (wall/block/floor/boundary) pop a small neutral puff, never red.
+export const BALL_HIT_PLAYER_MESSAGE = "ball-hit-player";
+// Red hit-burst particle count for normal shots (SUPER shots reuse
+// PARTICLE_BURST_COUNT). One shared pooled Points draw call, no lights.
+export const BLOOD_BURST_COUNT = 16;
 // Charging slow-down (mirror server CHARGE_MOVE_MULT): aiming/charging
 // fighters move at half speed on both ends, so the client prediction stops
 // wobble-fighting the server during charge+walk (preview origin jitter).

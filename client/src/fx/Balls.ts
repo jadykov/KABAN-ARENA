@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { MAX_LIVE_BALLS, SUPER_BLINK_S } from "../config";
 import type { NetBallSnapshot, NetSuperSnapshot } from "../net/protocol";
-import { ACCENT_BALL_CAP, ACCENT_TRAIL, BASE_BASALT, HL_CHARTREUSE, NEUTRAL_WHITE } from "../palette";
+import { ACCENT_BALL_CAP, ACCENT_SPARK, ACCENT_TRAIL, BASE_BASALT, HL_CHARTREUSE, NEUTRAL_WHITE } from "../palette";
 
 export const BALL_RADIUS = 0.38;
 export const BALL_BASALT_COLOR = BASE_BASALT;
@@ -35,6 +35,16 @@ export const TRAIL_GOLD_COLOR = ACCENT_TRAIL;
 export const TRAIL_SUPER_COLOR = SUPER_BALL_COLOR;
 export const TRAIL_SCALES = [0.42, 0.26] as const;
 export const TRAIL_OPACITIES = [0.55, 0.32] as const;
+// Environmental impact feedback (bug round 3, blood-only-on-damage): a ball
+// that vanishes WITHOUT a server player-hit event pops a SMALL NEUTRAL
+// mini-puff (pale violet, never red) — wall/block/floor/boundary deaths keep
+// a soft read without faking blood. The red burst spawns ONLY through the
+// "ball-hit-player" event (SceneManager blood FX); marked balls skip this
+// puff (see markPlayerHit) so a real hit never doubles up.
+export const ENV_PUFF_COLOR = ACCENT_SPARK;
+export const ENV_PUFF_LIFE_S = 0.3;
+export const ENV_PUFF_GROW = 1.5;
+export const ENV_PUFF_SUPER_GROW = 3;
 
 function makeGlowTexture(): THREE.Texture {
   if (typeof document === "undefined") {
@@ -86,7 +96,9 @@ const renderSeen: Set<string> = new Set();
 // no transparency).
 // Fire trail: 2 pooled glow sprites per live ball slot tinted by the owner's
 // ball.color (chartreuse for SUPER). Impact feedback is the pooled puff burst
-// (8 sprites) tinted the same way. Vanished ids pop a puff.
+// (8 sprites): environmental vanishes pop a small NEUTRAL mini-puff (never
+// red); player hits skip it via markPlayerHit (the red blood burst covers
+// those through the server event). Vanished ids pop a puff.
 // Mapping is STABLE by ballId (slotIds parallel to groups): insert/delete/
 // order shifts never teleport a ball to another slot. Positions ease toward
 // the latest snapshot target (exponential lerp in update); new ids snap once
@@ -112,6 +124,11 @@ export class BallsPool {
   private readonly puffs: Puff[] = [];
   private readonly trails: THREE.Sprite[] = [];
   private readonly tracked = new Map<string, TrackedBall>();
+  // Player-hit markers (bug round 3): ball ids confirmed by the server
+  // "ball-hit-player" event. Marked ids skip the neutral vanish puff — the
+  // red blood burst already covers the impact. Written only on rare hit
+  // events (never per-frame), capped so stale ids never accumulate.
+  private readonly hitIds = new Set<string>();
   private pulseTime = 0;
 
   public constructor(scene: THREE.Scene) {
@@ -177,6 +194,33 @@ export class BallsPool {
     return created;
   }
 
+  // Player-hit marker (bug round 3): call when the server "ball-hit-player"
+  // event arrives for a ball id. The id's snapshot vanish then skips the
+  // neutral env puff (the red burst covers it). The event lands ahead of or
+  // with the snapshot that drops the ball, so the marker is always armed in
+  // time; the cap + consume keep the set bounded even if a marked ball never
+  // vanishes (reconnect races).
+  public markPlayerHit(ballId: string): void {
+    if (typeof ballId !== "string" || ballId === "") {
+      return;
+    }
+    this.hitIds.add(ballId);
+    if (this.hitIds.size > MAX_LIVE_BALLS * 2) {
+      const oldest = this.hitIds.values().next();
+      if (!oldest.done && typeof oldest.value === "string") {
+        this.hitIds.delete(oldest.value);
+      }
+    }
+  }
+
+  private consumePlayerHit(ballId: string): boolean {
+    if (!this.hitIds.has(ballId)) {
+      return false;
+    }
+    this.hitIds.delete(ballId);
+    return true;
+  }
+
   public render(balls: readonly NetBallSnapshot[]): void {
     renderSeen.clear();
     for (const ball of balls) {
@@ -202,8 +246,8 @@ export class BallsPool {
       this.slotIds[i] = null;
       const last = this.tracked.get(slotId);
       this.tracked.delete(slotId);
-      if (last !== undefined) {
-        this.spawnPuff(last.x, last.y, last.z, last.super, last.color);
+      if (last !== undefined && !this.consumePlayerHit(slotId)) {
+        this.spawnEnvPuff(last.x, last.y, last.z, last.super);
       }
     }
     // Assign by ballId (stable) or update the existing slot target. New ids
@@ -273,11 +317,13 @@ export class BallsPool {
       this.tracked.set(ball.ballId, { x: ball.x, y: ball.y, z: ball.z, super: isSuper, color: ball.color });
     }
     // Defensive: tracked ids that never got a slot (pool-exhausted edge)
-    // still vanish with a puff; never accumulate stale ids.
+    // still vanish quietly; player-hit marks are honored here too.
     for (const [ballId, last] of this.tracked) {
       if (!renderSeen.has(ballId)) {
         this.tracked.delete(ballId);
-        this.spawnPuff(last.x, last.y, last.z, last.super, last.color);
+        if (!this.consumePlayerHit(ballId)) {
+          this.spawnEnvPuff(last.x, last.y, last.z, last.super);
+        }
       }
     }
     // Cap the tracked map (stale ids never accumulate).
@@ -364,6 +410,35 @@ export class BallsPool {
     material.opacity = 0.9;
   }
 
+  // Environmental vanish puff (bug round 3): SMALL NEUTRAL mini-puff in pale
+  // violet (never red, never the thrower color) for wall/block/floor/
+  // boundary deaths. Reuses the same pooled sprites (no new draw calls, no
+  // alloc); SUPER vanishes read slightly bigger but stay neutral.
+  public spawnEnvPuff(x: number, y: number, z: number, superShot: boolean): void {
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+      return;
+    }
+    let slot: Puff | null = null;
+    for (const puff of this.puffs) {
+      if (puff.life <= 0) {
+        slot = puff;
+        break;
+      }
+    }
+    if (slot === null) {
+      return;
+    }
+    slot.life = ENV_PUFF_LIFE_S;
+    slot.maxLife = ENV_PUFF_LIFE_S;
+    slot.grow = superShot ? ENV_PUFF_SUPER_GROW : ENV_PUFF_GROW;
+    slot.sprite.visible = true;
+    slot.sprite.position.set(x, y, z);
+    slot.sprite.scale.set(0.6, 0.6, 1);
+    const material = slot.sprite.material as THREE.SpriteMaterial;
+    material.color.set(ENV_PUFF_COLOR);
+    material.opacity = 0.9;
+  }
+
   // Instant local feedback (<1 frame, zero network wait): a DOUBLE pooled
   // flash AT the barrel tip on release (core + halo). Reuses the puff sprite
   // pool (no alloc, no lights, DOM-free); the authoritative ball arrives
@@ -443,6 +518,7 @@ export class BallsPool {
     }
     this.trails.length = 0;
     this.tracked.clear();
+    this.hitIds.clear();
     this.bodyGeometry.dispose();
     this.capGeometry.dispose();
     this.bodyMaterial.dispose();

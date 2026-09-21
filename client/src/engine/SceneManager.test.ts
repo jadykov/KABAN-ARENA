@@ -4,6 +4,7 @@ import {
   AIRBORNE_VY_THRESHOLD,
   ARENA_HALF_SIZE,
   AVATAR_CHARGE_OPACITY,
+  BLOOD_BURST_COUNT,
   CAMERA_CHARGE_DISTANCE,
   CAMERA_FOLLOW_DISTANCE,
   CAMERA_FOLLOW_HEIGHT,
@@ -22,6 +23,7 @@ import {
   MIRROR_PITCH_MAX,
   MIRROR_PITCH_MIN,
   NEBULA_COUNT,
+  PARTICLE_BURST_COUNT,
   RECOIL_FULL_M,
   WALL_FADE_OPACITY,
   WALL_GLASS_OPACITY,
@@ -245,6 +247,27 @@ describe("SceneManager death burst (30, palette 10/30/60)", () => {
     expect(manager.getAliveParticleCount()).toBe(0);
     manager.spawnDeathBurst(0, 1.2, 0);
     expect(manager.getAliveParticleCount()).toBe(30);
+  });
+});
+
+describe("SceneManager ball-hit blood burst (red only on player damage)", () => {
+  it("notifyBallHit pops BLOOD_BURST_COUNT red particles (SUPER: full burst)", async () => {
+    expect(BLOOD_BURST_COUNT).toBe(16);
+    const manager = await createManager();
+    expect(manager.getAliveParticleCount()).toBe(0);
+    manager.notifyBallHit("b1", 0, 1.2, 0, false);
+    expect(manager.getAliveParticleCount()).toBe(BLOOD_BURST_COUNT);
+    manager.notifyBallHit("b2", 1, 1.4, 2, true);
+    expect(manager.getAliveParticleCount()).toBe(BLOOD_BURST_COUNT + PARTICLE_BURST_COUNT);
+  });
+
+  it("ignores non-finite hit positions (no phantom bursts)", async () => {
+    const manager = await createManager();
+    expect(manager.getAliveParticleCount()).toBe(0);
+    manager.notifyBallHit("b1", Number.NaN, 1.2, 0, false);
+    manager.notifyBallHit("b2", 0, Number.NaN, 0, false);
+    manager.notifyBallHit("b3", 0, 1.2, Number.POSITIVE_INFINITY, true);
+    expect(manager.getAliveParticleCount()).toBe(0);
   });
 });
 
