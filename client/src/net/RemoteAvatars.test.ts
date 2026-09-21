@@ -59,11 +59,9 @@ afterEach(() => {
   delete (globalThis as unknown as Record<string, unknown>)["document"];
 });
 
-// NOTE: the live server pins player y at 1.1 (never tracks elevation), so
-// remote flight is currently unreachable in production. These tests drive
-// the estimator with synthetic elevated snapshots to prove the gating works
-// once replicated height exists; local flight (Rapier vy) is covered by the
-// SceneManager airborne tests.
+// NOTE: the server replicates body height every tick (grounded derivation +
+// trampoline arcs), so remote flight reads live here; local flight (Rapier
+// vy) is covered by the SceneManager airborne tests.
 describe("RemoteAvatars airborne glide (climb -> lean, no bounce)", () => {
   it("glides a climbing remote: forward lean, zero bounce lift", () => {
     const scene = new THREE.Scene();
@@ -114,6 +112,29 @@ describe("RemoteAvatars airborne glide (climb -> lean, no bounce)", () => {
       }
       expect(rigOf(scene).rotation.x).toBeCloseTo(0, 6);
       expect(rigOf(scene).position.y).toBeCloseTo(0, 6);
+    } finally {
+      avatars.dispose();
+    }
+  });
+});
+
+describe("RemoteAvatars livingPositions carries replicated height (bug 2)", () => {
+  it("exposes the eased body-center Y for aim-assist targeting", () => {
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    try {
+      // A remote standing on a 2.0m tower (server y = 3.1): after the ease
+      // converges, livingPositions must report tower height, not 1.1.
+      for (let i = 0; i < 120; i += 1) {
+        avatars.sync([makeSnapshot({ sessionId: "r1", x: 4.8, z: 4.8, y: 3.1 })], null, FRAME);
+      }
+      const positions = avatars.livingPositions(null);
+      expect(positions).toHaveLength(1);
+      expect(positions[0]?.sessionId).toBe("r1");
+      expect(positions[0]?.y ?? 0).toBeGreaterThan(2.5);
+      expect(positions[0]?.y ?? 0).toBeCloseTo(3.1, 1);
+      // Self is excluded, spectators never list.
+      expect(avatars.livingPositions("r1")).toHaveLength(0);
     } finally {
       avatars.dispose();
     }

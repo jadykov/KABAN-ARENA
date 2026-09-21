@@ -110,4 +110,17 @@ describe("self reconciliation (bounded drift, no jitter)", () => {
     // …and the eased path never ends embedded in the block (3.3 face).
     expect(after.x).toBeLessThanOrEqual(3.3 + 0.15);
   });
+
+  it("does not fight a tower-top server position (bug 3a end state)", async () => {
+    // The server now tracks tower-top XZ authoritatively (bugs 1/3a fix), so
+    // when the local body stands at the tower center and the snapshot agrees,
+    // reconcile holds inside the deadband instead of tugging the avatar off.
+    const manager = await createFighter();
+    manager.teleportSelf(4.8, 4.8);
+    const result = manager.reconcileSelf(4.8, 4.8, FRAME);
+    expect(result).toBe("ok");
+    const after = manager.getAvatarPosition();
+    expect(after.x).toBeCloseTo(4.8, 5);
+    expect(after.z).toBeCloseTo(4.8, 5);
+  });
 });

@@ -4,8 +4,12 @@ import {
   BALL_GRAVITY,
   BALL_GROUND_Y,
   BALL_HIT_RADIUS,
+  BODY_CENTER_Y,
   BOT_NAMES,
   BOT_SPEED,
+  CHARGE_MOVE_MULT,
+  FIRE_PITCH_MAX,
+  FIRE_PITCH_MIN,
   GUEST_NICK_PREFIX,
   HIT_KNOCKBACK_M,
   INVULN_MS,
@@ -19,6 +23,8 @@ import {
   PATCH_RATE_MS,
   PLAYER_BODY_RADIUS,
   PLAYER_SPEED,
+  RAMP_ADMIT_MIN_FEET,
+  RAMP_ENTRY_TOL,
   RELOAD_MS,
   REMATCH_DELAY_MS,
   RESPAWN_DELAY_MS,
@@ -26,28 +32,39 @@ import {
   ROUND_HARD_CAP_MS,
   SELF_ARMING_DIST_M,
   SELF_ARMING_TIME_S,
+  SERVER_OBSTACLES,
   SERVER_PLATFORMS,
   SIM_TICK_MS,
   SPAWN_INSET,
   SUPER_LIFE_S,
   SUPER_PICKUP_RADIUS,
   SUPER_SPAWN_S,
+  SUPPORT_STICK_TOL,
+  TRAMPOLINE_MAX_AIR_S,
   WIN_SCORE,
 } from "../config.js";
 import { createBrain, planBotFire, stepBot, type BotBrain } from "../bots.js";
 import {
   applyHit,
+  bodyCenterYAt,
+  bodyCenterYAtExpanded,
   canDamage,
   damageForPower,
+  groundTopAt,
+  isOnTrampolinePad,
   muzzleForShot,
   powerToSpeed,
+  rampBandHeightAt,
   recoilDistanceForPower,
   resolveThrowerY,
   respawnPlayer,
   sanitizeNick,
   sanitizeThrowerY,
+  trampolineArcY,
 } from "../hits.js";
 import { ArenaState, BallState, PlayerState, type RoundPhase } from "../state.js";
+// Re-exported for unit-test compat (layout data now lives in config).
+export { SERVER_OBSTACLES };
 
 interface MoveInput {
   x: number;
@@ -71,25 +88,8 @@ export interface FirePayload {
 // methods + ArenaState fields — no changes to the ball pipeline needed.
 export type CenterItemKind = "super"; // | "pineapple" | "heal" (future)
 
-// Server obstacle mirrors (client Arena.getObstacleLayout): AABB check for
-// cannonball impacts AND authoritative movement collision (see
-// resolvePlayerMove). Heights ignored — balls fly over low blocks only when
-// above hy*2, otherwise they impact. Positions scaled x1.2 with the map
-// (4 -> 4.8, 9 -> 10.8); block half extents unchanged.
-// Stage 4d.3: the 4 CENTRAL blocks (at +-4.8) double to topY 2.0 (mirrors
-// client hy 1.0) — trampoline-only high ground. Balls arcing over at
-// y 1.0-2.0 now impact instead of flying through (intended gameplay change
-// — flag for playtest). The 4 OUTER blocks stay at topY 0.8.
-export const SERVER_OBSTACLES: Array<{ x: number; z: number; hx: number; hz: number; topY: number }> = [
-  { x: 4.8, z: 4.8, hx: 1, hz: 1, topY: 2.0 },
-  { x: -4.8, z: 4.8, hx: 1, hz: 1, topY: 2.0 },
-  { x: 4.8, z: -4.8, hx: 1, hz: 1, topY: 2.0 },
-  { x: -4.8, z: -4.8, hx: 1, hz: 1, topY: 2.0 },
-  { x: 10.8, z: 0, hx: 1.5, hz: 0.75, topY: 0.8 },
-  { x: -10.8, z: 0, hx: 1.5, hz: 0.75, topY: 0.8 },
-  { x: 0, z: 10.8, hx: 0.75, hz: 1.5, topY: 0.8 },
-  { x: 0, z: -10.8, hx: 0.75, hz: 1.5, topY: 0.8 },
-];
+// Server obstacle mirrors now live in config (SERVER_OBSTACLES, re-exported
+// above for test compat) alongside SERVER_PLATFORMS.
 
 function clampAxis(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -105,19 +105,27 @@ function clampAngle(value: unknown): number {
   return value;
 }
 
-// Server-side movement solid: XZ AABB with per-face openness. Obstacles are
-// closed on all four faces; platforms leave their ramp-side face OPEN so
-// fighters can walk up onto the top (the server never tracks body height,
-// so a blanket platform block would trap climbers at the footprint edge).
+// Server-side movement solid: XZ AABB with a top height, per-face openness,
+// and a ramp corridor. Obstacles are closed on all four faces. Platforms
+// leave their ramp-side face OPEN so fighters can walk up onto the top — but
+// ONLY inside the ramp corridor (lateral |offset| <= rampWidth/2 + radius
+// around the ramp centerline), matching the client's solid platform box:
+// skirting the ramp mouth at ground level stays blocked. Corridor axis "z"
+// means the ±x faces gate on the Z lateral (and vice versa); obstacles carry
+// axis null (corridor never consulted — all faces closed).
 interface MoveSolid {
   x: number;
   z: number;
   hx: number;
   hz: number;
+  top: number;
   openMinX: boolean;
   openMaxX: boolean;
   openMinZ: boolean;
   openMaxZ: boolean;
+  corridorAxis: "x" | "z" | null;
+  corridorCenter: number;
+  corridorHalf: number;
 }
 
 const MOVE_SOLIDS: readonly MoveSolid[] = [
@@ -126,20 +134,28 @@ const MOVE_SOLIDS: readonly MoveSolid[] = [
     z: block.z,
     hx: block.hx,
     hz: block.hz,
+    top: block.topY,
     openMinX: false,
     openMaxX: false,
     openMinZ: false,
     openMaxZ: false,
+    corridorAxis: null as "x" | "z" | null,
+    corridorCenter: 0,
+    corridorHalf: 0,
   })),
   ...SERVER_PLATFORMS.map((platform) => ({
     x: platform.x,
     z: platform.z,
     hx: platform.hx,
     hz: platform.hz,
+    top: platform.topY,
     openMinX: platform.rampSide === "-x",
     openMaxX: platform.rampSide === "+x",
     openMinZ: platform.rampSide === "-z",
     openMaxZ: platform.rampSide === "+z",
+    corridorAxis: (platform.rampSide === "-x" || platform.rampSide === "+x" ? "z" : "x") as "x" | "z",
+    corridorCenter: platform.rampSide === "-x" || platform.rampSide === "+x" ? platform.z : platform.x,
+    corridorHalf: platform.rampWidth / 2,
   })),
 ];
 
@@ -159,19 +175,46 @@ function insideSolidFootprint(solid: MoveSolid, x: number, z: number, radius: nu
   );
 }
 
+// Numeric guard for the elevation gate below: feet-vs-top comparisons within
+// a micron read as level (float-exact in practice — derived heights snap —
+// but the arc math rounds). Far below any real step, far above float dust.
+const COLLISION_Y_EPS = 1e-6;
+// Pads sit on open ground by layout (groundTop exactly 0 there); the launch
+// guard tolerates a centimeter so float dust never blocks a real pad.
+const TRAMPOLINE_GROUND_TOL = 0.01;
+// Feet height of a body-center y (BODY_CENTER_Y above the feet on the level).
+function feetYOf(bodyY: number): number {
+  const center = Number.isFinite(bodyY) ? bodyY : BODY_CENTER_Y;
+  return center - BODY_CENTER_Y;
+}
+
 // Authoritative XZ collision resolution (humans AND bots): per-axis swept
 // clamp against every solid face (X first, then Z), so diagonal input slides
 // along faces instead of sticking. A step can never tunnel (max ~0.23m per
-// 50ms tick vs 1.25m+ expanded half extents). If the start point is already
-// inside a footprint (fighter standing on a platform top, or embedded by a
-// knockback shove), that solid is skipped for this step so the fighter can
-// always walk back out — nobody gets permanently trapped.
+// 50ms tick vs 1.25m+ expanded half extents).
+// Elevation gates (bugs A/B): feetY carries the mover's feet height
+// (body-center y minus BODY_CENTER_Y).
+// - A solid whose top sits at or below the feet is skipped entirely — the
+//   fighter stands on top of it or flies above it. Defaults to 0 (ground
+//   crawler) so pre-elevation call sites behave exactly as before.
+// - The ramp-side open face admits ONLY a mover that is actually climbing
+//   (feet above RAMP_ADMIT_MIN_FEET) and ONLY inside the support band
+//   (|lateral| <= rampWidth/2, no radius widening — the widening created a
+//   no-ramp band that walked through the wall at ground level). A grounded
+//   fighter at the ramp mouth is clamped like any sheer face.
+// - The inside-footprint escape is height-gated too: at/above the top the
+//   fighter walks out freely (tower tops, knockback embeds at height); a
+//   climber inside via the open face in-lane (feet up, lateral on the ramp)
+//   passes freely as well; below the top anywhere else the mover is ejected
+//   toward the nearest face on each axis — nobody gets trapped, and nobody
+//   walks THROUGH to the far side.
 export function resolvePlayerMove(
   fromX: number,
   fromZ: number,
   toX: number,
   toZ: number,
   radius: number = PLAYER_BODY_RADIUS,
+  feetY: number = 0,
 ): { x: number; z: number } {
   if (
     !Number.isFinite(fromX) ||
@@ -182,39 +225,134 @@ export function resolvePlayerMove(
   ) {
     return { x: fromX, z: fromZ };
   }
+  const feet = Number.isFinite(feetY) ? feetY : 0;
+  const admitted = feet > RAMP_ADMIT_MIN_FEET;
+  // A climber crossing the open face in-lane: inside the footprint below the
+  // top but on the ramp (feet up, lateral in the support band) — free pass,
+  // no eject. Only meaningful for ramped platforms (corridorAxis non-null).
+  const inClimbLane = (solid: MoveSolid, px: number, pz: number): boolean =>
+    admitted &&
+    ((solid.corridorAxis === "z" && Math.abs(pz - solid.corridorCenter) <= solid.corridorHalf) ||
+      (solid.corridorAxis === "x" && Math.abs(px - solid.corridorCenter) <= solid.corridorHalf));
   let x = toX;
   for (const solid of MOVE_SOLIDS) {
+    if (solid.top <= feet + COLLISION_Y_EPS) {
+      continue;
+    }
+    const minFaceX = solid.x - solid.hx - radius;
+    const maxFaceX = solid.x + solid.hx + radius;
     if (insideSolidFootprint(solid, fromX, fromZ, radius)) {
+      if (inClimbLane(solid, fromX, fromZ)) {
+        continue;
+      }
+      // Illegally inside below the top: eject toward the nearest X face.
+      x = fromX - minFaceX <= maxFaceX - fromX ? Math.min(x, minFaceX) : Math.max(x, maxFaceX);
       continue;
     }
     if (fromZ >= solid.z - solid.hz - radius && fromZ <= solid.z + solid.hz + radius) {
-      const minFace = solid.x - solid.hx - radius;
-      const maxFace = solid.x + solid.hx + radius;
-      if (!solid.openMinX && fromX <= minFace && x > minFace) {
-        x = minFace;
+      const minPass =
+        admitted &&
+        solid.openMinX &&
+        solid.corridorAxis === "z" &&
+        Math.abs(fromZ - solid.corridorCenter) <= solid.corridorHalf;
+      const maxPass =
+        admitted &&
+        solid.openMaxX &&
+        solid.corridorAxis === "z" &&
+        Math.abs(fromZ - solid.corridorCenter) <= solid.corridorHalf;
+      if (!minPass && fromX <= minFaceX && x > minFaceX) {
+        x = minFaceX;
       }
-      if (!solid.openMaxX && fromX >= maxFace && x < maxFace) {
-        x = maxFace;
+      if (!maxPass && fromX >= maxFaceX && x < maxFaceX) {
+        x = maxFaceX;
       }
     }
   }
   let z = toZ;
   for (const solid of MOVE_SOLIDS) {
+    if (solid.top <= feet + COLLISION_Y_EPS) {
+      continue;
+    }
+    const minFaceZ = solid.z - solid.hz - radius;
+    const maxFaceZ = solid.z + solid.hz + radius;
     if (insideSolidFootprint(solid, fromX, fromZ, radius)) {
+      if (inClimbLane(solid, fromX, fromZ)) {
+        continue;
+      }
+      // Illegally inside below the top: eject toward the nearest Z face.
+      z = fromZ - minFaceZ <= maxFaceZ - fromZ ? Math.min(z, minFaceZ) : Math.max(z, maxFaceZ);
       continue;
     }
     if (x >= solid.x - solid.hx - radius && x <= solid.x + solid.hx + radius) {
-      const minFace = solid.z - solid.hz - radius;
-      const maxFace = solid.z + solid.hz + radius;
-      if (!solid.openMinZ && fromZ <= minFace && z > minFace) {
-        z = minFace;
+      const minPass =
+        admitted &&
+        solid.openMinZ &&
+        solid.corridorAxis === "x" &&
+        Math.abs(fromX - solid.corridorCenter) <= solid.corridorHalf;
+      const maxPass =
+        admitted &&
+        solid.openMaxZ &&
+        solid.corridorAxis === "x" &&
+        Math.abs(fromX - solid.corridorCenter) <= solid.corridorHalf;
+      if (!minPass && fromZ <= minFaceZ && z > minFaceZ) {
+        z = minFaceZ;
       }
-      if (!solid.openMaxZ && fromZ >= maxFace && z < maxFace) {
-        z = maxFace;
+      if (!maxPass && fromZ >= maxFaceZ && z < maxFaceZ) {
+        z = maxFaceZ;
       }
     }
   }
   return { x, z };
+}
+
+// Wedge-side entry block (bug A leak 2): a mover may not step INTO a ramp
+// band below its surface — the client wedge is a wall from the side, and
+// the server must not materialize fighters onto the slope in one tick.
+// Legit climbing always satisfies surface(target) - feet <= climb rate
+// (~0.06m/tick), so RAMP_ENTRY_TOL never trips it. Axis-separated fallback
+// preserves sliding along the wedge. Flying movers (feet above every ramp)
+// pass untouched. Zero per-tick allocation (scalar math only).
+function resolveWedgeEntry(
+  fromX: number,
+  fromZ: number,
+  toX: number,
+  toZ: number,
+  feet: number,
+): { x: number; z: number } {
+  if (rampBandHeightAt(toX, toZ) <= feet + RAMP_ENTRY_TOL) {
+    return { x: toX, z: toZ };
+  }
+  if (rampBandHeightAt(toX, fromZ) <= feet + RAMP_ENTRY_TOL) {
+    return { x: toX, z: fromZ };
+  }
+  if (rampBandHeightAt(fromX, toZ) <= feet + RAMP_ENTRY_TOL) {
+    return { x: fromX, z: toZ };
+  }
+  return { x: fromX, z: fromZ };
+}
+
+// Shared grounded-move path (humans, bots, knockback, recoil): wedge-side
+// block first, then the elevation-gated face resolver.
+export function resolveGroundMove(
+  fromX: number,
+  fromZ: number,
+  toX: number,
+  toZ: number,
+  radius: number = PLAYER_BODY_RADIUS,
+  feetY: number = 0,
+): { x: number; z: number } {
+  if (
+    !Number.isFinite(fromX) ||
+    !Number.isFinite(fromZ) ||
+    !Number.isFinite(toX) ||
+    !Number.isFinite(toZ) ||
+    !(radius > 0)
+  ) {
+    return { x: fromX, z: fromZ };
+  }
+  const feet = Number.isFinite(feetY) ? feetY : 0;
+  const wedged = resolveWedgeEntry(fromX, fromZ, toX, toZ, feet);
+  return resolvePlayerMove(fromX, fromZ, wedged.x, wedged.z, radius, feet);
 }
 
 // Authoritative FFA room (Stage 4): guest-nick join, inputs-only 20/s,
@@ -226,6 +364,10 @@ export class ArenaRoom extends Room<ArenaState> {
   private readonly inputs = new Map<string, MoveInput>();
   private readonly respawnAt = new Map<string, number>();
   private readonly brains = new Map<string, BotBrain>();
+  // Trampoline-flight launch timestamps (ms, currentTime clock): present =
+  // airborne following trampolineArcY, absent = grounded (y derived from XZ).
+  // Humans only — bots never launch (weak ground game by design).
+  private readonly airSince = new Map<string, number>();
   private botCounter = 0;
   private ballCounter = 0;
   private countdownEndsAt = 0;
@@ -307,6 +449,7 @@ export class ArenaRoom extends Room<ArenaState> {
     player.spectator = true;
     this.state.players.set(client.sessionId, player);
     this.inputs.delete(client.sessionId);
+    this.airSince.delete(client.sessionId);
     // No ensureBots here: spectators alone must never spawn bots or start
     // a countdown. Bots fill only once a ready human exists (see play).
     client.send("spectator", { sessionId: client.sessionId });
@@ -356,6 +499,7 @@ export class ArenaRoom extends Room<ArenaState> {
     // are not farmed on the spawn marker before their first frame renders.
     player.invulnUntil = this.state.phase === "playing" || this.state.phase === "countdown" ? now + INVULN_MS : 0;
     this.inputs.delete(client.sessionId);
+    this.airSince.delete(client.sessionId);
     this.ensureBots();
     client.send("welcome", { sessionId: client.sessionId, nick, x: player.x, z: player.z });
   }
@@ -366,6 +510,7 @@ export class ArenaRoom extends Room<ArenaState> {
     }
     this.inputs.delete(client.sessionId);
     this.respawnAt.delete(client.sessionId);
+    this.airSince.delete(client.sessionId);
     // Bots persist for the next joiner; with no humans left the room idles
     // back in lobby instead of running a bot-only round.
     if (this.humanCount() === 0 && this.state.phase !== "lobby") {
@@ -454,6 +599,7 @@ export class ArenaRoom extends Room<ArenaState> {
       index += 1;
     });
     this.respawnAt.clear();
+    this.airSince.clear();
     this.state.balls.clear();
     this.ballCounter = 0;
     this.state.superActive = false;
@@ -493,6 +639,7 @@ export class ArenaRoom extends Room<ArenaState> {
     this.state.remainingMs = 0;
     this.state.countdownMs = 0;
     this.respawnAt.clear();
+    this.airSince.clear();
     this.state.balls.clear();
     this.state.superActive = false;
     this.state.superNextAt = 0;
@@ -564,7 +711,7 @@ export class ArenaRoom extends Room<ArenaState> {
     const pitchRaw = typeof body["pitch"] === "number" && Number.isFinite(body["pitch"])
       ? (body["pitch"] as number)
       : 0.25;
-    const pitch = Math.max(-0.15, Math.min(0.9, pitchRaw));
+    const pitch = Math.max(FIRE_PITCH_MIN, Math.min(FIRE_PITCH_MAX, pitchRaw));
     const wantSuper = body["super"] === true;
     const useSuper = wantSuper && shooter.superBuff;
     // Buff is consumed on fire even on a miss (NEXT shot only).
@@ -614,7 +761,14 @@ export class ArenaRoom extends Room<ArenaState> {
     if (horizontal > 0.0001 && Number.isFinite(recoil) && recoil > 0) {
       const kickX = (dirX / horizontal) * recoil;
       const kickZ = (dirZ / horizontal) * recoil;
-      const kicked = resolvePlayerMove(shooter.x, shooter.z, shooter.x - kickX, shooter.z - kickZ);
+      const kicked = resolveGroundMove(
+        shooter.x,
+        shooter.z,
+        shooter.x - kickX,
+        shooter.z - kickZ,
+        PLAYER_BODY_RADIUS,
+        feetYOf(shooter.y),
+      );
       shooter.x = clampPosition(kicked.x);
       shooter.z = clampPosition(kicked.z);
     }
@@ -744,7 +898,11 @@ export class ArenaRoom extends Room<ArenaState> {
         }
       }
       const dx = player.x - ball.x;
-      const dy = 1.1 - ball.y;
+      // Derived body-center Y (bug 3b): the room maintains player.y every
+      // tick (tower tops read ~3.1), so elevated victims are hittable. The
+      // old hardcoded 1.1 made dy^2 alone exceed the hit radius^2 on towers.
+      const bodyY = Number.isFinite(player.y) ? player.y : BODY_CENTER_Y;
+      const dy = bodyY - ball.y;
       const dz = player.z - ball.z;
       if (dx * dx + dy * dy + dz * dz <= BALL_HIT_RADIUS * BALL_HIT_RADIUS) {
         victim = player;
@@ -764,11 +922,13 @@ export class ArenaRoom extends Room<ArenaState> {
     // the face instead of embedding the authoritative position inside a
     // closed footprint (which the by-design escape rule would then let walk
     // out through the far face = pass-through again).
-    const moved = resolvePlayerMove(
+    const moved = resolveGroundMove(
       victim.x,
       victim.z,
       victim.x + (dx / length) * HIT_KNOCKBACK_M,
       victim.z + (dz / length) * HIT_KNOCKBACK_M,
+      PLAYER_BODY_RADIUS,
+      feetYOf(victim.y),
     );
     victim.x = clampPosition(moved.x);
     victim.z = clampPosition(moved.z);
@@ -828,31 +988,115 @@ export class ArenaRoom extends Room<ArenaState> {
   // sending, so input.x -> world X and input.y -> world Z with no server
   // re-transform. Last-known input persists across ticks (inputs map is only
   // replaced on new packets), so a single dropped 20Hz packet never freezes.
+  // Elevation (bugs 1/3a): player.y is maintained here every tick and
+  // replicates to clients (remotes render it, balls aim at it). Grounded
+  // fighters derive y from XZ (platform/ramp/obstacle tops via
+  // bodyCenterYAt); a grounded fighter whose XZ enters a trampoline pad
+  // launches into the closed-form trampolineArcY flight, landing when the
+  // arc meets the support height (tower tops included). XZ collision is
+  // gated by the current feet height, so ground fighters stay out of tower
+  // footprints while tower-top fighters walk freely on top.
+  // Grounded support with hysteresis (bug B): the radius-expanded support
+  // sticks while the feet still match it — walking off a top falls only once
+  // fully outside the footprint, killing the pinned-at-face state. Otherwise
+  // the strict support wins, so the ground beside a solid never snaps up
+  // (that path fails the feet match by metres, not microns).
+  private groundSupport(x: number, z: number, feet: number): number {
+    const strict = bodyCenterYAt(x, z);
+    const wide = bodyCenterYAtExpanded(x, z, PLAYER_BODY_RADIUS);
+    if (wide > strict + COLLISION_Y_EPS && feet >= wide - BODY_CENTER_Y - SUPPORT_STICK_TOL) {
+      return wide;
+    }
+    return strict;
+  }
+
   private moveHumans(dt: number): void {
+    const now = this.currentTime();
     this.state.players.forEach((player: PlayerState): void => {
       if (player.isBot || !player.alive || !player.ready || player.spectator) {
         return;
       }
       const input = this.inputs.get(player.sessionId);
-      if (input === undefined) {
+      // R2: aiming/charging runs slower (CHARGE_MOVE_MULT mirror); reloading
+      // runs at normal speed.
+      const speed =
+        input !== undefined && input.charging ? PLAYER_SPEED * CHARGE_MOVE_MULT : PLAYER_SPEED;
+      const airStart = this.airSince.get(player.sessionId);
+      if (airStart !== undefined) {
+        this.stepAirborneHuman(player, input, speed, dt, now, airStart);
         return;
       }
-      // R2: aiming/charging runs 50% slower; reloading runs at normal speed.
-      // Collision resolved per axis (slide along faces) BEFORE the arena
-      // clamp, so the authoritative position never enters geometry — this is
-      // what stopped the client reconcile pass-through loop (server targets
-      // are always legal now).
-      const speed = input.charging ? PLAYER_SPEED * 0.5 : PLAYER_SPEED;
-      const moved = resolvePlayerMove(
+      // Grounded: wedge-side block + Y-gated XZ move (slide along faces)
+      // BEFORE the arena clamp, so the authoritative position never enters
+      // geometry. Then the grounded height follows the HYSTERETIC support
+      // under the new XZ (ramps read smoothly via the slope band, tops stick
+      // through the 0.5m ring, ground beside solids never snaps up).
+      const feet = feetYOf(player.y);
+      const moved = resolveGroundMove(
         player.x,
         player.z,
-        player.x + input.x * speed * dt,
-        player.z + input.y * speed * dt,
+        input !== undefined ? player.x + input.x * speed * dt : player.x,
+        input !== undefined ? player.z + input.y * speed * dt : player.z,
+        PLAYER_BODY_RADIUS,
+        feet,
       );
       player.x = clampPosition(moved.x);
       player.z = clampPosition(moved.z);
-      player.rotY = input.rotY;
+      if (input !== undefined) {
+        player.rotY = input.rotY;
+      }
+      player.y = this.groundSupport(player.x, player.z, feet);
+      // Pad launch (pads sit on open ground by layout; the ground-top guard
+      // keeps a future overlapping layout from launching off a rooftop).
+      if (isOnTrampolinePad(player.x, player.z) && groundTopAt(player.x, player.z) <= TRAMPOLINE_GROUND_TOL) {
+        this.airSince.set(player.sessionId, now);
+      }
     });
+  }
+
+  // One airborne tick: advance the closed-form arc, steer XZ with the same
+  // Y-gated resolver (at apex the feet clear tower tops, so the flight
+  // crosses into footprints), and land the moment the arc meets the
+  // RADIUS-EXPANDED support under the new XZ — clipping a top edge at
+  // support height rests on it (physical), while landing short on open
+  // ground beside a solid stays down (no snap-up: expanded support there is
+  // still ground level). Zero per-tick allocation (scalar math only).
+  private stepAirborneHuman(
+    player: PlayerState,
+    input: MoveInput | undefined,
+    speed: number,
+    dt: number,
+    now: number,
+    airStart: number,
+  ): void {
+    const airTimeS = (now - airStart) / 1000;
+    if (!(airTimeS >= 0) || airTimeS > TRAMPOLINE_MAX_AIR_S) {
+      // Stuck arc (clock jump, NaN): force-land on the support below.
+      this.airSince.delete(player.sessionId);
+      player.y = bodyCenterYAt(player.x, player.z);
+      return;
+    }
+    const arcY = trampolineArcY(airTimeS);
+    const moved = resolvePlayerMove(
+      player.x,
+      player.z,
+      input !== undefined ? player.x + input.x * speed * dt : player.x,
+      input !== undefined ? player.z + input.y * speed * dt : player.z,
+      PLAYER_BODY_RADIUS,
+      feetYOf(player.y),
+    );
+    player.x = clampPosition(moved.x);
+    player.z = clampPosition(moved.z);
+    if (input !== undefined) {
+      player.rotY = input.rotY;
+    }
+    const support = bodyCenterYAtExpanded(player.x, player.z, PLAYER_BODY_RADIUS);
+    if (arcY <= support) {
+      this.airSince.delete(player.sessionId);
+      player.y = support;
+    } else {
+      player.y = arcY;
+    }
   }
 
   private moveBots(now: number, dt: number): void {
@@ -866,16 +1110,23 @@ export class ArenaRoom extends Room<ArenaState> {
         this.brains.set(player.sessionId, brain);
       }
       const step = stepBot(player, brain, now);
-      // Same collision resolution as humans: bots stop/slide at geometry
-      // instead of walking through it.
-      const moved = resolvePlayerMove(
+      // Same grounded path as humans (wedge block + gated collision +
+      // hysteretic support): bots stop/slide at geometry instead of walking
+      // through it. Bots stay grounded (no pad launches — weak ground game
+      // by design) and derive y from XZ, so a bot wandering up a ramp reads
+      // at slope height for remotes and balls.
+      const feet = feetYOf(player.y);
+      const moved = resolveGroundMove(
         player.x,
         player.z,
         player.x + step.moveX * BOT_SPEED * dt,
         player.z + step.moveZ * BOT_SPEED * dt,
+        PLAYER_BODY_RADIUS,
+        feet,
       );
       player.x = clampPosition(moved.x);
       player.z = clampPosition(moved.z);
+      player.y = this.groundSupport(player.x, player.z, feet);
       player.rotY = step.rotY;
     });
   }
@@ -927,9 +1178,10 @@ export class ArenaRoom extends Room<ArenaState> {
         continue;
       }
       respawnPlayer(player, this.spawnCursor % MAX_PLAYERS, now);
-      // Fresh life: no carried SUPER buff, no pending reload gate.
+      // Fresh life: no carried SUPER buff, no pending reload gate, grounded.
       player.superBuff = false;
       player.reloadUntil = 0;
+      this.airSince.delete(sessionId);
       this.spawnCursor += 1;
     }
   }

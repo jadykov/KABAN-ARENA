@@ -55,11 +55,10 @@ interface RemoteEntry {
   track: RemoteTrack;
   hop: HopState;
   // Airborne estimator: the eased Y trail's vertical speed, damped so a
-  // single snapshot jitter never flips the flight gate. NOTE: the live
-  // server pins player y (1.1, never tracks elevation), so remote flight is
-  // currently unreachable in production — this path is implemented and
-  // tested for synthetic/elevated snapshots and stays ready for replicated
-  // height. Local flight (Rapier vy) is unaffected.
+  // single snapshot jitter never flips the flight gate. The server now
+  // replicates body height every tick (grounded derivation + trampoline
+  // arcs), so remote flight/climbing reads live here; local flight (Rapier
+  // vy) is unaffected.
   vySmooth: number;
   prevY: number;
   // Two-level flight gate (shared AirborneGate): entry trips it, sustained
@@ -152,14 +151,24 @@ export class RemoteAvatars {
     }
   }
 
-  // Living non-self positions for client-side hitscan target picking.
-  public livingPositions(selfId: string | null): Array<{ sessionId: string; x: number; z: number; alive: boolean }> {
-    const out: Array<{ sessionId: string; x: number; z: number; alive: boolean }> = [];
+  // Living non-self positions for client-side aim assist target picking.
+  // Carries the eased body-center Y (server player.y) so the assist aims at
+  // the target's real height (tower tops included — bug 2 elevation fix).
+  public livingPositions(
+    selfId: string | null,
+  ): Array<{ sessionId: string; x: number; z: number; alive: boolean; y: number }> {
+    const out: Array<{ sessionId: string; x: number; z: number; alive: boolean; y: number }> = [];
     for (const [sessionId, entry] of this.entries) {
       if (sessionId === selfId || !entry.rig.visible) {
         continue;
       }
-      out.push({ sessionId, x: entry.group.position.x, z: entry.group.position.z, alive: true });
+      out.push({
+        sessionId,
+        x: entry.group.position.x,
+        z: entry.group.position.z,
+        alive: true,
+        y: entry.group.position.y,
+      });
     }
     return out;
   }

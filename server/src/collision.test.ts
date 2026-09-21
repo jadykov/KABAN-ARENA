@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PLAYER_BODY_RADIUS } from "./config.js";
-import { resolvePlayerMove } from "./rooms/ArenaRoom.js";
+import { resolveGroundMove, resolvePlayerMove } from "./rooms/ArenaRoom.js";
 
 // Through-wall fix: authoritative per-axis XZ collision for humans + bots.
 // Obstacle corner block is at (4.8, 4.8) hx=hz=1; with the 0.5 body radius
@@ -67,26 +67,39 @@ describe("resolvePlayerMove (server authoritative movement collision)", () => {
     expect(minZ.z).toBeCloseTo(-10.2, 9);
   });
 
-  it("lets fighters through the ramp-side face (climbing stays possible)", () => {
-    // Platform 0 ramp is on +z: the max-z face (-6.8 expanded) is open.
-    const cross = resolvePlayerMove(13.8, -6.0, 13.8, -7.5);
+  it("admits climbing fighters through the ramp-side face, blocks ground entry", () => {
+    // Platform 0 ramp is on +z: the max-z face (-6.8 expanded) opens only
+    // for a mover that is actually climbing (feet above RAMP_ADMIT_MIN_FEET).
+    const cross = resolvePlayerMove(13.8, -6.0, 13.8, -7.5, 0.5, 2.0);
     expect(cross.x).toBeCloseTo(13.8, 9);
     expect(cross.z).toBeCloseTo(-7.5, 9);
-    // Full entry from the ramp side walks into the footprint.
-    const entry = resolvePlayerMove(13.8, -4, 13.8, -8.5);
+    // Full entry from the ramp side walks into the footprint at climb height.
+    const entry = resolvePlayerMove(13.8, -4, 13.8, -8.5, 0.5, 1.8);
     expect(entry.x).toBeCloseTo(13.8, 9);
     expect(entry.z).toBeCloseTo(-8.5, 9);
+    // Same steps at ground level: clamped at the face like a sheer wall.
+    const grounded = resolvePlayerMove(13.8, -6.0, 13.8, -7.5, 0.5, 0);
+    expect(grounded.z).toBeCloseTo(-6.8, 9);
   });
 
-  it("frees fighters already inside a footprint (platform top / knockback)", () => {
-    // Standing on platform 0's top: free to walk off in any direction.
-    const offTop = resolvePlayerMove(13.8, -8.5, 16, -8.5);
+  it("ejects ground-level embeds toward the nearest face (never trapped, never through)", () => {
+    // Embedded at platform 0's center below the top: ejected to the nearest
+    // faces (tie goes min), never a free pass to the far side.
+    const embedded = resolvePlayerMove(13.8, -8.5, 16, -8.5, 0.5, 0);
+    expect(embedded.x).toBeCloseTo(12.1, 9);
+    expect(embedded.z).toBeCloseTo(-10.2, 9);
+    // Embedded at the tower center: corner eject onto the faces...
+    const towerEmbed = resolvePlayerMove(4.8, 4.8, 5.5, 4.8, 0.5, 0);
+    expect(towerEmbed.x).toBeCloseTo(3.3, 9);
+    expect(towerEmbed.z).toBeCloseTo(3.3, 9);
+    // ...and the next step away walks off freely (escape still works).
+    const walkOff = resolvePlayerMove(towerEmbed.x, towerEmbed.z, 3.0, 3.0, 0.5, 0);
+    expect(walkOff.x).toBeCloseTo(3.0, 9);
+    expect(walkOff.z).toBeCloseTo(3.0, 9);
+    // At/above the top the old free pass is kept: on-top fighters walk out.
+    const offTop = resolvePlayerMove(13.8, -8.5, 16, -8.5, 0.5, 2.6);
     expect(offTop.x).toBeCloseTo(16, 9);
     expect(offTop.z).toBeCloseTo(-8.5, 9);
-    // Embedded inside a block by a knockback shove: free to walk out.
-    const embedded = resolvePlayerMove(4.8, 4.8, 5.5, 4.8);
-    expect(embedded.x).toBeCloseTo(5.5, 9);
-    expect(embedded.z).toBeCloseTo(4.8, 9);
   });
 
   it("refuses garbage instead of teleporting", () => {
@@ -108,5 +121,100 @@ describe("resolvePlayerMove (server authoritative movement collision)", () => {
       pinned.x = next.x;
       pinned.z = next.z;
     }
+  });
+});
+
+// Elevation gate (bug B): solids at/below the mover's feet never clamp.
+// Central tower (4.8, 4.8) topY 2.0, expanded faces 3.3/6.3; outer block
+// (10.8, 0) topY 0.8, expanded min-x face 8.8; platform 0 (13.8, -8.5) topY
+// 2.6 with the +z ramp corridor |x - 13.8| <= 1.0 (support band, no radius
+// widening), open face -6.8 admitting climbers only (feet > 0.3).
+describe("resolvePlayerMove elevation gate + ramp corridor", () => {
+  it("lets a tower-top fighter walk the CENTER (no invisible wall)", () => {
+    // Feet 2.0 on the 2.0 tower top: straight through the middle. Starts
+    // are OUTSIDE the expanded footprint, so the old inside-escape cannot
+    // explain the pass — only the elevation gate lets these through (on the
+    // pre-fix code both clamp at the 6.3 face).
+    const cross = resolvePlayerMove(6.5, 4.8, 5.5, 4.8, 0.5, 2.0);
+    expect(cross.x).toBeCloseTo(5.5, 9);
+    expect(cross.z).toBeCloseTo(4.8, 9);
+    const walkIn = resolvePlayerMove(6.5, 4.8, 4.8, 4.8, 0.5, 2.0);
+    expect(walkIn.x).toBeCloseTo(4.8, 9);
+    expect(walkIn.z).toBeCloseTo(4.8, 9);
+  });
+
+  it("blocks ground-level entry from all four sides (feet 0)", () => {
+    expect(resolvePlayerMove(1.0, 4.8, 4.0, 4.8, 0.5, 0).x).toBeCloseTo(3.3, 9);
+    expect(resolvePlayerMove(8.0, 4.8, 5.0, 4.8, 0.5, 0).x).toBeCloseTo(6.3, 9);
+    expect(resolvePlayerMove(4.8, 1.0, 4.8, 4.0, 0.5, 0).z).toBeCloseTo(3.3, 9);
+    expect(resolvePlayerMove(4.8, 8.0, 4.8, 5.0, 0.5, 0).z).toBeCloseTo(6.3, 9);
+    // Diagonal corner approach at ground stays out too.
+    const corner = resolvePlayerMove(3.0, 3.0, 4.5, 4.5, 0.5, 0);
+    const insideX = Math.abs(corner.x - 4.8) < 1.5 - 1e-9;
+    const insideZ = Math.abs(corner.z - 4.8) < 1.5 - 1e-9;
+    expect(insideX && insideZ).toBe(false);
+  });
+
+  it("lets trampoline flights cross low blocks, blocks low flight into them", () => {
+    // Feet 1.0 above the 0.8 outer-block top: full crossing, no clamp.
+    const over = resolvePlayerMove(8.0, 0, 12.0, 0, 0.5, 1.0);
+    expect(over.x).toBeCloseTo(12.0, 9);
+    expect(over.z).toBeCloseTo(0, 9);
+    // Feet 0.5 below the top: the min-x face (8.8) stops the flight, like
+    // the client capsule hitting the wall mid-jump.
+    const into = resolvePlayerMove(8.0, 0, 12.0, 0, 0.5, 0.5);
+    expect(into.x).toBeCloseTo(8.8, 9);
+    expect(into.z).toBeCloseTo(0, 9);
+  });
+
+  it("admits ramp-corridor entry for climbers, blocks ground skirting", () => {
+    // Inside the +z corridor (|13.0 - 13.8| = 0.8 <= 1.0) at climb height:
+    // open face passes.
+    const inCorridor = resolvePlayerMove(13.0, -6.5, 13.0, -7.5, 0.5, 2.0);
+    expect(inCorridor.z).toBeCloseTo(-7.5, 9);
+    // Same step at ground level: the open face behaves closed.
+    const grounded = resolvePlayerMove(13.0, -6.5, 13.0, -7.5, 0.5, 0);
+    expect(grounded.z).toBeCloseTo(-6.8, 9);
+    // Outside the corridor but inside the face span (sliver [12.1, 12.3)):
+    // the open face behaves closed even at climb height — no +radius band.
+    const skirt = resolvePlayerMove(12.2, -6.5, 12.2, -7.5, 0.5, 2.0);
+    expect(skirt.z).toBeCloseTo(-6.8, 9);
+    // Sheer faces keep blocking at ground even next to the ramp.
+    const sheer = resolvePlayerMove(10, -8.5, 13, -8.5, 0.5, 0);
+    expect(sheer.x).toBeCloseTo(12.1, 9);
+  });
+
+  it("treats non-finite feet as ground level (never a free pass)", () => {
+    const grounded = resolvePlayerMove(1.0, 4.8, 4.0, 4.8, 0.5, Number.NaN);
+    expect(grounded.x).toBeCloseTo(3.3, 9);
+  });
+});
+
+// Wedge-side entry block (bug A leak 2): resolveGroundMove holds a grounded
+// mover out of the ramp band below its surface, lets climbers through, and
+// slides diagonally along the band edge. Platform 4 (-x ramp, band z in
+// [12.7, 14.3], surface at x = 2.0 is 1.50m).
+describe("resolveGroundMove wedge-side block", () => {
+  it("holds ground-level lateral entry at the band edge", () => {
+    const held = resolveGroundMove(2.0, 12.0, 2.0, 12.9, 0.5, 0);
+    expect(held.x).toBeCloseTo(2.0, 9);
+    expect(held.z).toBeCloseTo(12.0, 9);
+  });
+
+  it("lets a climber at slope height step in", () => {
+    const climb = resolveGroundMove(2.0, 12.0, 2.0, 12.9, 0.5, 1.6);
+    expect(climb.x).toBeCloseTo(2.0, 9);
+    expect(climb.z).toBeCloseTo(12.9, 9);
+  });
+
+  it("slides diagonally along the band edge instead of sticking", () => {
+    const slide = resolveGroundMove(1.5, 12.0, 2.2, 12.9, 0.5, 0);
+    expect(slide.x).toBeCloseTo(2.2, 9);
+    expect(slide.z).toBeCloseTo(12.0, 9);
+  });
+
+  it("refuses garbage instead of teleporting", () => {
+    expect(resolveGroundMove(1, 2, Number.NaN, 4, 0.5, 0)).toEqual({ x: 1, z: 2 });
+    expect(resolveGroundMove(1, 2, 3, 4, -1, 0)).toEqual({ x: 1, z: 2 });
   });
 });

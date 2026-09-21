@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { afterEach, describe, expect, it } from "vitest";
 import { getSlipperyZones } from "../arena/Arena";
-import { ICE_SPEED_MULT, MOVE_SPEED } from "../config";
+import { CHARGE_MOVE_MULT, ICE_SPEED_MULT, MOVE_SPEED } from "../config";
 import { SceneManager } from "./SceneManager";
 
 const FRAME = 1 / 60;
@@ -111,5 +111,42 @@ describe("SceneManager movement blending (ice/impulse regression)", () => {
     // Old code: the next update() wiped the horizontal kick (only the hop
     // remained), so displacement stayed ~0.
     expect(displacement).toBeGreaterThan(0.5);
+  });
+
+  it("halves local move speed while charging (server mirror, bug C)", async () => {
+    // The server simulates charging fighters at CHARGE_MOVE_MULT; unscaled
+    // client prediction diverged ~2.25 m/s during charge+walk and reconcile
+    // tugged the preview origin every frame. Open ground at (0,0), steady
+    // full input, body re-pinned each frame so the surface never changes.
+    expect(CHARGE_MOVE_MULT).toBe(0.5);
+    const push = { x: 1, y: 0 };
+    async function settledSpeed(charging: boolean): Promise<number> {
+      const manager = await createSceneManager();
+      try {
+        manager.setCharging(charging);
+        for (let i = 0; i < 120; i += 1) {
+          manager.update(FRAME, push, NO_LOOK);
+          const pos = manager.getAvatarPosition();
+          const vel = manager.getPlayerVelocity();
+          if (vel !== null) {
+            manager.debugSetPlayerState({ x: 0, y: pos.y, z: 0 }, { x: vel.x, y: vel.y, z: vel.z });
+          }
+        }
+        return horizontalSpeed(manager);
+      } finally {
+        manager.dispose();
+        const index = managers.indexOf(manager);
+        if (index >= 0) {
+          managers.splice(index, 1);
+        }
+      }
+    }
+    const free = await settledSpeed(false);
+    expect(free).toBeGreaterThan(MOVE_SPEED * 0.9);
+    const charged = await settledSpeed(true);
+    expect(charged).toBeGreaterThan(MOVE_SPEED * CHARGE_MOVE_MULT * 0.9);
+    expect(charged).toBeLessThan(MOVE_SPEED * CHARGE_MOVE_MULT * 1.1);
+    expect(charged / free).toBeGreaterThan(0.4);
+    expect(charged / free).toBeLessThan(0.6);
   });
 });

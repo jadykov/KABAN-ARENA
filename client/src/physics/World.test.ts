@@ -63,9 +63,9 @@ describe("PhysicsWorld rapier wrapper", () => {
       expect(velocity.y).toBeCloseTo(TRAMPOLINE_IMPULSE);
       expect(velocity.x).toBeCloseTo(1);
       expect(velocity.z).toBeCloseTo(0.5);
-      // QT3-A confirmed band 8-12.
-      expect(TRAMPOLINE_IMPULSE).toBeGreaterThanOrEqual(8);
-      expect(TRAMPOLINE_IMPULSE).toBeLessThanOrEqual(12);
+      // Owner directive 2026-09-20: 13.5 (+12.5%, extends the old 8-12 band
+      // for easier tower landings — the band proof lives in Arena.test).
+      expect(TRAMPOLINE_IMPULSE).toBe(13.5);
     } finally {
       physics.dispose();
     }

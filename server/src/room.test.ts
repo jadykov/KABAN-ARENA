@@ -5,6 +5,7 @@ import {
   BALL_MUZZLE_OFFSET,
   BALL_TORSO_OFFSET,
   BODY_CENTER_Y,
+  CHARGE_MOVE_MULT,
   FULL_DAMAGE,
   LOBBY_COUNTDOWN_MS,
   MAX_LIVE_BALLS,
@@ -19,7 +20,18 @@ import {
   SUPER_SPAWN_S,
   WEAK_DAMAGE,
 } from "./config.js";
-import { bodyCenterYAt, groundTopAt, muzzleForShot, resolveThrowerY, sanitizeThrowerY } from "./hits.js";
+import {
+  bodyCenterYAt,
+  bodyCenterYAtExpanded,
+  groundTopAt,
+  isOnTrampolinePad,
+  muzzleForShot,
+  rampHeightAt,
+  rampRunForTop,
+  resolveThrowerY,
+  sanitizeThrowerY,
+  trampolineArcY,
+} from "./hits.js";
 import { ArenaRoom, SERVER_OBSTACLES } from "./rooms/ArenaRoom.js";
 import type { PlayerState } from "./state.js";
 
@@ -1202,5 +1214,420 @@ describe("central towers (doubled topY intercepts mid-height shots)", () => {
     expect(room.state.balls.size).toBe(1);
     expect(target.hp).toBe(100);
     expect(shooter.hp).toBe(100);
+  });
+});
+
+// Elevation awareness (bugs 1/3a/3b + server side of bug 2): the room
+// maintains player.y every tick (grounded derivation + trampoline arcs),
+// XZ collision is gated by feet height, balls aim at body Y, and the fire
+// pitch band reaches the full client aim range.
+describe("server elevation (tower tops walkable, ground impenetrable)", () => {
+  it("pins the charging slow-down mirror (bug C origin fix)", () => {
+    // The client runs CHARGE_MOVE_MULT while charging (SceneManager); the
+    // server must simulate the same factor or charge+walk diverges ~2.25m/s.
+    expect(CHARGE_MOVE_MULT).toBe(0.5);
+  });
+
+  function sendMove(room: ArenaRoom, sessionId: string, x: number, y: number): void {
+    (room as unknown as { handleInput(sessionId: string, payload: unknown): void }).handleInput(sessionId, {
+      x,
+      y,
+      rotY: 0,
+      seq: 1,
+      charging: false,
+    });
+  }
+
+  function tick50(room: ArenaRoom): void {
+    advance(room, 50);
+    room.tickRoom(50);
+  }
+
+  function godmode(room: ArenaRoom): void {
+    room.state.players.forEach((player: PlayerState): void => {
+      player.invulnUntil = 1e15;
+    });
+  }
+
+  function expectOutsideSolids(
+    room: ArenaRoom,
+    solids: ReadonlyArray<{ x: number; z: number; hx: number; hz: number }>,
+    sessionId: string,
+  ): void {
+    const fighter = getPlayer(room, sessionId);
+    if (fighter === undefined) {
+      throw new Error(`missing ${sessionId}`);
+    }
+    for (const solid of solids) {
+      const insideX = Math.abs(fighter.x - solid.x) < solid.hx + PLAYER_BODY_RADIUS - 1e-6;
+      const insideZ = Math.abs(fighter.z - solid.z) < solid.hz + PLAYER_BODY_RADIUS - 1e-6;
+      expect(insideX && insideZ).toBe(false);
+    }
+  }
+
+  it("AC1: ground approaches from all 8 directions never enter the tower", async () => {
+    const room = await playingRoom();
+    godmode(room);
+    const solids = [...SERVER_OBSTACLES, ...SERVER_PLATFORMS];
+    const starts: ReadonlyArray<readonly [number, number, number, number]> = [
+      [1.0, 4.8, 1, 0],
+      [8.6, 4.8, -1, 0],
+      [4.8, 1.0, 0, 1],
+      [4.8, 8.6, 0, -1],
+      [2.0, 2.0, 1, 1],
+      [7.6, 2.0, -1, 1],
+      [2.0, 7.6, 1, -1],
+      [7.6, 7.6, -1, -1],
+    ];
+    for (const [sx, sz, mx, mz] of starts) {
+      const player = getPlayer(room, "s1");
+      if (player === undefined) {
+        throw new Error("missing s1");
+      }
+      player.x = sx;
+      player.z = sz;
+      player.y = 1.1;
+      sendMove(room, "s1", mx, mz);
+      for (let i = 0; i < 40; i += 1) {
+        tick50(room);
+        expectOutsideSolids(room, solids, "s1");
+      }
+    }
+    // And the head-on lane ends pinned at the expanded face (3.3), not inside.
+    const after = getPlayer(room, "s1");
+    expect(after).toBeDefined();
+  });
+
+  it("AC2: a tower-top fighter walks to the CENTER with y held", async () => {
+    const room = await playingRoom();
+    godmode(room);
+    const player = getPlayer(room, "s1");
+    if (player === undefined) {
+      throw new Error("missing s1");
+    }
+    // East of the tower at top height, walking west: 8 ticks * 0.225 = 1.8m.
+    player.x = 6.5;
+    player.z = 4.8;
+    player.y = 3.1;
+    sendMove(room, "s1", -1, 0);
+    for (let i = 0; i < 8; i += 1) {
+      tick50(room);
+    }
+    const after = getPlayer(room, "s1");
+    if (after === undefined) {
+      throw new Error("missing s1");
+    }
+    // Past the 6.3 face (no clamp), near the 4.8 center, still on top.
+    expect(after.x).toBeLessThan(6.3 - 0.2);
+    expect(Math.abs(after.x - 4.8)).toBeLessThan(1.0);
+    expect(after.z).toBeCloseTo(4.8, 9);
+    expect(after.y).toBeCloseTo(3.1, 9);
+  });
+
+  it("AC2 journey: a pad bounce flies OVER the face and lands on top", async () => {
+    const room = await playingRoom();
+    removeBots(room);
+    const player = getPlayer(room, "s1");
+    if (player === undefined) {
+      throw new Error("missing s1");
+    }
+    player.x = 0;
+    player.z = 4.2;
+    player.y = 1.1;
+    player.invulnUntil = 1e15;
+    // Toward the (4.8, 4.8) tower center (unit-ish dir, normalized by input).
+    sendMove(room, "s1", 4.8 / 4.837, 0.6 / 4.837);
+    // ~0.7s in: near the west face (x > 3.0) but ABOVE it (arc y > 3.5,
+    // feet clear the 2.0 top — the flight crosses, it does not go around).
+    for (let i = 0; i < 14; i += 1) {
+      tick50(room);
+    }
+    const mid = getPlayer(room, "s1");
+    if (mid === undefined) {
+      throw new Error("missing s1");
+    }
+    expect(mid.x).toBeGreaterThan(3.0);
+    expect(mid.y).toBeGreaterThan(3.5);
+    // ~1.2s in: landed on top, inside the footprint, y snapped to support.
+    for (let i = 0; i < 11; i += 1) {
+      tick50(room);
+    }
+    const landed = getPlayer(room, "s1");
+    if (landed === undefined) {
+      throw new Error("missing s1");
+    }
+    expect(landed.y).toBeCloseTo(3.1, 2);
+    expect(Math.abs(landed.x - 4.8)).toBeLessThan(1.5 - 1e-6);
+    expect(Math.abs(landed.z - 4.8)).toBeLessThan(1.5 - 1e-6);
+    expect(landed.x).toBeGreaterThan(3.3);
+  });
+
+  it("AC-B journey cont.: halt stays on top, walk-off sticks then falls", async () => {
+    const room = await playingRoom();
+    removeBots(room);
+    const player = getPlayer(room, "s1");
+    if (player === undefined) {
+      throw new Error("missing s1");
+    }
+    player.x = 0;
+    player.z = 4.2;
+    player.y = 1.1;
+    player.invulnUntil = 1e15;
+    sendMove(room, "s1", 4.8 / 4.837, 0.6 / 4.837);
+    for (let i = 0; i < 25; i += 1) {
+      tick50(room);
+    }
+    const landed = getPlayer(room, "s1");
+    if (landed === undefined) {
+      throw new Error("missing s1");
+    }
+    expect(landed.y).toBeCloseTo(3.1, 2);
+    // Halt: XZ and y freeze on top (no drift, no snap-down).
+    const holdX = landed.x;
+    const holdZ = landed.z;
+    sendMove(room, "s1", 0, 0);
+    for (let i = 0; i < 3; i += 1) {
+      tick50(room);
+    }
+    const held = getPlayer(room, "s1");
+    if (held === undefined) {
+      throw new Error("missing s1");
+    }
+    expect(held.x).toBeCloseTo(holdX, 9);
+    expect(held.z).toBeCloseTo(holdZ, 9);
+    expect(held.y).toBeCloseTo(3.1, 9);
+    // Walk east off the top: y sticks at 3.1 through the 0.5m ring...
+    sendMove(room, "s1", 1, 0);
+    for (let i = 0; i < 3; i += 1) {
+      tick50(room);
+    }
+    const edge = getPlayer(room, "s1");
+    if (edge === undefined) {
+      throw new Error("missing s1");
+    }
+    expect(edge.x).toBeCloseTo(holdX + 0.675, 1);
+    expect(edge.x).toBeLessThan(4.8 + 1.5);
+    expect(edge.y).toBeCloseTo(3.1, 2);
+    // ...then falls only once fully outside the expanded footprint.
+    for (let i = 0; i < 3; i += 1) {
+      tick50(room);
+    }
+    const off = getPlayer(room, "s1");
+    if (off === undefined) {
+      throw new Error("missing s1");
+    }
+    expect(off.x).toBeGreaterThan(4.8 + 1.5);
+    expect(off.y).toBeCloseTo(1.1, 2);
+  });
+
+  it("AC-B control: ground beside the tower never snaps up", async () => {
+    const room = await playingRoom();
+    godmode(room);
+    const solids = [...SERVER_OBSTACLES, ...SERVER_PLATFORMS];
+    const player = getPlayer(room, "s1");
+    if (player === undefined) {
+      throw new Error("missing s1");
+    }
+    // East of the tower, outside the expanded ring, walking into the face.
+    player.x = 7.5;
+    player.z = 4.8;
+    player.y = 1.1;
+    sendMove(room, "s1", -1, 0);
+    for (let i = 0; i < 20; i += 1) {
+      tick50(room);
+      expectOutsideSolids(room, solids, "s1");
+      expect(getPlayer(room, "s1")?.y ?? 99).toBeCloseTo(1.1, 9);
+    }
+    // Pinned at the expanded face (6.3), made progress, never lifted.
+    expect(getPlayer(room, "s1")?.x ?? 99).toBeLessThanOrEqual(6.3 + 1e-9);
+    expect(getPlayer(room, "s1")?.x ?? 0).toBeGreaterThan(5.5);
+  });
+
+  it("AC-A: ground walk through the ramp mismatch band is blocked at the face", async () => {
+    // Platform 4 (-x ramp, support band z in [12.7, 14.3]): z = 12.4 sits
+    // OUTSIDE the support band but INSIDE the old +radius admit band — the
+    // exact leak-1 geometry. Ground-level entry must clamp, never teleport.
+    const room = await playingRoom();
+    godmode(room);
+    const solids = [...SERVER_OBSTACLES, ...SERVER_PLATFORMS];
+    const player = getPlayer(room, "s1");
+    if (player === undefined) {
+      throw new Error("missing s1");
+    }
+    player.x = 2.0;
+    player.z = 12.4;
+    player.y = 1.1;
+    sendMove(room, "s1", 1, 0);
+    for (let i = 0; i < 40; i += 1) {
+      tick50(room);
+      expectOutsideSolids(room, solids, "s1");
+      expect(getPlayer(room, "s1")?.y ?? 99).toBeCloseTo(1.1, 9);
+    }
+    // Pinned at the expanded min-x face (3.5), y never left the ground.
+    expect(getPlayer(room, "s1")?.x ?? 99).toBeCloseTo(3.5, 9);
+    expect(getPlayer(room, "s1")?.z ?? 99).toBeCloseTo(12.4, 9);
+  });
+
+  it("AC-A: lateral walk into the ramp band edge does not teleport y", async () => {
+    // Northward walk at x = 2.0 meets the platform-4 ramp band edge
+    // (z = 12.7, surface 1.50m there) at ground level: the wedge side must
+    // hold XZ (no step-in) so y cannot jump 1.1 -> 2.6 in one tick.
+    const room = await playingRoom();
+    godmode(room);
+    const player = getPlayer(room, "s1");
+    if (player === undefined) {
+      throw new Error("missing s1");
+    }
+    player.x = 2.0;
+    player.z = 12.0;
+    player.y = 1.1;
+    sendMove(room, "s1", 0, 1);
+    for (let i = 0; i < 20; i += 1) {
+      tick50(room);
+      expect(getPlayer(room, "s1")?.y ?? 99).toBeCloseTo(1.1, 9);
+    }
+    expect(getPlayer(room, "s1")?.z ?? 99).toBeLessThan(12.7);
+    expect(getPlayer(room, "s1")?.x ?? 99).toBeCloseTo(2.0, 9);
+  });
+
+  it("AC-A control: a real ramp climb works end-to-end (no per-tick jumps)", async () => {
+    // From the platform-4 ramp foot (-5.0, 13.5) straight up the ramp band:
+    // feet track the slope (~0.06m/tick), the open face admits at height,
+    // and the walk ends on top — with no teleport on any single tick.
+    const room = await playingRoom();
+    const { shooter } = isolateDuel(room);
+    shooter.x = -5.0;
+    shooter.z = 13.5;
+    shooter.y = 1.1;
+    shooter.invulnUntil = 1e15;
+    sendMove(room, shooter.sessionId, 1, 0);
+    let prevY = 1.1;
+    for (let i = 0; i < 43; i += 1) {
+      tick50(room);
+      const p = getPlayer(room, shooter.sessionId);
+      if (p === undefined) {
+        throw new Error("missing shooter");
+      }
+      expect(Math.abs(p.y - prevY)).toBeLessThan(0.3);
+      prevY = p.y;
+    }
+    const top = getPlayer(room, shooter.sessionId);
+    if (top === undefined) {
+      throw new Error("missing shooter");
+    }
+    expect(top.x).toBeCloseTo(4.675, 1);
+    expect(top.z).toBeCloseTo(13.5, 9);
+    expect(top.y).toBeCloseTo(3.1, 2);
+  });
+
+  it("AC3: a ball at tower-top height damages the tower-top victim", async () => {
+    const room = await playingRoom();
+    const { shooter, target } = isolateDuel(room);
+    shooter.x = 4.8;
+    shooter.z = 2.0;
+    shooter.y = 3.1;
+    shooter.reloadUntil = 0;
+    target.x = 4.8;
+    target.z = 4.8;
+    target.y = 3.1;
+    target.hp = 100;
+    // Level shot +Z at the victim body (muzzle 3.4, ~3.5m flight, drop ~5cm).
+    fireAs(room, "s1", { power01: 1, yaw: Math.PI, pitch: 0, super: false, throwerY: 3.1 });
+    expect(room.state.balls.size).toBe(1);
+    for (let i = 0; i < 20 && room.state.balls.size > 0; i += 1) {
+      advance(room, 50);
+      room.tickRoom(50);
+    }
+    expect(room.state.balls.size).toBe(0);
+    expect(target.hp).toBe(75);
+  });
+
+  it("AC3 control: a sub-top ball into the wall despawns, victim unharmed", async () => {
+    const room = await playingRoom();
+    const { shooter, target } = isolateDuel(room);
+    shooter.x = 1.0;
+    shooter.z = 4.8;
+    shooter.y = 1.1;
+    shooter.reloadUntil = 0;
+    target.x = 4.8;
+    target.z = 4.8;
+    target.y = 3.1;
+    target.hp = 100;
+    // Flat ground shot +X into the tower wall (muzzle 1.4 < top 2.0).
+    fireAs(room, "s1", { power01: 1, yaw: -Math.PI / 2, pitch: 0, super: false, throwerY: 1.1 });
+    expect(room.state.balls.size).toBe(1);
+    for (let i = 0; i < 20 && room.state.balls.size > 0; i += 1) {
+      advance(room, 50);
+      room.tickRoom(50);
+    }
+    expect(room.state.balls.size).toBe(0);
+    expect(target.hp).toBe(100);
+    expect(shooter.hp).toBe(100);
+  });
+
+  it("server keeps steep down-aim unflattened (bug 2, server side)", async () => {
+    const room = await playingRoom();
+    const { shooter } = isolateDuel(room);
+    shooter.reloadUntil = 0;
+    fireAs(room, "s1", { power01: 1, yaw: 0, pitch: -0.4, super: false });
+    expect(room.state.balls.size).toBe(1);
+    let vy = 0;
+    room.state.balls.forEach((ball): void => {
+      vy = ball.vy;
+    });
+    // Full-power down-aim: sin(-0.4) * 20 = -7.79. The old [-0.15, 0.9]
+    // clamp flattened this to sin(-0.15) * 20 = -2.99 (flatter than preview).
+    expect(vy).toBeCloseTo(Math.sin(-0.4) * 20, 6);
+    expect(vy).toBeLessThan(-5);
+  });
+
+  it("groundTopAt reads obstacle tops and ramp slopes", () => {
+    expect(groundTopAt(4.8, 4.8)).toBeCloseTo(2.0, 10);
+    expect(groundTopAt(10.8, 0)).toBeCloseTo(0.8, 10);
+    expect(groundTopAt(0, 0)).toBe(0);
+    // Platform 0 (+z ramp, edge z = -7.3, run = topY / tan14).
+    const platform = SERVER_PLATFORMS[0];
+    if (platform === undefined) {
+      throw new Error("no server platform defined");
+    }
+    const run = rampRunForTop(platform.topY);
+    expect(run).toBeGreaterThan(9);
+    expect(run).toBeLessThan(12);
+    expect(rampHeightAt(platform, platform.x, -7.3)).toBeCloseTo(platform.topY, 6);
+    expect(rampHeightAt(platform, platform.x, -7.3 + run / 2)).toBeCloseTo(platform.topY / 2, 6);
+    expect(rampHeightAt(platform, platform.x, -7.3 + run + 1)).toBe(0);
+    expect(rampHeightAt(platform, platform.x + 99, -4)).toBe(0);
+    expect(groundTopAt(platform.x, -7.3 + run / 2)).toBeCloseTo(platform.topY / 2, 6);
+  });
+
+  it("trampolineArcY launches at 1.1, apexes ~4.16, lands ~1.75s", () => {
+    expect(trampolineArcY(0)).toBeCloseTo(1.1, 10);
+    expect(trampolineArcY(-1)).toBeCloseTo(1.1, 10);
+    expect(trampolineArcY(Number.NaN)).toBeCloseTo(1.1, 10);
+    expect(trampolineArcY(0.6)).toBeGreaterThan(4.1);
+    expect(trampolineArcY(0.6)).toBeLessThan(4.25);
+    expect(trampolineArcY(1.17)).toBeCloseTo(3.1, 1);
+    // Full ground-to-ground flight: still ~2.0 up at 1.5s, back down ~1.11
+    // at 1.75s (touchdown), below ground level by 1.9s. The old "~1.2s"
+    // comments confused the tower-top landing time with the full arc.
+    expect(trampolineArcY(1.5)).toBeCloseTo(2.02, 1);
+    expect(trampolineArcY(1.75)).toBeCloseTo(1.11, 1);
+    expect(trampolineArcY(1.9)).toBeLessThan(1.1);
+  });
+
+  it("isOnTrampolinePad matches the two client pads", () => {
+    expect(isOnTrampolinePad(0, 4.2)).toBe(true);
+    expect(isOnTrampolinePad(0, -4.2)).toBe(true);
+    expect(isOnTrampolinePad(1.0, 4.2)).toBe(true);
+    expect(isOnTrampolinePad(5, 5)).toBe(false);
+    expect(isOnTrampolinePad(Number.NaN, 0)).toBe(false);
+  });
+
+  it("bodyCenterYAtExpanded matches strict inside, ring, and open ground", () => {
+    expect(bodyCenterYAtExpanded(4.8, 4.8, 0.5)).toBeCloseTo(3.1, 10);
+    // 0.5m ring around the tower (expanded footprint, strict body box out).
+    expect(bodyCenterYAtExpanded(6.0, 4.8, 0.5)).toBeCloseTo(3.1, 10);
+    expect(bodyCenterYAtExpanded(7.5, 4.8, 0.5)).toBeCloseTo(1.1, 10);
+    expect(bodyCenterYAtExpanded(0, 0, 0.5)).toBeCloseTo(1.1, 10);
   });
 });

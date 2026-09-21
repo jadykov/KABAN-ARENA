@@ -4,7 +4,7 @@
 // covered by server room tests + live playtest, not unit mocks.
 
 import { describe, expect, it } from "vitest";
-import { GUEST_NICK_PREFIX, HIT_DAMAGE, MAX_HEARTS } from "../config";
+import { BALL_FIRST_TICK_HOLD_S, GUEST_NICK_PREFIX, HIT_DAMAGE, MAX_HEARTS, TRAJ_PREVIEW_DT_S } from "../config";
 import { expSmoothFactor, lerp, lerpAngle, RemoteTrack } from "./interpolation";
 import { decodeSnapshot } from "./NetworkManager";
 import {
@@ -19,6 +19,7 @@ import {
   normalizeNick,
   normalizePlayNick,
   pickHitTarget,
+  previewTimeAt,
   roundPhaseFromString,
   worldMoveFromYaw,
   type NetPlayerSnapshot,
@@ -115,6 +116,22 @@ describe("round phase parsing", () => {
     expect(roundPhaseFromString("ended")).toBe("ended");
     expect(roundPhaseFromString("bogus")).toBe("lobby");
     expect(roundPhaseFromString(undefined)).toBe("lobby");
+  });
+});
+
+describe("preview time base (first-tick hold offset, bug 2 secondary)", () => {
+  it("starts at one server tick and steps by the preview dt", () => {
+    // The server holds newborn balls one patch tick (50ms) at the muzzle,
+    // so dot i samples HOLD + i*DT instead of i*DT.
+    expect(BALL_FIRST_TICK_HOLD_S).toBe(0.05);
+    expect(previewTimeAt(0)).toBeCloseTo(BALL_FIRST_TICK_HOLD_S, 10);
+    expect(previewTimeAt(1) - previewTimeAt(0)).toBeCloseTo(TRAJ_PREVIEW_DT_S, 10);
+    expect(previewTimeAt(5)).toBeCloseTo(BALL_FIRST_TICK_HOLD_S + 5 * TRAJ_PREVIEW_DT_S, 10);
+  });
+
+  it("floors garbage indexes to the hold instead of NaN", () => {
+    expect(previewTimeAt(-3)).toBeCloseTo(BALL_FIRST_TICK_HOLD_S, 10);
+    expect(previewTimeAt(Number.NaN)).toBeCloseTo(BALL_FIRST_TICK_HOLD_S, 10);
   });
 });
 

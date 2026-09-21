@@ -16,6 +16,7 @@ import {
   CAMERA_WALL_MARGIN,
   BALL_MUZZLE_OFFSET,
   BALL_TORSO_OFFSET,
+  CHARGE_MOVE_MULT,
   DEATH_BURST_COUNT,
   DEATH_BURST_ORANGE,
   DEATH_BURST_RED,
@@ -183,6 +184,12 @@ export class SceneManager {
   // update / dispose stay in one place with the other pooled visuals.
   private fireflies: Fireflies | null = null;
   private charge01 = 0;
+  // Charging locomotion flag (bug C): main.ts feeds isCharging here every
+  // frame; while true the local move target speed scales by CHARGE_MOVE_MULT
+  // (server mirror) so prediction stops wobble-fighting the server during
+  // charge+walk — the preview origin stays put. Defaults false (spectators,
+  // tests, and pre-charge frames move full speed).
+  private charging = false;
   private latestBalls: readonly NetBallSnapshot[] = [];
   private latestSuper: NetSuperSnapshot | null = null;
   // Scratch vectors for the per-frame camera path (no per-frame alloc).
@@ -373,6 +380,13 @@ export class SceneManager {
   public setCharge01(value: number): void {
     const clamped = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
     this.charge01 = clamped;
+  }
+
+  // Charging locomotion flag (bug C): fed every frame from main.ts while
+  // playing. While charging the local move target runs at CHARGE_MOVE_MULT
+  // (server mirror) — see updatePhysics.
+  public setCharging(active: boolean): void {
+    this.charging = active === true;
   }
 
   // Stage 4d.2 charge-zoom feed (called every frame from main.ts while
@@ -731,7 +745,12 @@ export class SceneManager {
     const preStep = physics.getPlayerPosition();
     const onIce = isOnSlippery(preStep.x, preStep.z);
     physics.setSlippery(onIce);
-    const speed = MOVE_SPEED * this.powerState.getSpeedMultiplier() * (onIce ? ICE_SPEED_MULT : 1);
+    // Charging halves the move target (CHARGE_MOVE_MULT, server mirror): the
+    // server simulates charging fighters at half speed, so unscaled client
+    // prediction diverged ~2.25 m/s during charge+walk and reconcile tugged
+    // the preview origin every frame (bug C jitter source).
+    const chargeMult = this.charging ? CHARGE_MOVE_MULT : 1;
+    const speed = MOVE_SPEED * chargeMult * this.powerState.getSpeedMultiplier() * (onIce ? ICE_SPEED_MULT : 1);
     const current = physics.getPlayerVelocity();
     const targetX = worldMove.x * speed;
     const targetZ = worldMove.z * speed;
@@ -996,6 +1015,7 @@ export class SceneManager {
     this.speedWasActive = false;
     this.events.length = 0;
     this.charge01 = 0;
+    this.charging = false;
     this.chargeZoom01 = 0;
     this.shotTurnActive = false;
     this.shotTurnTarget = 0;

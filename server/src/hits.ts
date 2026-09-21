@@ -19,13 +19,21 @@ import {
   MAX_PLAYERS,
   NICK_MAX_LENGTH,
   NICK_MIN_LENGTH,
+  RAMP_SLOPE_DEG,
   RECOIL_FULL_M,
   RECOIL_WEAK_M,
+  SERVER_OBSTACLES,
   SERVER_PLATFORMS,
   SPAWN_INSET,
   SUPER_DAMAGE_MULT,
+  TRAMPOLINE_AIR_DAMPING,
+  TRAMPOLINE_GRAVITY,
+  TRAMPOLINE_IMPULSE,
+  TRAMPOLINE_RADIUS,
+  TRAMPOLINE_SPOTS,
   WEAK_DAMAGE,
   WIN_SCORE,
+  type ServerPlatformDef,
 } from "./config.js";
 import type { PlayerState } from "./state.js";
 
@@ -144,16 +152,91 @@ export function muzzleForShot(
 }
 
 // 4d.1 thrower elevation: server movement is XZ-kinematic (moveHumans never
-// writes player.y), so the authoritative body-center y is DERIVED here —
-// never trusted blindly from the wire:
-// - groundTopAt: highest platform top under (x,z), 0 on open ground
-//   (SERVER_PLATFORMS mirror of the client Arena PLATFORM_FIGURES).
+// trusted blindly from the wire, but since the elevation patch the room
+// maintains player.y every tick (grounded derivation + trampoline arcs), so
+// this derivation is the grounded anchor the room writes into player.y:
+// - groundTopAt: highest walkable top under (x,z) — platform tops, OBSTACLE
+//   tops (tower tops are standable), and RAMP SLOPE heights along each
+//   platform's walk-up band (0 at the ramp foot, topY at the platform edge).
+//   0 on open ground.
 // - bodyCenterYAt: groundTop + BODY_CENTER_Y (capsule center on that level).
 // - sanitizeThrowerY: client-sent body-center y clamped to absolute 0..8
 //   (NaN/garbage -> null = derive).
 // - resolveThrowerY: sanitized client y wins when inside [derived-1,
-//   derived+6] (covers trampoline jumps, apex ~+5m), otherwise the derived
+//   derived+6] (covers trampoline jumps, apex ~+3m), otherwise the derived
 //   value. Bots (no client y) always derive. Pure + unit-tested.
+// - rampRunForTop / rampHeightAt: ramp-band geometry mirror of the client
+//   Arena.getRamps (run = topY / tan(RAMP_SLOPE_DEG), height lerps foot->edge).
+// - trampolineArcY: closed-form damped vertical arc for server trampoline
+//   jumps (same model the client Arena.test pins: y0 = BODY_CENTER_Y,
+//   v0 = TRAMPOLINE_IMPULSE, exp damping TRAMPOLINE_AIR_DAMPING, gravity
+//   TRAMPOLINE_GRAVITY). Pure + unit-tested.
+// - isOnTrampolinePad: XZ inside a TRAMPOLINE_SPOTS pad (launch trigger).
+export function rampRunForTop(topY: number): number {
+  if (!Number.isFinite(topY) || topY <= 0) {
+    return 0;
+  }
+  const tan = Math.tan((RAMP_SLOPE_DEG * Math.PI) / 180);
+  if (!(tan > 0)) {
+    return 0;
+  }
+  return topY / tan;
+}
+
+export function rampHeightAt(platform: ServerPlatformDef, x: number, z: number): number {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) {
+    return 0;
+  }
+  const run = rampRunForTop(platform.topY);
+  if (!(run > 0)) {
+    return 0;
+  }
+  const halfW = platform.rampWidth / 2;
+  let lateral = 0;
+  let outward = -1;
+  switch (platform.rampSide) {
+    case "+z":
+      lateral = x - platform.x;
+      outward = z - (platform.z + platform.hz);
+      break;
+    case "-z":
+      lateral = x - platform.x;
+      outward = platform.z - platform.hz - z;
+      break;
+    case "+x":
+      lateral = z - platform.z;
+      outward = x - (platform.x + platform.hx);
+      break;
+    case "-x":
+      lateral = z - platform.z;
+      outward = platform.x - platform.hx - x;
+      break;
+    default:
+      return 0;
+  }
+  if (Math.abs(lateral) > halfW || outward < 0 || outward > run) {
+    return 0;
+  }
+  return platform.topY * (1 - outward / run);
+}
+
+// Ramp-band-only height (bug A leak 2): max rampHeightAt over platforms,
+// WITHOUT footprint tops — the wedge-side entry check needs the surface a
+// step would land on, not the platform top behind it.
+export function rampBandHeightAt(x: number, z: number): number {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) {
+    return 0;
+  }
+  let top = 0;
+  for (const platform of SERVER_PLATFORMS) {
+    const rampH = rampHeightAt(platform, x, z);
+    if (rampH > top) {
+      top = rampH;
+    }
+  }
+  return top;
+}
+
 export function groundTopAt(x: number, z: number): number {
   if (!Number.isFinite(x) || !Number.isFinite(z)) {
     return 0;
@@ -165,12 +248,62 @@ export function groundTopAt(x: number, z: number): number {
         top = platform.topY;
       }
     }
+    const rampH = rampHeightAt(platform, x, z);
+    if (rampH > top) {
+      top = rampH;
+    }
+  }
+  for (const block of SERVER_OBSTACLES) {
+    if (Math.abs(x - block.x) <= block.hx && Math.abs(z - block.z) <= block.hz) {
+      if (block.topY > top) {
+        top = block.topY;
+      }
+    }
   }
   return top;
 }
 
 export function bodyCenterYAt(x: number, z: number): number {
   return groundTopAt(x, z) + BODY_CENTER_Y;
+}
+
+// Radius-expanded support (bug B): same tops as groundTopAt but measured
+// against the radius-expanded footprints — the SAME test collision uses.
+// Lets landings clip a top edge (physical: capsule overlapping the edge at
+// support height rests on it) and implements support hysteresis: a fighter
+// walking off a top keeps it through the 0.5m ring, falling only once fully
+// outside. Ramp bands stay STRICT (unexpanded): the wedge-entry block owns
+// the band sides, and widening support there would re-open leak 2.
+// Callers gate the widened value by feet (see ArenaRoom groundSupport), so
+// ground fighters beside a solid never snap up.
+export function groundTopAtExpanded(x: number, z: number, radius: number): number {
+  if (!Number.isFinite(x) || !Number.isFinite(z) || !(radius >= 0)) {
+    return groundTopAt(x, z);
+  }
+  let top = 0;
+  for (const platform of SERVER_PLATFORMS) {
+    if (Math.abs(x - platform.x) <= platform.hx + radius && Math.abs(z - platform.z) <= platform.hz + radius) {
+      if (platform.topY > top) {
+        top = platform.topY;
+      }
+    }
+    const rampH = rampHeightAt(platform, x, z);
+    if (rampH > top) {
+      top = rampH;
+    }
+  }
+  for (const block of SERVER_OBSTACLES) {
+    if (Math.abs(x - block.x) <= block.hx + radius && Math.abs(z - block.z) <= block.hz + radius) {
+      if (block.topY > top) {
+        top = block.topY;
+      }
+    }
+  }
+  return top;
+}
+
+export function bodyCenterYAtExpanded(x: number, z: number, radius: number): number {
+  return groundTopAtExpanded(x, z, radius) + BODY_CENTER_Y;
 }
 
 export function sanitizeThrowerY(raw: unknown): number | null {
@@ -186,6 +319,36 @@ export function resolveThrowerY(throwerY: number | null, x: number, z: number): 
     return derived;
   }
   return Math.max(derived - 1, Math.min(derived + 6, throwerY));
+}
+
+// Server trampoline-jump arc (bugs 1/3a: tower tops must be reachable
+// server-side, not just client-side): closed-form damped vertical motion,
+// the same model the client Arena.test pins for the impulse proof —
+// y(t) = y0 + (A/d)(1-e^-dt) - (g/d)t with A = v0 + g/d, y0 = BODY_CENTER_Y
+// (pads sit on open ground), v0 = TRAMPOLINE_IMPULSE, d =
+// TRAMPOLINE_AIR_DAMPING, g = TRAMPOLINE_GRAVITY. Non-finite/negative input
+// reads as t = 0 (launch height), never NaN.
+export function trampolineArcY(airTimeS: number): number {
+  const t = Number.isFinite(airTimeS) && airTimeS > 0 ? airTimeS : 0;
+  const d = TRAMPOLINE_AIR_DAMPING;
+  const g = TRAMPOLINE_GRAVITY;
+  const a = TRAMPOLINE_IMPULSE + g / d;
+  return BODY_CENTER_Y + (a / d) * (1 - Math.exp(-d * t)) - ((g / d) * t);
+}
+
+// Launch trigger: XZ inside a trampoline pad (client getTrampolines mirror).
+export function isOnTrampolinePad(x: number, z: number): boolean {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) {
+    return false;
+  }
+  for (const pad of TRAMPOLINE_SPOTS) {
+    const dx = x - pad.x;
+    const dz = z - pad.z;
+    if (dx * dx + dz * dz <= TRAMPOLINE_RADIUS * TRAMPOLINE_RADIUS) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Throw-polish: shot randomness is removed (SPRAY_DEG/BOT_SPRAY_DEG are 0 —

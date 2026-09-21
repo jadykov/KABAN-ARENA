@@ -24,7 +24,6 @@ import {
   SELF_RECONCILE_SNAP_M,
   START_SCORE,
   TAP_FIRE_MIN_S,
-  TRAJ_PREVIEW_DT_S,
   getServerUrl,
 } from "./config";
 import { Engine } from "./engine/Engine";
@@ -32,7 +31,7 @@ import { InputController, isTypingTarget } from "./engine/InputController";
 import { SceneManager } from "./engine/SceneManager";
 import { NetworkManager, type RoomSnapshot } from "./net/NetworkManager";
 import { RemoteAvatars } from "./net/RemoteAvatars";
-import { applyAimAssist } from "./net/aimAssist";
+import { applyAimAssistTo, type AssistStick } from "./net/aimAssist";
 import { beginChargeLevel, mirrorChargeCameraPitch, pitchRateScale, shouldTrackAimFromCamera, stepChargeLevel, unmirrorChargeCameraPitch, yawRateScale, type ChargeLevel } from "./net/chargeAim";
 import { cameraYawBehindFacing, forwardnessRateScale, shouldIdleFollow, stepIdleFollowPitch, stepIdleFollowYaw, stickAngleFromForward, tolerantCameraPitchMin, type IdleFollowGate } from "./net/idleFollow";
 import {
@@ -45,6 +44,7 @@ import {
   muzzleForShot,
   normalizePlayNick,
   powerToSpeed,
+  previewTimeAt,
   worldMoveFromYaw,
 } from "./net/protocol";
 import { TRAJ_DOT_COUNT, createAim, type TrajSample } from "./ui/aim";
@@ -140,6 +140,26 @@ async function boot(): Promise<void> {
   // aim, while a charge with zero ticks (background-tab rAF stall) never
   // mirrored the camera, so the plain copy is already true aim.
   let chargeMirrored = false;
+  // Shared release-time aim (bug 2: preview == flight): ONE assisted
+  // yaw/pitch object feeds BOTH the trajectory preview (per-frame while
+  // charging) and the fire payload (stopCharge). Same object, same values —
+  // preview dots cannot diverge from the fired ball. Refreshed through
+  // refreshAssist below (per-frame on a 100ms TTL while charging so the
+  // candidate lookup, which allocates, stays out of the hot path; forced
+  // fresh at release so the payload uses release-moment aim). Zero per-frame
+  // allocs itself: applyAimAssistTo writes into this same object.
+  const assistedAim = { yaw: 0, pitch: 0 };
+  let assistRefreshAtMs = 0;
+  // Preview-assist refresh throttle (ms): livingPositions builds an array per
+  // call, so the per-frame preview reuses the last assist within this window
+  // (assist is a gentle <=6deg nudge — 100ms staleness is invisible).
+  // File-local: a frame-cache throttle, not game tuning.
+  const PREVIEW_ASSIST_REFRESH_MS = 100;
+  // Sticky assist target (bug C): caller-owned AssistStick, mutated in place
+  // by applyAimAssistTo (zero-alloc) — the tracked enemy holds across
+  // refreshes until beaten by the sticky margin or out of the cone, so the
+  // preview stops flip-flopping between near-tied candidates.
+  const assistStick: AssistStick = { lastId: null };
   // Floating LMB aim (PC parity): LMB hold on the canvas starts charge at the
   // press point (floating origin, not a fixed disc); drag offset in px maps
   // to [-1, 1] over FLOAT_DRAG_RADIUS_PX, then expo + deadzone + yaw/pitch
@@ -498,6 +518,32 @@ async function boot(): Promise<void> {
     aimOverlay.hide();
   }
 
+  // Elevation-aware aim assist shared by preview AND payload (bug 2): runs
+  // the same applyAimAssistTo path into the shared assistedAim object, then
+  // clamps pitch to the aim band both consumers honor. force=true recomputes
+  // (release moment); force=false respects the 100ms preview TTL. Self
+  // heights come from the live avatar Y, target heights from replicated Y.
+  // The owned assistStick rides along (mutated in place, zero-alloc) so the
+  // tracked target holds across refreshes (bug C hysteresis).
+  function refreshAssist(yaw: number, pitch: number, force: boolean): void {
+    const nowMs = Date.now();
+    if (!force && nowMs - assistRefreshAtMs < PREVIEW_ASSIST_REFRESH_MS) {
+      return;
+    }
+    assistRefreshAtMs = nowMs;
+    const selfPos = sceneManager.getAvatarPosition();
+    const assistCandidates = remotes.livingPositions(net.ownSessionId);
+    applyAimAssistTo(
+      assistedAim,
+      yaw,
+      pitch,
+      { x: selfPos.x, z: selfPos.z, y: selfPos.y },
+      assistCandidates,
+      assistStick,
+    );
+    assistedAim.pitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, assistedAim.pitch));
+  }
+
   function stopCharge(): void {
     if (!isCharging) {
       return;
@@ -562,13 +608,10 @@ async function boot(): Promise<void> {
     }
     const power01 = chargeToPower01(chargeMs / 1000);
     const selfPos = sceneManager.getAvatarPosition();
-    const assistCandidates = remotes.livingPositions(net.ownSessionId);
-    const assisted = applyAimAssist(
-      aimYaw,
-      aimPitch,
-      { x: selfPos.x, z: selfPos.z },
-      assistCandidates,
-    );
+    // Release-moment assist, fresh (force): the SAME shared object the
+    // preview has been showing, so payload == preview by construction.
+    refreshAssist(aimYaw, aimPitch, true);
+    const assisted = assistedAim;
     // The server spawns at torso height on our elevation: send the live
     // body-center y (avatar position.y) with the payload so platform and
     // mid-jump throws leave the hand, not the feet.
@@ -1041,15 +1084,20 @@ async function boot(): Promise<void> {
   // gravity the authoritative server integrates, sampled at fixed steps and
   // projected to screen-space offsets from the crosshair. Runs while
   // charging so the dots move with power + aim. DOM overlay only.
+  // Direction == payload direction by construction: both read the shared
+  // assistedAim object (refreshed on the preview TTL here, forced fresh at
+  // release in stopCharge). Time base includes the server first-tick hold
+  // (previewTimeAt), matching the first patched ball frame.
   const projScratch = new THREE.Vector3();
   function computeAimTrajectory(): TrajSample[] {
+    refreshAssist(aimYaw, aimPitch, false);
     const chargeS = Math.max(0, (Date.now() - chargeStartMs) / 1000);
     const speed = powerToSpeed(chargeToPower01(chargeS));
-    const dir = directionFromYawPitch(aimYaw, aimPitch);
+    const dir = directionFromYawPitch(assistedAim.yaw, assistedAim.pitch);
     const origin = sceneManager.getAvatarPosition();
     // Identical muzzle helper as the fire path (bodyCenter XZ + dir*0.7,
     // y = bodyY + torso offset) so the preview tracks elevation too.
-    const muzzle = muzzleForShot(origin.x, origin.y, origin.z, aimYaw, aimPitch);
+    const muzzle = muzzleForShot(origin.x, origin.y, origin.z, assistedAim.yaw, assistedAim.pitch);
     const muzzleX = muzzle.x;
     const muzzleY = muzzle.y;
     const muzzleZ = muzzle.z;
@@ -1057,10 +1105,11 @@ async function boot(): Promise<void> {
     const height = window.innerHeight;
     engine.camera.updateMatrixWorld();
     const samples: TrajSample[] = [];
-    // Start at t=0 (muzzle) so the first dot visibly leaves the torso —
-    // same origin/offset/height/gravity as the authoritative spawn.
+    // Start at the first-tick hold (muzzle + one server tick) so the first
+    // dot matches the first patched ball frame — same origin/offset/height/
+    // gravity as the authoritative spawn.
     for (let i = 0; i < TRAJ_DOT_COUNT; i += 1) {
-      const t = i * TRAJ_PREVIEW_DT_S;
+      const t = previewTimeAt(i);
       projScratch.set(
         muzzleX + dir.x * speed * t,
         muzzleY + dir.y * speed * t - 0.5 * BALL_GRAVITY * t * t,
@@ -1240,6 +1289,11 @@ async function boot(): Promise<void> {
         sceneManager.setChargeZoom01(charge01);
         aimOverlay.setCharge01(charge01);
       }
+      // Charging locomotion mirror (bug C): the server simulates charging
+      // fighters at CHARGE_MOVE_MULT, so the client prediction runs the same
+      // factor — otherwise charge+walk diverges ~2.25 m/s and reconcile tugs
+      // the preview origin every frame.
+      sceneManager.setCharging(isCharging && playing);
       if (isReloading) {
         if (nowMs >= reloadUntilMs) {
           isReloading = false;

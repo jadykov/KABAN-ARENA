@@ -92,6 +92,13 @@ export const RECOIL_FULL_M = 0.8;
 // rampSide marks the walk-up face (mirrors client rampSide): server movement
 // collision leaves that face OPEN so fighters can climb onto the top, while
 // the other three faces stay sheer walls.
+// rampWidth mirrors client rampWidth (full slab width, m): the open face
+// admits entry only inside the ramp corridor (lateral |offset| <=
+// rampWidth/2 + body radius), so skirting the ramp mouth at ground level
+// stays blocked like the client's solid platform box. rampWidth is also the
+// lateral extent of the server ramp-slope band (see hits.rampHeightAt).
+// RAMP_SLOPE_DEG mirrors client RAMP_SLOPE_DEG (run = topY / tan).
+export const RAMP_SLOPE_DEG = 14;
 export interface ServerPlatformDef {
   x: number;
   z: number;
@@ -99,12 +106,13 @@ export interface ServerPlatformDef {
   hz: number;
   topY: number;
   rampSide: "+x" | "-x" | "+z" | "-z";
+  rampWidth: number;
 }
 export const SERVER_PLATFORMS: ReadonlyArray<ServerPlatformDef> = [
-  { x: 13.8, z: -8.5, hx: 1.2, hz: 1.2, topY: 2.6, rampSide: "+z" },
-  { x: -13.5, z: 10.0, hx: 2.4, hz: 1.0, topY: 1.8, rampSide: "-z" },
-  { x: -11.5, z: -9.5, hx: 1.4, hz: 1.4, topY: 2.2, rampSide: "+x" },
-  { x: 5.0, z: 13.5, hx: 1.0, hz: 1.0, topY: 2.0, rampSide: "-x" },
+  { x: 13.8, z: -8.5, hx: 1.2, hz: 1.2, topY: 2.6, rampSide: "+z", rampWidth: 2.0 },
+  { x: -13.5, z: 10.0, hx: 2.4, hz: 1.0, topY: 1.8, rampSide: "-z", rampWidth: 1.6 },
+  { x: -11.5, z: -9.5, hx: 1.4, hz: 1.4, topY: 2.2, rampSide: "+x", rampWidth: 1.8 },
+  { x: 5.0, z: 13.5, hx: 1.0, hz: 1.0, topY: 2.0, rampSide: "-x", rampWidth: 1.6 },
 ];
 // Super-core: center spawn every 45s, 15s life, blink last 3s, 1.7m pickup
 // (matches the bigger 0.8/0.4 visual), buffs NEXT shot only (consumed on
@@ -113,6 +121,79 @@ export const SUPER_SPAWN_S = 45;
 export const SUPER_LIFE_S = 15;
 export const SUPER_BLINK_S = 3;
 export const SUPER_PICKUP_RADIUS = 1.7;
+// Server obstacle mirrors (client Arena.getObstacleLayout): AABB + topY for
+// cannonball impacts (a ball inside the footprint with y <= topY impacts)
+// AND authoritative movement collision (see rooms/ArenaRoom
+// resolvePlayerMove, where solids at/below the mover's feet stop blocking).
+// Positions scaled x1.2 with the map (4 -> 4.8, 9 -> 10.8); block half
+// extents unchanged.
+// Stage 4d.3: the 4 CENTRAL blocks (at +-4.8) double to topY 2.0 (mirrors
+// client hy 1.0) — trampoline-only high ground. Balls arcing over at
+// y 1.0-2.0 now impact instead of flying through (intended gameplay change
+// — flag for playtest). The 4 OUTER blocks stay at topY 0.8.
+export interface ServerObstacleDef {
+  x: number;
+  z: number;
+  hx: number;
+  hz: number;
+  topY: number;
+}
+export const SERVER_OBSTACLES: ReadonlyArray<ServerObstacleDef> = [
+  { x: 4.8, z: 4.8, hx: 1, hz: 1, topY: 2.0 },
+  { x: -4.8, z: 4.8, hx: 1, hz: 1, topY: 2.0 },
+  { x: 4.8, z: -4.8, hx: 1, hz: 1, topY: 2.0 },
+  { x: -4.8, z: -4.8, hx: 1, hz: 1, topY: 2.0 },
+  { x: 10.8, z: 0, hx: 1.5, hz: 0.75, topY: 0.8 },
+  { x: -10.8, z: 0, hx: 1.5, hz: 0.75, topY: 0.8 },
+  { x: 0, z: 10.8, hx: 0.75, hz: 1.5, topY: 0.8 },
+  { x: 0, z: -10.8, hx: 0.75, hz: 1.5, topY: 0.8 },
+];
+// R2 fire-pitch acceptance band (mirrors client CAMERA_PITCH_MIN/MAX):
+// down-aim from elevation (down to -0.41) must reach the ball spawn
+// unflattened — the old [-0.15, 0.9] literals clipped every downhill shot
+// toward horizontal (client preview vs server flight mismatch on bug 2).
+export const FIRE_PITCH_MIN = -0.41;
+export const FIRE_PITCH_MAX = 0.36;
+// Server trampoline-jump model (mirrors client Rapier trampolines so tower
+// tops are reachable server-side, not just client-side): pads at
+// TRAMPOLINE_SPOTS with TRAMPOLINE_RADIUS (mirror client getTrampolines /
+// TRAMPOLINE_RADIUS). A grounded fighter whose XZ enters a pad launches with
+// TRAMPOLINE_IMPULSE (mirror client TRAMPOLINE_IMPULSE incl. the owner 13.5
+// buff) and follows the same damped vertical arc the client integrates
+// (TRAMPOLINE_AIR_DAMPING mirrors client PLAYER_LINEAR_DAMPING,
+// TRAMPOLINE_GRAVITY mirrors client world gravity 9.81 — NOT the floaty
+// BALL_GRAVITY 3.5). Full ground-to-ground flight lasts ~1.75s (tower-top
+// landing ~1.17s); TRAMPOLINE_MAX_AIR_S force-lands a stuck arc (the real
+// arc lands well inside the cap; the cap never fires in practice).
+export const TRAMPOLINE_SPOTS: ReadonlyArray<{ x: number; z: number }> = [
+  { x: 0, z: 4.2 },
+  { x: 0, z: -4.2 },
+];
+export const TRAMPOLINE_RADIUS = 1.2;
+export const TRAMPOLINE_IMPULSE = 13.5;
+export const TRAMPOLINE_AIR_DAMPING = 2.5;
+export const TRAMPOLINE_GRAVITY = 9.81;
+export const TRAMPOLINE_MAX_AIR_S = 3;
+// Elevation-gate tuning (ramp-side pass-through fix): an open (ramp-side)
+// face admits entry only when the mover is actually climbing — feet above
+// RAMP_ADMIT_MIN_FEET — and only inside the support band (see below). A
+// grounded fighter skirting the ramp mouth at feet ~0 is clamped like any
+// sheer face, matching the client's solid platform box.
+export const RAMP_ADMIT_MIN_FEET = 0.3;
+// Wedge-side tolerance (m): legit ramp climbing changes height by at most
+// slope x speed x tick (~0.06m), so stepping onto a ramp surface more than
+// this above the feet means walking into the wedge SIDE (client Rapier
+// blocks it) and the step is held on its axis instead.
+export const RAMP_ENTRY_TOL = 0.3;
+// Support hysteresis (tower-edge stickiness): keep the last elevated support
+// while its feet still match within this tolerance, so walking off a top
+// only falls after leaving the radius-expanded footprint (no pinned-at-face
+// state, no snap-up from the ground beside a solid — that path fails the
+// feet match by metres, not microns).
+export const SUPPORT_STICK_TOL = 0.05;
+// Charging slow-down mirror (client CHARGE_MOVE_MULT): aiming/charging
+// fighters move at half speed, server and client alike.
+export const CHARGE_MOVE_MULT = 0.5;
 // Cannon bot tuning: random charge 0.3-1.0s, 2.5s cooldown + rand, zero spread.
 export const BOT_CHARGE_MIN_S = 0.3;
 export const BOT_CHARGE_MAX_S = 1.0;

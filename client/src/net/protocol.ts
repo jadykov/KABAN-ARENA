@@ -5,6 +5,7 @@
 
 import {
   AIM_EXPO,
+  BALL_FIRST_TICK_HOLD_S,
   BALL_MAX_SPEED,
   BALL_MIN_SPEED,
   BALL_MUZZLE_OFFSET,
@@ -28,6 +29,7 @@ import {
   REMOTE_PALETTE,
   SELF_SPAWN_Y,
   SUPER_DAMAGE_MULT,
+  TRAJ_PREVIEW_DT_S,
   WEAK_DAMAGE,
 } from "../config";
 
@@ -328,6 +330,14 @@ export function roundPhaseFromString(raw: unknown): RoundPhase {
     return raw;
   }
   return "lobby";
+}
+
+// Trajectory-preview time base (bug 2, secondary): the authoritative server
+// holds a newborn ball one patch tick at the muzzle before integrating, so
+// preview dot i samples flight time HOLD + i*DT, not i*DT. Pure + tested.
+export function previewTimeAt(index: number): number {
+  const i = Number.isFinite(index) && index > 0 ? Math.floor(index) : 0;
+  return BALL_FIRST_TICK_HOLD_S + i * TRAJ_PREVIEW_DT_S;
 }
 
 export interface HitCandidate {

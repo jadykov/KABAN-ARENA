@@ -111,12 +111,14 @@ export const ICE_FRICTION = 0.07;
 export const ICE_LINEAR_DAMPING = 1.0;
 // Stage 4d.3 feedback (owner: impulse 10 cannot land the 2.0m towers —
 // verified: Rapier linear damping 2.5 bleeds the launch, damped arrival over
-// the tower footprint peaks below the needed 3.0m body-center). Bumped to 12
-// (band max, still inside QT3-A 8-12): the smallest band value whose damped
-// trajectory arrives over the footprint above 3.0m with margin — see the
-// Arena.test damped-reach proof. Horizontal cruise (~4.5m/s via input
+// the tower footprint peaks below the needed 3.0m body-center). Raised to
+// 13.5 per owner directive 2026-09-20 (+12.5%, asked +10-15% for easier tower
+// landings — deliberately above the old QT3-A 8-12 band, which no longer
+// applies): the damped trajectory arrives over the footprint at ~3.81m
+// (bar: >= 3.5, comfortable margin — see the Arena.test damped-reach proof;
+// 12 only reaches 3.29). Apex ~4.16m. Horizontal cruise (~4.5m/s via input
 // steering, which outruns damping) covers pad-edge to footprint in ~0.84s.
-export const TRAMPOLINE_IMPULSE = 12;
+export const TRAMPOLINE_IMPULSE = 13.5;
 export const TRAMPOLINE_COOLDOWN_S = 0.5;
 // Trampoline pad glow dim (4d.3 feedback: pads read too hot): multiplier on
 // the pad emissive intensity (0.9 x 0.8 = 0.72, -20%). Named constant so the
@@ -128,7 +130,7 @@ export const TRAMPOLINE_PAD_DIM = 0.8;
 // |vy| dips under the exit level for ~0.16s, shorter than the hold).
 // THRESHOLD sits safely above ramp-climb vy (tan14° × 4.5m/s ≈ 1.1 —
 // climbing a ramp stays grounded) and far below trampoline launch
-// (TRAMPOLINE_IMPULSE 8-12). Grounded Rapier rest/contact reads ~0.
+// (TRAMPOLINE_IMPULSE 13.5). Grounded Rapier rest/contact reads ~0.
 export const AIRBORNE_VY_THRESHOLD = 2.0;
 export const AIRBORNE_EXIT_FRACTION = 0.4;
 export const AIRBORNE_EXIT_HOLD_S = 0.25;
@@ -249,6 +251,13 @@ export const BALL_MAX_SPEED = 20;
 // src/config.ts is truth): same muzzle/body-height/gravity so the aim dots
 // show the real arc. Light-lob tuning (precision pass), MAX 20 kept.
 export const BALL_GRAVITY = 3.5;
+// First-tick hold mirror (bug 2, secondary): the authoritative server holds
+// a newborn ball one patch tick at the muzzle before integrating
+// (ArenaRoom.stepBalls: prevAge < PATCH_RATE_MS skips), and the client ball
+// pool eases toward snapshots — so the trajectory preview samples flight
+// time HOLD + i*DT (see protocol.previewTimeAt), not i*DT. 0.05s mirrors
+// server PATCH_RATE_MS 50.
+export const BALL_FIRST_TICK_HOLD_S = 0.05;
 // Torso/hand height above the thrower body-center y: ground body-center is
 // SELF_SPAWN_Y 1.1, so spawn y = bodyY + 0.3 == 1.4 on the ground (unchanged
 // from the old absolute height); on platforms it tracks the elevation.
@@ -444,6 +453,19 @@ export const SHOT_BODY_TURN_DONE_RAD = 0.01;
 export const AIM_ASSIST_MAX_DIST_M = 18;
 export const AIM_ASSIST_CONE_DEG = 12;
 export const AIM_ASSIST_BLEND = 0.5;
+// Assist target hysteresis (preview-jitter fix): the tracked target sticks
+// until a rival beats its cone angle by this margin — near-tied candidates
+// stop alternating every 100ms refresh. Pure + zero-alloc (see aimAssist).
+export const AIM_ASSIST_STICKY_MARGIN_DEG = 2;
+// Assist acquisition dead zone: a NEW target must sit inside this fraction
+// of the cone to steal the solve, while the tracked target holds until the
+// full cone edge. Kills cone-edge enter/exit tremor without touching the
+// tracked-target feel.
+export const AIM_ASSIST_ACQUIRE_FRACTION = 0.75;
+// Charging slow-down (mirror server CHARGE_MOVE_MULT): aiming/charging
+// fighters move at half speed on both ends, so the client prediction stops
+// wobble-fighting the server during charge+walk (preview origin jitter).
+export const CHARGE_MOVE_MULT = 0.5;
 // Crosshair colors (DOM aim overlay, pointer-events none). Values live in
 // palette.ts: idle white, charging white, full muted red, reload + super
 // chartreuse (highlight bucket).

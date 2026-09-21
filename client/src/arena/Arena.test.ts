@@ -137,11 +137,11 @@ describe("arena obstacle layout (QD5-A + 4d.3 central towers)", () => {
     }
   });
 
-  it("a trampoline bounce lands on the doubled top (damped reach proof, impulse 12)", () => {
-    // 4d.3 feedback (owner: impulse 10 cannot land the towers) — the old
-    // ideal-apex proof ignored Rapier linear damping (2.5/s), which bleeds
-    // most of the launch: the DAMPED model below matches the shipped
-    // integration (exponential velocity decay at PLAYER_LINEAR_DAMPING).
+  it("a trampoline bounce lands on the doubled top (damped reach proof, impulse 13.5)", () => {
+    // Owner directive 2026-09-20 (+12.5% for easier tower landings): impulse
+    // 12 -> 13.5, deliberately above the old QT3-A 8-12 band. The DAMPED
+    // model below matches the shipped integration (exponential velocity
+    // decay at PLAYER_LINEAR_DAMPING).
     // Damped vertical: y(t) = y0 + (A/d)(1-e^-dt) - (g/d)t, A = v0 + g/d.
     // Launch body-center y is worst-case 1.0 (resting capsule center; the
     // trigger band fires below TRAMPOLINE_TRIGGER_Y 1.7). Landing on the
@@ -149,9 +149,8 @@ describe("arena obstacle layout (QD5-A + 4d.3 central towers)", () => {
     // radius 0.5) = 3.0. Horizontal cruise holds at MOVE_SPEED (input
     // steering at 24/s outruns the 2.5/s damping, so cruise speed survives
     // the flight): pad (0,4.2) to tower footprint edge ~= 3.8m ~= 0.84s.
-    expect(TRAMPOLINE_IMPULSE).toBe(12);
+    expect(TRAMPOLINE_IMPULSE).toBe(13.5);
     expect(TRAMPOLINE_IMPULSE).toBeGreaterThanOrEqual(8);
-    expect(TRAMPOLINE_IMPULSE).toBeLessThanOrEqual(12);
     const g = Math.abs(PHYSICS_GRAVITY_Y);
     const d = PLAYER_LINEAR_DAMPING;
     const dampedY = (v0: number, t: number): number => {
@@ -166,13 +165,14 @@ describe("arena obstacle layout (QD5-A + 4d.3 central towers)", () => {
     const arriveT = 3.8 / MOVE_SPEED;
     expect(arriveT).toBeLessThan(0.9);
     const requiredCenterY = 2.0 + 1.0;
-    // Arrival over the footprint clears 3.0 with >= 0.2 margin (3.29m).
-    expect(dampedY(TRAMPOLINE_IMPULSE, arriveT)).toBeGreaterThan(requiredCenterY + 0.2);
-    // 11 falls short of the same bar (2.94m): 12 is the smallest integer in
-    // the 8-12 band that lands the towers with margin.
-    expect(dampedY(11, arriveT)).toBeLessThan(requiredCenterY + 0.2);
-    // Apex still clears with >= 0.5 margin (3.60m).
-    expect(dampedApexY(TRAMPOLINE_IMPULSE)).toBeGreaterThan(requiredCenterY + 0.5);
+    // Arrival over the footprint clears 3.0 with comfortable margin (3.81m
+    // vs the 3.5 bar, i.e. +0.8 over required).
+    expect(dampedY(TRAMPOLINE_IMPULSE, arriveT)).toBeGreaterThan(requiredCenterY + 0.5);
+    // 12 only reaches 3.28m — below the same bar: the buff was needed for
+    // comfortable (not marginal) landings.
+    expect(dampedY(12, arriveT)).toBeLessThan(requiredCenterY + 0.5);
+    // Apex clears with margin (4.06m vs the 3.8 bar).
+    expect(dampedApexY(TRAMPOLINE_IMPULSE)).toBeGreaterThan(requiredCenterY + 0.8);
   });
 
   it("dims trampoline pads -20% via the named multiplier (palette untouched)", () => {
