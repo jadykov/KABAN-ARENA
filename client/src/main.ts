@@ -21,11 +21,17 @@ import {
   MOVE_STICK_DIAMETER,
   RELOAD_MS,
   ROUND_SECONDS,
+  SELF_RECONCILE_BIG_DIV,
+  SELF_RECONCILE_BIG_DIV_HOLD_S,
   SELF_RECONCILE_SNAP_M,
+  SELF_RECONCILE_STALL_INPUT_MIN,
+  SELF_RECONCILE_STALL_MIN_DIV,
+  SELF_RECONCILE_STALL_MIN_PROGRESS_M,
   START_SCORE,
   TAP_FIRE_MIN_S,
   getServerUrl,
 } from "./config";
+import { SnapDebugOverlay } from "./engine/debugOverlay";
 import { Engine } from "./engine/Engine";
 import { InputController, isTypingTarget } from "./engine/InputController";
 import { SceneManager } from "./engine/SceneManager";
@@ -79,6 +85,50 @@ async function boot(): Promise<void> {
   const engine = new Engine(container);
   const sceneManager = new SceneManager(engine.scene, engine.camera);
   sceneManager.build();
+  // F3 snap-gate debug overlay (diagnostic only): reads the telemetry
+  // reconcileSelf populates plus live avatar/velocity reads — no gameplay
+  // logic runs here. Starts hidden, toggled by F3 below.
+  const snapDebug = new SnapDebugOverlay(() => {
+    const telemetry = sceneManager.getLastReconcileTelemetry();
+    const position = sceneManager.getAvatarPosition();
+    return {
+      serverY: telemetry.serverY,
+      clientY: position.y,
+      divergence: telemetry.divergence,
+      stallMinDiv: SELF_RECONCILE_STALL_MIN_DIV,
+      divOk: telemetry.divOk,
+      inputMag: telemetry.moveMag,
+      inputMin: SELF_RECONCILE_STALL_INPUT_MIN,
+      inputOk: telemetry.inputOk,
+      stallProgressM: telemetry.stallProgressM,
+      stallWindowM: SELF_RECONCILE_STALL_MIN_PROGRESS_M,
+      stallOk: telemetry.stallOk,
+      bigDivHoldS: telemetry.bigDivHoldS,
+      bigDivHoldNeedS: SELF_RECONCILE_BIG_DIV_HOLD_S,
+      bigDivAbs: Math.abs(telemetry.divergence),
+      bigDivNeed: SELF_RECONCILE_BIG_DIV,
+      bigHealCount: telemetry.bigHealCount,
+      lastBigHealAgoS:
+        telemetry.lastBigHealAtMs > 0 ? (Date.now() - telemetry.lastBigHealAtMs) / 1000 : -1,
+      airborne: telemetry.airborne,
+      cooldownLeftS: telemetry.cooldownLeftS,
+      levelTopIndex: telemetry.levelTopIndex,
+      levelTopY: telemetry.levelTopY,
+      evalTopIndex: telemetry.evalTopIndex,
+      xzOk: telemetry.xzOk,
+      blockCenterX: telemetry.blockCenterX,
+      blockCenterZ: telemetry.blockCenterZ,
+      blockDist: telemetry.blockDist,
+      xzDist: telemetry.xzDist,
+      xzBand: telemetry.xzBand,
+      result: telemetry.result,
+      snapKind: telemetry.snapKind,
+      upSnapCount: telemetry.upSnapCount,
+      lastUpSnapAgoS:
+        telemetry.lastUpSnapAtMs > 0 ? (Date.now() - telemetry.lastUpSnapAtMs) / 1000 : -1,
+      note: telemetry.note,
+    };
+  });
   // R1: boot starts spectating — no ghost body, hover orbit over the arena.
   sceneManager.setSpectating(true);
 
@@ -938,6 +988,13 @@ async function boot(): Promise<void> {
   hud.addKillfeed(physicsReady ? "Physics ready — have fun!" : "Physics offline — fallback movement");
 
   const handleKeyDown = (event: KeyboardEvent): void => {
+    // F3 snap-gate debug overlay: handled BEFORE the typing guard so the
+    // toggle works even with the nick/chat input focused (F3 types nothing).
+    if (event.code === "F3") {
+      event.preventDefault();
+      snapDebug.toggle();
+      return;
+    }
     // Typing a nick must never fire Space/H/R/power-up shortcuts.
     if (isTypingTarget(event)) {
       return;
@@ -1035,6 +1092,7 @@ async function boot(): Promise<void> {
     fireButton.removeEventListener("pointerdown", handleFirePointerDown);
     void net.disconnect();
     joystick.destroy();
+    snapDebug.dispose();
     aimOverlay.dispose();
     hud.dispose();
     input.dispose();
@@ -1283,15 +1341,27 @@ async function boot(): Promise<void> {
     // Self reconciliation FIRST (playing + alive only): correct toward the
     // authoritative server self before local physics integrates, so input
     // builds on top of the authoritative base instead of overwriting the
-    // correction same-frame. Lerp 0.5-6m, snap beyond, no jitter in band.
+    // correction same-frame. Lerp 0.7-6m, snap beyond, no jitter in band;
+    // stall-snap heals lip-wedge Y-divergence onto block tops (bug round 7:
+    // input active + XZ stalled) and the big-div heal pulls large sustained
+    // Y gaps down to the server pose. The live stick magnitude feeds the
+    // stall input gate (|move| is already playing/alive-gated above).
     if (latest !== null && playing) {
       const selfId = net.ownSessionId;
       const selfSnap = latest.players.find((player) => player.sessionId === selfId);
       if (selfSnap !== undefined && selfSnap.alive) {
-        sceneManager.reconcileSelf(selfSnap.x, selfSnap.z, deltaSeconds);
+        sceneManager.reconcileSelf(
+          selfSnap.x,
+          selfSnap.y,
+          selfSnap.z,
+          deltaSeconds,
+          Math.hypot(move.x, move.y),
+        );
       }
     }
     sceneManager.update(deltaSeconds, move, look);
+    // F3 overlay refresh (internally throttled to ~10Hz; no-op when hidden).
+    snapDebug.refresh();
     // Honest preview after the camera moved: dots track the real arc.
     if (playing && isCharging) {
       aimOverlay.setTrajectory(computeAimTrajectory());

@@ -183,8 +183,9 @@ describe("resolvePlayerMove elevation gate + ramp corridor", () => {
     // Same step at ground level: the open face behaves closed.
     const grounded = resolvePlayerMove(13.0, -6.5, 13.0, -7.5, 0.5, 0);
     expect(grounded.z).toBeCloseTo(-6.8, 9);
-    // Outside the corridor but inside the face span (sliver [12.1, 12.3)):
-    // the open face behaves closed even at climb height — no +radius band.
+    // Outside the corridor + radius sliver (1.6 > 1.0 + 0.5) but inside the
+    // face span: the open face behaves closed even at climb height — the lane
+    // ends one radius past the slab edge, and the capture reach with it.
     const skirt = resolvePlayerMove(12.2, -6.5, 12.2, -7.5, 0.5, 2.0);
     expect(skirt.z).toBeCloseTo(-6.8, 9);
     // Sheer faces keep blocking at ground even next to the ramp.
@@ -219,11 +220,13 @@ describe("resolvePlayerMove elevation gate + ramp corridor", () => {
 
   it("captures off-corridor climbers at ±x ramps too", () => {
     // Platform 4 (-x ramp, open min-x face 3.5, lane z in [12.7, 14.3],
-    // slope at the projected entry ~1.93m): an admitted climber crossing
-    // just north of the lane is re-laned south instead of clamped.
+    // slope at the projected entry ~1.93m): bug round 6 admits the
+    // capsule-overlap lane (corridorHalf + radius = 1.3) directly, so an
+    // admitted climber crossing just north of the visual lane passes WITHOUT
+    // the round-4 lateral yank (z stays 12.4) instead of clamping.
     const captured = resolvePlayerMove(3.3, 12.4, 3.7, 12.4, 0.5, 1.85);
     expect(captured.x).toBeCloseTo(3.7, 9);
-    expect(captured.z).toBeCloseTo(12.7, 6);
+    expect(captured.z).toBeCloseTo(12.4, 9);
     // Same geometry grounded: the sheer-side behavior is unchanged.
     const grounded = resolvePlayerMove(3.3, 12.4, 3.7, 12.4, 0.5, 0);
     expect(grounded.x).toBeCloseTo(3.5, 9);

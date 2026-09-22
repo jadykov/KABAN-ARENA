@@ -167,6 +167,12 @@ export function muzzleForShot(
 //   value. Bots (no client y) always derive. Pure + unit-tested.
 // - rampRunForTop / rampHeightAt: ramp-band geometry mirror of the client
 //   Arena.getRamps (run = topY / tan(RAMP_SLOPE_DEG), height lerps foot->edge).
+//   The band stays STRICT (halfW): grounded support must never read slope
+//   height beside the slab (bug A leak 1 — a ground-level lift would admit a
+//   walk-through the next tick). The capsule-overlap sliver (halfW + radius)
+//   is evaluated only through rampBandHeightAt (wedge-side seal + capture
+//   surface checks) and through the feet-gated ramp candidate in the room's
+//   groundSupport (bug round 6, BUG 1) — never as strict support.
 // - trampolineArcY: closed-form damped vertical arc for server trampoline
 //   jumps (same model the client Arena.test pins: y0 = BODY_CENTER_Y,
 //   v0 = TRAMPOLINE_IMPULSE, exp damping TRAMPOLINE_AIR_DAMPING, gravity
@@ -183,7 +189,12 @@ export function rampRunForTop(topY: number): number {
   return topY / tan;
 }
 
-export function rampHeightAt(platform: ServerPlatformDef, x: number, z: number): number {
+export function rampHeightAt(
+  platform: ServerPlatformDef,
+  x: number,
+  z: number,
+  extraBand: number = 0,
+): number {
   if (!Number.isFinite(x) || !Number.isFinite(z)) {
     return 0;
   }
@@ -192,6 +203,7 @@ export function rampHeightAt(platform: ServerPlatformDef, x: number, z: number):
     return 0;
   }
   const halfW = platform.rampWidth / 2;
+  const band = halfW + (extraBand > 0 ? extraBand : 0);
   let lateral = 0;
   let outward = -1;
   switch (platform.rampSide) {
@@ -214,7 +226,7 @@ export function rampHeightAt(platform: ServerPlatformDef, x: number, z: number):
     default:
       return 0;
   }
-  if (Math.abs(lateral) > halfW || outward < 0 || outward > run) {
+  if (Math.abs(lateral) > band || outward < 0 || outward > run) {
     return 0;
   }
   return platform.topY * (1 - outward / run);
@@ -222,7 +234,12 @@ export function rampHeightAt(platform: ServerPlatformDef, x: number, z: number):
 
 // Ramp-band-only height (bug A leak 2): max rampHeightAt over platforms,
 // WITHOUT footprint tops — the wedge-side entry check needs the surface a
-// step would land on, not the platform top behind it.
+// step would land on, not the platform top behind it. Evaluated over the
+// STRICT band: the wedge seals stepping into the slab below its surface, and
+// a center past the slab edge keeps sliding along the slab side to the face
+// corner (the client Rapier slides the same way) instead of stopping in thin
+// air — the face resolver owns the sliver (grounded clamps, admitted climbers
+// pass through the overlap lane).
 export function rampBandHeightAt(x: number, z: number): number {
   if (!Number.isFinite(x) || !Number.isFinite(z)) {
     return 0;
@@ -230,6 +247,26 @@ export function rampBandHeightAt(x: number, z: number): number {
   let top = 0;
   for (const platform of SERVER_PLATFORMS) {
     const rampH = rampHeightAt(platform, x, z);
+    if (rampH > top) {
+      top = rampH;
+    }
+  }
+  return top;
+}
+
+// Capsule-overlap band height (bug round 6, BUG 1): same as rampBandHeightAt
+// but spanning extraBand past each slab edge. Used ONLY through feet-gated
+// support (the room's groundSupport ramp candidate): a center past the edge
+// by up to one body radius still rests on the slab. Never used for strict
+// support or the wedge seal — grounded fighters must not read slope height
+// beside a slab (bug A leak 1).
+export function rampBandHeightAtExpanded(x: number, z: number, extraBand: number): number {
+  if (!Number.isFinite(x) || !Number.isFinite(z) || !(extraBand > 0)) {
+    return rampBandHeightAt(x, z);
+  }
+  let top = 0;
+  for (const platform of SERVER_PLATFORMS) {
+    const rampH = rampHeightAt(platform, x, z, extraBand);
     if (rampH > top) {
       top = rampH;
     }

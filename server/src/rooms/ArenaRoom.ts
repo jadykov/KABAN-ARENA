@@ -57,6 +57,7 @@ import {
   muzzleForShot,
   powerToSpeed,
   rampBandHeightAt,
+  rampBandHeightAtExpanded,
   recoilDistanceForPower,
   resolveThrowerY,
   respawnPlayer,
@@ -110,9 +111,12 @@ function clampAngle(value: unknown): number {
 // Server-side movement solid: XZ AABB with a top height, per-face openness,
 // and a ramp corridor. Obstacles are closed on all four faces. Platforms
 // leave their ramp-side face OPEN so fighters can walk up onto the top — but
-// ONLY inside the ramp corridor (lateral |offset| <= rampWidth/2 + radius
-// around the ramp centerline), matching the client's solid platform box:
-// skirting the ramp mouth at ground level stays blocked. Corridor axis "z"
+// ONLY inside the capsule-overlap lane (lateral |offset| <= corridorHalf +
+// body radius around the ramp centerline, bug round 6): the pass checks add
+// the mover radius to the visual corridor half, matching the widened server
+// slope band (hits.rampHeightAt) and the client Rapier edge contact.
+// Skirting the ramp mouth at ground level stays blocked via the admitted
+// gate (feet above RAMP_ADMIT_MIN_FEET). Corridor axis "z"
 // means the ±x faces gate on the Z lateral (and vice versa); obstacles carry
 // axis null (corridor never consulted — all faces closed).
 interface MoveSolid {
@@ -208,25 +212,31 @@ function feetYOf(bodyY: number): number {
 //   blocked: every solid top (0.8+) exceeds feet 0 + 0.05 by far. Defaults to
 //   0 (ground crawler) so pre-elevation call sites behave exactly as before.
 // - The ramp-side open face admits ONLY a mover that is actually climbing
-//   (feet above RAMP_ADMIT_MIN_FEET) and ONLY inside the support band
-//   (|lateral| <= rampWidth/2, no radius widening — the widening created a
-//   no-ramp band that walked through the wall at ground level). A grounded
-//   fighter at the ramp mouth is clamped like any sheer face.
+//   (feet above RAMP_ADMIT_MIN_FEET) and ONLY inside the capsule-overlap lane
+//   (|lateral| <= corridorHalf + radius, bug round 6, BUG 1): the authoritative
+//   XZ is the capsule center, so a center up to one radius past the slab edge
+//   still overlaps the ramp — the same contact the client Rapier resolves. The
+//   admitted gate keeps ground entry blocked (a grounded fighter at the ramp
+//   mouth is clamped like any sheer face: face-high surfaces never match feet
+//   ~0, so the old no-ramp-band ground leak cannot reopen).
 // - The inside-footprint escape is height-gated too: at/above the top the
 //   fighter walks out freely (tower tops, knockback embeds at height); a
 //   climber inside via the open face in-lane (feet up, lateral on the ramp)
 //   passes freely as well; below the top anywhere else the mover is ejected
 //   toward the nearest face on each axis — nobody gets trapped, and nobody
 //   walks THROUGH to the far side.
-// - Climb-lane capture (bug round 4, defect 2): an admitted mover crossing a
-//   ramped solid's OPEN face off-corridor is re-laned instead of clamped when
-//   the target lateral sits within corridorHalf + RAMP_LANE_CAPTURE_TOL and
-//   the lane-projected target is at slope height near the feet (ramp-band
-//   surface in (0, feet + RAMP_ENTRY_TOL]). The projection is lateral-only
-//   and bounded (at most the tolerance past the corridor edge, toward the
-//   lane, strictly inside the face span — it can never cross a sheer face),
-//   and the surface match keeps grounded movers out (face-high surfaces never
-//   match feet ~0) with no y jump on entry (support follows the slope).
+// - Climb-lane capture (bug round 4, defect 2): kept as a fallback for an
+//   admitted mover crossing a ramped solid's OPEN face off-corridor when the
+//   target lateral sits within corridorHalf + RAMP_LANE_CAPTURE_TOL and the
+//   lane-projected target is at slope height near the feet (ramp-band surface
+//   in (0, feet + RAMP_ENTRY_TOL]). Since round 6 admits the overlap lane
+//   (corridorHalf + radius) directly, the capture window now lies inside the
+//   direct-pass region and only fires if tolerances ever narrow again. The
+//   projection stays lateral-only and bounded (at most the tolerance past the
+//   corridor edge, toward the lane, strictly inside the face span — it can
+//   never cross a sheer face), and the surface match keeps grounded movers
+//   out (face-high surfaces never match feet ~0) with no y jump on entry
+//   (support follows the slope).
 //   Both a from-lane drift-out and (for axis-x ramps) a mid-crossing target drift-out
 //   are captured; for axis-z ramps a mid-crossing target drift-out falls through
 //   to the next-tick eject-and-drop path (no trap).
@@ -250,12 +260,14 @@ export function resolvePlayerMove(
   const feet = Number.isFinite(feetY) ? feetY : 0;
   const admitted = feet > RAMP_ADMIT_MIN_FEET;
   // A climber crossing the open face in-lane: inside the footprint below the
-  // top but on the ramp (feet up, lateral in the support band) — free pass,
-  // no eject. Only meaningful for ramped platforms (corridorAxis non-null).
+  // top but on the ramp (feet up, lateral in the capsule-overlap lane) — free
+  // pass, no eject. Only meaningful for ramped platforms (corridorAxis
+  // non-null). The lane is corridorHalf + radius (bug round 6, BUG 1): a
+  // center past the slab edge by up to one radius still overlaps the ramp.
   const inClimbLane = (solid: MoveSolid, px: number, pz: number): boolean =>
     admitted &&
-    ((solid.corridorAxis === "z" && Math.abs(pz - solid.corridorCenter) <= solid.corridorHalf) ||
-      (solid.corridorAxis === "x" && Math.abs(px - solid.corridorCenter) <= solid.corridorHalf));
+    ((solid.corridorAxis === "z" && Math.abs(pz - solid.corridorCenter) <= solid.corridorHalf + radius) ||
+      (solid.corridorAxis === "x" && Math.abs(px - solid.corridorCenter) <= solid.corridorHalf + radius));
   // Climb-lane capture target (defect 2): when an admitted mover's target
   // lateral is off-corridor but within reach (corridorHalf +
   // RAMP_LANE_CAPTURE_TOL), returns the lane-clamped lateral; otherwise null
@@ -313,12 +325,12 @@ export function resolvePlayerMove(
         admitted &&
         solid.openMinX &&
         solid.corridorAxis === "z" &&
-        Math.abs(fromZ - solid.corridorCenter) <= solid.corridorHalf;
+        Math.abs(fromZ - solid.corridorCenter) <= solid.corridorHalf + radius;
       let maxPass =
         admitted &&
         solid.openMaxX &&
         solid.corridorAxis === "z" &&
-        Math.abs(fromZ - solid.corridorCenter) <= solid.corridorHalf;
+        Math.abs(fromZ - solid.corridorCenter) <= solid.corridorHalf + radius;
       // Off-corridor capture at the open ±x faces (ramps only): re-lane the
       // lateral (z) goal instead of clamping when the target is within reach
       // and at slope height. In-lane targets need no capture (z is frozen in
@@ -367,12 +379,12 @@ export function resolvePlayerMove(
         admitted &&
         solid.openMinZ &&
         solid.corridorAxis === "x" &&
-        Math.abs(fromX - solid.corridorCenter) <= solid.corridorHalf;
+        Math.abs(fromX - solid.corridorCenter) <= solid.corridorHalf + radius;
       let maxPass =
         admitted &&
         solid.openMaxZ &&
         solid.corridorAxis === "x" &&
-        Math.abs(fromX - solid.corridorCenter) <= solid.corridorHalf;
+        Math.abs(fromX - solid.corridorCenter) <= solid.corridorHalf + radius;
       // Off-corridor capture at the open ±z faces (ramps only): re-lane the
       // target x instead of clamping when within reach and at slope height.
       // Also covers drifting out mid-crossing (from in-lane, target out):
@@ -1113,11 +1125,27 @@ export class ArenaRoom extends Room<ArenaState> {
   // fully outside the footprint, killing the pinned-at-face state. Otherwise
   // the strict support wins, so the ground beside a solid never snaps up
   // (that path fails the feet match by metres, not microns).
+  // Ramp-slope continuity (bug round 6, BUG 1): an admitted climber whose
+  // center drifted past the strict slab edge (capsule-overlap sliver, up to
+  // one radius out) still stands on the slope — the widened band surface near
+  // the feet is the support, so the feet track the slope instead of dropping
+  // to the ground (the drop armed the eject loop on the next tick: the ramp
+  // edge invisible wall). Gated on admitted (feet above RAMP_ADMIT_MIN_FEET)
+  // so grounded fighters beside a ramp never snap up (bug A leak 1), and on
+  // a genuine slope step (|surface - feet| <= RAMP_ENTRY_TOL, the same gate
+  // family as the wedge block and the lane capture) so entries never jump in
+  // y. Scalar math only, zero per-tick allocation.
   private groundSupport(x: number, z: number, feet: number): number {
     const strict = bodyCenterYAt(x, z);
     const wide = bodyCenterYAtExpanded(x, z, PLAYER_BODY_RADIUS);
     if (wide > strict + COLLISION_Y_EPS && feet >= wide - BODY_CENTER_Y - SUPPORT_STICK_TOL) {
       return wide;
+    }
+    if (feet > RAMP_ADMIT_MIN_FEET) {
+      const rampSurface = rampBandHeightAtExpanded(x, z, PLAYER_BODY_RADIUS);
+      if (rampSurface > 0 && Math.abs(rampSurface - feet) <= RAMP_ENTRY_TOL) {
+        return rampSurface + BODY_CENTER_Y;
+      }
     }
     return strict;
   }

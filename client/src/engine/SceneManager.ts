@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { AdsManager, getFenceSlotTransforms } from "../ads/AdsLoader";
 import {
   ARENA_HALF_SIZE,
+  AVATAR_BODY_RADIUS,
   AVATAR_CHARGE_OPACITY,
   CAMERA_CHARGE_DISTANCE,
   CAMERA_FOLLOW_DISTANCE,
@@ -41,6 +42,16 @@ import {
   SELF_RECONCILE_MIN_M,
   SELF_RECONCILE_RATE,
   SELF_RECONCILE_SNAP_M,
+  SELF_RECONCILE_TOP_TOL,
+  SELF_RECONCILE_UP_SNAP_COOLDOWN_S,
+  SELF_RECONCILE_STALL_MIN_DIV,
+  SELF_RECONCILE_STALL_INPUT_MIN,
+  SELF_RECONCILE_STALL_WINDOW_S,
+  SELF_RECONCILE_STALL_MIN_PROGRESS_M,
+  SELF_RECONCILE_STALL_SLOTS,
+  SELF_RECONCILE_BIG_DIV,
+  SELF_RECONCILE_BIG_DIV_HOLD_S,
+  SELF_RECONCILE_REST_OFFSET,
   SELF_SPAWN_Y,
   SHADOW_MAP_SIZE,
   SPECTATOR_BOB_AMPLITUDE,
@@ -55,7 +66,7 @@ import {
   WALL_GLASS_OPACITY,
   WALL_HEIGHT,
 } from "../config";
-import { ArenaBuilder, getTrampolineAt, isOnSlippery } from "../arena/Arena";
+import { ArenaBuilder, getObstacleLayout, getPlatforms, getTrampolineAt, isOnSlippery } from "../arena/Arena";
 import { KIND_COLORS, PowerUpPickups, PowerUpState, type PowerUpKind } from "../arena/PowerUps";
 import { BallsPool, SuperCore } from "../fx/Balls";
 import { CameraShake, HitFlash } from "../fx/CameraShake";
@@ -111,6 +122,100 @@ export type ArenaEvent =
   | { type: "pickup"; kind: PowerUpKind }
   | { type: "speed-expired" }
   | { type: "trampoline" };
+
+// Authoritative on-top level for the UP-snap: XZ footprint of one elevated
+// block plus the body-center Y the server derives on its top (topY +
+// SELF_SPAWN_Y). Cached once (no per-frame allocation in reconcileSelf).
+interface SupportTop {
+  x: number;
+  z: number;
+  hx: number;
+  hz: number;
+  levelY: number;
+}
+
+// Elevated-block inventory for the UP-snap (bug round 6, BUG 2): every
+// walkable top the server can derive — ramped platforms (topY) and obstacle
+// blocks (box center hy, full height 2*hy: central towers 2.0, outer 0.8).
+// Ramp slabs are NOT tops (a slope Y is never an exact level).
+function buildSupportTopList(): SupportTop[] {
+  const tops: SupportTop[] = [];
+  for (const platform of getPlatforms()) {
+    tops.push({
+      x: platform.x,
+      z: platform.z,
+      hx: platform.hx,
+      hz: platform.hz,
+      levelY: platform.topY + SELF_SPAWN_Y,
+    });
+  }
+  for (const block of getObstacleLayout()) {
+    tops.push({
+      x: block.x,
+      z: block.z,
+      hx: block.hx,
+      hz: block.hz,
+      levelY: block.hy * 2 + SELF_SPAWN_Y,
+    });
+  }
+  return tops;
+}
+
+// Live reconcile telemetry (F3 snap-gate debug overlay, diagnostic only):
+// reconcileSelf populates this REUSED object on every call (all paths incl.
+// "skipped"), so the overlay can display each UP-snap gate with pass/fail
+// marks without re-deriving anything. Gameplay logic never reads it.
+export type ReconcileResult = "unrun" | "ok" | "lerp" | "snap" | "skipped";
+export interface ReconcileTelemetry {
+  result: ReconcileResult;
+  // Which snap fired: "up" (stall-snap onto a block top), "big" (downward-
+  // desync heal to the full server pose) or "far" (XZ far snap).
+  snapKind: "none" | "up" | "big" | "far";
+  serverX: number;
+  serverY: number;
+  serverZ: number;
+  // Avatar Y at decision time + divergence (serverY - localY).
+  localY: number;
+  divergence: number;
+  // Stall-snap gates: divOk (divergence >= STALL_MIN_DIV), input magnitude
+  // fed by the caller + inputOk (>= STALL_INPUT_MIN), stall-window progress
+  // (XZ travel over the last STALL_WINDOW_S) + stallOk (< MIN_PROGRESS_M).
+  divOk: boolean;
+  moveMag: number;
+  inputOk: boolean;
+  stallProgressM: number;
+  stallOk: boolean;
+  // Big-div heal state: sustained-hold timer + its own event counter.
+  bigDivHoldS: number;
+  bigHealCount: number;
+  lastBigHealAtMs: number;
+  airborne: boolean;
+  cooldownLeftS: number;
+  // First support top whose level matches serverY within TOP_TOL (index into
+  // the cached list, -1 when none) — observation pre-scan, mirrors the loop.
+  levelTopIndex: number;
+  levelTopY: number;
+  // Last top the snap loop actually evaluated XZ on (-1 when the loop
+  // never reached a level-matching top).
+  evalTopIndex: number;
+  xzOk: boolean;
+  blockCenterX: number;
+  blockCenterZ: number;
+  // Distance avatar -> evaluated block center (-1 when no top evaluated).
+  blockDist: number;
+  // XZ distance avatar -> server snapshot + which XZ band owns it.
+  xzDist: number;
+  xzBand: "deadband" | "lerp" | "snap" | "none";
+  // Cumulative stall-snap event counter + wall-clock of the last one
+  // (0 = never). The counter keeps its long-standing name so the F3 overlay
+  // "SNAPS" line and history stay comparable across rounds.
+  upSnapCount: number;
+  lastUpSnapAtMs: number;
+  // Short machine-readable reason for the outcome (e.g. "no-input",
+  // "no-progress", "off-block", "airborne", "cooldown", "recoil-grace",
+  // "far-snap", "big-heal").
+  note: string;
+}
 
 // Stage 3 scene (QD1-A capsule + QD2-A neon warehouse + QD5-A blocks):
 // exactly 1 directional light (shadow <= 1024) + 1 ambient light + ONE
@@ -212,6 +317,68 @@ export class SceneManager {
   // the same kick authoritatively), so reconcileSelf skips corrections while
   // this timer runs instead of fighting the kick and double-tugging.
   private recoilGraceLeftS = 0;
+  // Snap cooldown (bug round 6c reviewer B2 backstop, kept in round 7):
+  // minimum time between snaps on any path (stall, big-div, far), so a
+  // snap-then-dip-then-resnap cycle can never loop. Ticks down in
+  // reconcileSelf; set on every snap path. 0.3 s exceeds the 0.25 s stall
+  // window, so a post-teleport empty window can never fire early.
+  private upSnapCooldownLeftS = 0;
+  // Stall-window ring buffer (bug round 7): preallocated per-slot XZ-travel
+  // accumulators covering the last STALL_WINDOW_S (SLOTS slots x
+  // WINDOW_S/SLOTS each ≈ 0.25 s). The window sum is the avatar's XZ
+  // displacement over that span — under MIN_PROGRESS_M with input held it
+  // proves a run-in-place stall. Scalar only, zero per-frame allocs.
+  private readonly stallSlots: number[] = new Array<number>(SELF_RECONCILE_STALL_SLOTS).fill(0);
+  private stallSlotIndex = 0;
+  private stallSlotTimeS = 0;
+  private stallLastX = Number.NaN;
+  private stallLastZ = Number.NaN;
+  // Big-div sustained-hold timer (bug round 7): accumulates while
+  // |serverY - localY| >= BIG_DIV and NOT airborne; reset on agreement,
+  // airborne, or any teleport. Fires the downward-desync heal at HOLD_S.
+  private bigDivHoldS = 0;
+  // Cached elevated-block tops for the stall-snap (built once — reconcileSelf
+  // iterates this, never getPlatforms()/getObstacleLayout(), so the per-frame
+  // path allocates nothing).
+  private readonly supportTops: SupportTop[] = buildSupportTopList();
+  // Reused reconcile telemetry object (F3 overlay reads it; gameplay ignores
+  // it). Mutated in place every reconcileSelf call — never replaced.
+  private readonly reconcileTelemetry: ReconcileTelemetry = {
+    result: "unrun",
+    snapKind: "none",
+    serverX: Number.NaN,
+    serverY: Number.NaN,
+    serverZ: Number.NaN,
+    localY: Number.NaN,
+    divergence: Number.NaN,
+    divOk: false,
+    moveMag: 0,
+    inputOk: false,
+    stallProgressM: 0,
+    stallOk: false,
+    bigDivHoldS: 0,
+    bigHealCount: 0,
+    lastBigHealAtMs: 0,
+    airborne: false,
+    cooldownLeftS: 0,
+    levelTopIndex: -1,
+    levelTopY: Number.NaN,
+    evalTopIndex: -1,
+    xzOk: false,
+    blockCenterX: Number.NaN,
+    blockCenterZ: Number.NaN,
+    blockDist: -1,
+    xzDist: -1,
+    xzBand: "none",
+    upSnapCount: 0,
+    lastUpSnapAtMs: 0,
+    note: "never-run",
+  };
+
+  // Readonly view of the last reconcileSelf telemetry (F3 debug overlay).
+  public getLastReconcileTelemetry(): Readonly<ReconcileTelemetry> {
+    return this.reconcileTelemetry;
+  }
   // Full-charge spark timer: while charge01 >= 0.8 a small ember burst pops
   // at the muzzle every SPARK_INTERVAL_S (pooled, no alloc, no lights).
   private sparkTimer = 0;
@@ -914,56 +1081,310 @@ export class SceneManager {
   // Spawn/teleport the local avatar + Rapier body to the authoritative
   // server position (welcome spawn, respawn, large-divergence snap). Zeroes
   // velocity via physics.reset, keeps the body facing the server default.
-  public teleportSelf(x: number, z: number): void {
+  // The optional y pins the body height (UP-snap onto a block top); it
+  // defaults to ground spawn height for spawns/respawns.
+  public teleportSelf(x: number, z: number, y: number = SELF_SPAWN_Y): void {
     if (!this.built || this.avatar === null) {
       return;
     }
     if (!Number.isFinite(x) || !Number.isFinite(z)) {
       return;
     }
-    this.avatar.position.set(x, SELF_SPAWN_Y, z);
+    const snapY = Number.isFinite(y) ? y : SELF_SPAWN_Y;
+    this.avatar.position.set(x, snapY, z);
     this.avatar.rotation.y = 0;
     // Authoritative placement (spawn/respawn/snap) invalidates any pending
     // post-shot turn target — a fresh facing starts here.
     this.shotTurnActive = false;
     this.resetHop();
-    this.hopPrev.set(x, SELF_SPAWN_Y, z);
+    this.hopPrev.set(x, snapY, z);
     // A teleport zeroes body velocity (physics.reset) — never airborne.
     this.airborneGate.reset();
+    // Authoritative placement invalidates the stall window (the jump is not
+    // travel) and clears the big-div hold (fresh agreement by construction):
+    // reseed the window on the landing spot with empty slots.
+    this.resetStallWindow(x, z);
+    this.bigDivHoldS = 0;
     // A teleport is authoritative placement (spawn/respawn/snap) — any
     // pending recoil grace is stale, clear it so corrections resume.
     this.recoilGraceLeftS = 0;
     if (this.physics !== null) {
-      this.physics.reset({ x, y: SELF_SPAWN_Y, z });
+      this.physics.reset({ x, y: snapY, z });
     }
+  }
+
+  // Stall-window reset (authoritative placement): the teleport jump is not
+  // travel, so the ring is emptied and reseeded on the landing spot. Called
+  // from teleportSelf, which every snap/spawn/respawn path funnels through.
+  private resetStallWindow(x: number, z: number): void {
+    for (let i = 0; i < this.stallSlots.length; i += 1) {
+      this.stallSlots[i] = 0;
+    }
+    this.stallSlotIndex = 0;
+    this.stallSlotTimeS = 0;
+    this.stallLastX = x;
+    this.stallLastZ = z;
+  }
+
+  // Stall-window tracking (bug round 7): feeds this frame's avatar XZ travel
+  // into the current ring slot and returns the window sum — the avatar's XZ
+  // displacement over the last STALL_WINDOW_S. Math: SLOTS slots x
+  // WINDOW_S/SLOTS s each; per call the slot timer advances by dt and the
+  // slot rotates (zeroed) once its share elapses, so the sum always covers
+  // ~one window of recent motion. First call only seeds the reference (no
+  // travel yet). Scalar writes into the preallocated ring — zero allocs.
+  private trackStallWindow(x: number, z: number, deltaSeconds: number): number {
+    if (!Number.isFinite(this.stallLastX) || !Number.isFinite(this.stallLastZ)) {
+      this.stallLastX = x;
+      this.stallLastZ = z;
+      return 0;
+    }
+    const frameTravel = Math.hypot(x - this.stallLastX, z - this.stallLastZ);
+    this.stallLastX = x;
+    this.stallLastZ = z;
+    const slotCount = this.stallSlots.length;
+    if (slotCount <= 0) {
+      return frameTravel;
+    }
+    const current = this.stallSlots[this.stallSlotIndex];
+    this.stallSlots[this.stallSlotIndex] = (current ?? 0) + frameTravel;
+    this.stallSlotTimeS += deltaSeconds;
+    const slotShareS = SELF_RECONCILE_STALL_WINDOW_S / slotCount;
+    while (this.stallSlotTimeS >= slotShareS && slotShareS > 0) {
+      this.stallSlotTimeS -= slotShareS;
+      this.stallSlotIndex = (this.stallSlotIndex + 1) % slotCount;
+      this.stallSlots[this.stallSlotIndex] = 0;
+    }
+    let progressM = 0;
+    for (let i = 0; i < slotCount; i += 1) {
+      progressM += this.stallSlots[i] ?? 0;
+    }
+    return progressM;
   }
 
   // Gentle self reconciliation toward the server snapshot (XZ only, no
   // alloc): under SELF_RECONCILE_MIN_M stays local (no jitter during normal
   // play), within (MIN, SNAP] lerps avatar + body at SELF_RECONCILE_RATE,
-  // beyond SNAP teleports. Returns what happened (for tests/telemetry).
+  // beyond SNAP teleports (now to the authoritative Y, not always ground).
+  // Returns what happened (for tests/telemetry).
   // Recoil grace: for RECOIL_RECONCILE_GRACE_S after a local kick the
   // correction is skipped (prediction-only kick, server re-applies it) so
   // reconcile never fights the kick and double-tugs the avatar.
-  public reconcileSelf(serverX: number, serverZ: number, deltaSeconds: number): "ok" | "lerp" | "snap" | "skipped" {
+  // Stall-snap (bug round 7 — replaces the round 6/6b/6c Y-threshold +
+  // speed-gate UP-snap, which live F3 telemetry proved dead: healthy Rapier
+  // rest sits EXACTLY 0.100 below the server nominal and the resting
+  // lip-wedge sits there too, so Y-divergence alone can never tell them
+  // apart; the 0.11 hang gate was structurally blind and the 1.5 speed gate
+  // blocked the only live heal window). The local Rapier body has no
+  // auto-step, so a few cm of Y-divergence wedge it against the side lip
+  // forever (XZ-only reconcile can never heal it: the edge walk-back
+  // invisible wall). The discriminator is STALL EVIDENCE — ALL must hold:
+  // not airborne, cooldown == 0, serverY within TOP_TOL of a support top,
+  // client XZ in that top's expanded footprint, serverY - localY >=
+  // STALL_MIN_DIV, input |move| >= STALL_INPUT_MIN (fed by the caller via
+  // moveMag — reconcile runs before physics, so the live stick magnitude
+  // comes in as a parameter), and XZ travel over the last STALL_WINDOW_S <
+  // STALL_MIN_PROGRESS_M (zero-alloc ring buffer, see trackStallWindow).
+  // Action: teleport to (serverX, serverZ, serverY - REST_OFFSET) — true
+  // Rapier rest, no post-snap drop — arm the cooldown, count the snap.
+  // Healthy rest never fires (no input), normal walking never fires (XZ
+  // progresses), descents/step-offs never fire (XZ progresses — no speed
+  // gate needed), ground walls never fire (serverY matches no top).
+  // Big-div heal (bug round 7): a sustained |serverY - localY| >= BIG_DIV
+  // while NOT airborne (hold timer BIG_DIV_HOLD_S, reset on agreement /
+  // airborne / teleport) teleports to the FULL server pose — the down-pull
+  // the frozen -2.1 desync state never had. Scalar loop over the cached
+  // support list; no velocity reads, no per-frame allocs anywhere.
+  public reconcileSelf(
+    serverX: number,
+    serverY: number,
+    serverZ: number,
+    deltaSeconds: number,
+    moveMag = 0,
+  ): "ok" | "lerp" | "snap" | "skipped" {
+    // F3 telemetry: per-call reset of the reused object (scalar writes only,
+    // no allocation). Gameplay below is untouched — every write here is
+    // observation of values the gates already compute.
+    const t = this.reconcileTelemetry;
+    t.result = "skipped";
+    t.snapKind = "none";
+    t.serverX = serverX;
+    t.serverY = serverY;
+    t.serverZ = serverZ;
+    t.localY = Number.NaN;
+    t.divergence = Number.NaN;
+    t.divOk = false;
+    t.moveMag = moveMag;
+    t.inputOk = moveMag >= SELF_RECONCILE_STALL_INPUT_MIN;
+    t.stallProgressM = 0;
+    t.stallOk = false;
+    t.bigDivHoldS = this.bigDivHoldS;
+    t.airborne = this.airborneGate.isAirborne;
+    t.cooldownLeftS = this.upSnapCooldownLeftS;
+    t.levelTopIndex = -1;
+    t.levelTopY = Number.NaN;
+    t.evalTopIndex = -1;
+    t.xzOk = false;
+    t.blockCenterX = Number.NaN;
+    t.blockCenterZ = Number.NaN;
+    t.blockDist = -1;
+    t.xzDist = -1;
+    t.xzBand = "none";
+    t.note = "";
     if (!this.built || this.avatar === null || this.spectating) {
+      t.note = !this.built ? "not-built" : this.avatar === null ? "no-avatar" : "spectating";
       return "skipped";
     }
-    if (!Number.isFinite(serverX) || !Number.isFinite(serverZ) || !(deltaSeconds > 0)) {
+    if (
+      !Number.isFinite(serverX) ||
+      !Number.isFinite(serverZ) ||
+      !(deltaSeconds > 0)
+    ) {
+      t.note = "bad-input";
       return "skipped";
     }
     if (this.recoilGraceLeftS > 0) {
       this.recoilGraceLeftS = Math.max(0, this.recoilGraceLeftS - deltaSeconds);
+      t.note = "recoil-grace";
       return "skipped";
+    }
+    if (this.upSnapCooldownLeftS > 0) {
+      this.upSnapCooldownLeftS = Math.max(0, this.upSnapCooldownLeftS - deltaSeconds);
+    }
+    t.cooldownLeftS = this.upSnapCooldownLeftS;
+    t.localY = this.avatar.position.y;
+    // Stall-window tracking runs on every live frame (before any gate): the
+    // avatar's XZ travel since the last call feeds the current ring slot, so
+    // the window sum always reflects the last STALL_WINDOW_S of motion.
+    t.stallProgressM = this.trackStallWindow(
+      this.avatar.position.x,
+      this.avatar.position.z,
+      deltaSeconds,
+    );
+    t.stallOk = t.stallProgressM < SELF_RECONCILE_STALL_MIN_PROGRESS_M;
+    const serverYFinite = Number.isFinite(serverY);
+    // Observation pre-scan (diagnostic only): first support top whose level
+    // matches serverY within TOP_TOL — mirrors the loop's level check so the
+    // overlay can show the top match even when a later gate fails.
+    if (serverYFinite) {
+      t.divergence = serverY - t.localY;
+      t.divOk = t.divergence >= SELF_RECONCILE_STALL_MIN_DIV;
+      for (let i = 0; i < this.supportTops.length; i += 1) {
+        const scanned = this.supportTops[i];
+        if (scanned !== undefined && Math.abs(serverY - scanned.levelY) <= SELF_RECONCILE_TOP_TOL) {
+          t.levelTopIndex = i;
+          t.levelTopY = scanned.levelY;
+          break;
+        }
+      }
+      // Big-div hold timer: accumulate only while NOT airborne and the gap
+      // is at least BIG_DIV either way; any agreement, airborne frame, or
+      // teleport (which zeroes it directly) restarts the hold from zero.
+      if (!this.airborneGate.isAirborne && Math.abs(t.divergence) >= SELF_RECONCILE_BIG_DIV) {
+        this.bigDivHoldS += deltaSeconds;
+      } else {
+        this.bigDivHoldS = 0;
+      }
+      t.bigDivHoldS = this.bigDivHoldS;
+    }
+    if (
+      serverYFinite &&
+      !this.airborneGate.isAirborne &&
+      !(this.upSnapCooldownLeftS > 0)
+    ) {
+      // t.divOk / t.inputOk / t.stallOk were computed above (divergence,
+      // caller-fed input, live stall window); the loop only adds the
+      // top-level + footprint match.
+      if (t.divOk && t.inputOk && t.stallOk) {
+        for (let i = 0; i < this.supportTops.length; i += 1) {
+          const top = this.supportTops[i];
+          if (top === undefined || Math.abs(serverY - top.levelY) > SELF_RECONCILE_TOP_TOL) {
+            continue;
+          }
+          t.evalTopIndex = i;
+          t.blockCenterX = top.x;
+          t.blockCenterZ = top.z;
+          t.blockDist = Math.hypot(this.avatar.position.x - top.x, this.avatar.position.z - top.z);
+          const inX = Math.abs(this.avatar.position.x - top.x) <= top.hx + AVATAR_BODY_RADIUS;
+          const inZ = Math.abs(this.avatar.position.z - top.z) <= top.hz + AVATAR_BODY_RADIUS;
+          t.xzOk = inX && inZ;
+          if (inX && inZ) {
+            const firedProgressM = t.stallProgressM;
+            this.teleportSelf(serverX, serverZ, serverY - SELF_RECONCILE_REST_OFFSET);
+            this.upSnapCooldownLeftS = SELF_RECONCILE_UP_SNAP_COOLDOWN_S;
+            t.cooldownLeftS = this.upSnapCooldownLeftS;
+            t.stallProgressM = 0;
+            t.bigDivHoldS = this.bigDivHoldS;
+            t.result = "snap";
+            t.snapKind = "up";
+            t.upSnapCount += 1;
+            t.lastUpSnapAtMs = Date.now();
+            t.note = "up-snap";
+            console.log(
+              `[up-snap] #${t.upSnapCount} top#${i} (${top.x},${top.z}) ` +
+                `levelY=${top.levelY.toFixed(2)} div=${t.divergence.toFixed(3)} ` +
+                `prog=${firedProgressM.toFixed(3)} move=${moveMag.toFixed(2)}`,
+            );
+            return "snap";
+          }
+        }
+        if (t.evalTopIndex < 0) {
+          t.note = "no-level-match";
+        } else if (!t.xzOk) {
+          t.note = "off-block";
+        }
+      } else if (!t.divOk) {
+        t.note = "no-stall-div";
+      } else if (!t.inputOk) {
+        t.note = "no-input";
+      } else {
+        t.note = "no-progress";
+      }
+      // Big-div heal (downward-desync last resort): sustained large gap while
+      // grounded — e.g. the server walked off the footprint and fell while
+      // the client stayed on top. Full server pose, own counter, own log.
+      // Checked independently of the stall gates above (different trigger).
+      if (this.bigDivHoldS >= SELF_RECONCILE_BIG_DIV_HOLD_S) {
+        this.teleportSelf(serverX, serverZ, serverY);
+        this.upSnapCooldownLeftS = SELF_RECONCILE_UP_SNAP_COOLDOWN_S;
+        t.cooldownLeftS = this.upSnapCooldownLeftS;
+        t.stallProgressM = 0;
+        t.bigDivHoldS = this.bigDivHoldS;
+        t.result = "snap";
+        t.snapKind = "big";
+        t.bigHealCount += 1;
+        t.lastBigHealAtMs = Date.now();
+        t.note = "big-heal";
+        console.log(
+          `[big-heal] #${t.bigHealCount} div=${t.divergence.toFixed(3)} ` +
+            `hold=${SELF_RECONCILE_BIG_DIV_HOLD_S.toFixed(2)}s`,
+        );
+        return "snap";
+      }
+    } else if (!serverYFinite) {
+      t.note = "bad-serverY";
+    } else if (this.airborneGate.isAirborne) {
+      t.note = "airborne";
+    } else {
+      t.note = "cooldown";
     }
     const dx = serverX - this.avatar.position.x;
     const dz = serverZ - this.avatar.position.z;
     const dist = Math.hypot(dx, dz);
+    t.xzDist = dist;
     if (!(dist > SELF_RECONCILE_MIN_M)) {
+      t.xzBand = "deadband";
+      t.result = "ok";
       return "ok";
     }
     if (dist > SELF_RECONCILE_SNAP_M) {
-      this.teleportSelf(serverX, serverZ);
+      this.teleportSelf(serverX, serverZ, serverY);
+      this.upSnapCooldownLeftS = SELF_RECONCILE_UP_SNAP_COOLDOWN_S;
+      t.cooldownLeftS = this.upSnapCooldownLeftS;
+      t.xzBand = "snap";
+      t.result = "snap";
+      t.snapKind = "far";
+      t.note = "far-snap";
       return "snap";
     }
     const factor = 1 - Math.exp(-SELF_RECONCILE_RATE * deltaSeconds);
@@ -975,6 +1396,8 @@ export class SceneManager {
       const bodyPos = this.physics.getPlayerPosition();
       this.physics.setPlayerPosition(bodyPos.x + dx * factor, bodyPos.y, bodyPos.z + dz * factor);
     }
+    t.xzBand = "lerp";
+    t.result = "lerp";
     return "lerp";
   }
 

@@ -2182,3 +2182,278 @@ describe("bug round 5: on-top ring walk-back to the center", () => {
     }
   });
 });
+
+// Bug round 6, BUG 1: walking up a ramp near its lateral edge, then continuing
+// forward/diagonally, must step onto the block top — no support drop, no
+// eject, no invisible wall. Pre-fix the diagonal step leaves the strict ramp
+// band + corridor laterally while the feet are still ~top - slope*outward
+// (inside the expanded footprint but off-band): groundSupport drops the feet
+// to 0 and the next tick ejects the fighter to the expanded corner, where
+// every inward attempt re-ejects (permanent stall at the corner).
+// Each platform drives S (ramp foot, edge lateral) -> A (near top, edge) ->
+// B (diagonal across the band edge toward the top) -> C (center). The S->A
+// climb is in-lane and works pre-fix; the A->B transition is the live owner
+// repro and fails pre-fix (support drop > 0.3 + stall, never reaches B/C).
+describe("bug round 6 BUG1: ramp-edge climb steps onto the top, all platforms", () => {
+  function sendDrive(room: ArenaRoom, sessionId: string, x: number, y: number): void {
+    (room as unknown as { handleInput(sessionId: string, payload: unknown): void }).handleInput(sessionId, {
+      x,
+      y,
+      rotY: 0,
+      seq: 1,
+      charging: false,
+    });
+  }
+
+  function tickDrive(room: ArenaRoom): void {
+    room.testNow = (room.testNow ?? 0) + 50;
+    room.tickRoom(50);
+  }
+
+  function parkDuel(room: ArenaRoom): { s1: PlayerState; s2: PlayerState } {
+    removeBots(room);
+    const s1 = getPlayer(room, "s1");
+    const s2 = getPlayer(room, "s2");
+    if (s1 === undefined || s2 === undefined) {
+      throw new Error("duel room missing fighters");
+    }
+    s2.x = -14;
+    s2.z = 14;
+    s1.invulnUntil = 1e15;
+    s2.invulnUntil = 1e15;
+    s1.reloadUntil = 0;
+    s1.superBuff = false;
+    return { s1, s2 };
+  }
+
+  // Drives a waypoint path with per-tick homing; every leg must complete.
+  // Returns the largest single-tick y jump (drops/ejects read as jumps).
+  // Legs are driven one at a time so a stall names the failing leg.
+  function driveLeg(
+    room: ArenaRoom,
+    sessionId: string,
+    label: string,
+    wx: number,
+    wz: number,
+  ): number {
+    const player = getPlayer(room, sessionId);
+    if (player === undefined) {
+      throw new Error("missing fighter");
+    }
+    let maxJump = 0;
+    let prevY = player.y;
+    for (let i = 0; i < 500; i += 1) {
+      const left = Math.hypot(wx - player.x, wz - player.z);
+      if (left < 0.3) {
+        break;
+      }
+      const dx = wx - player.x;
+      const dz = wz - player.z;
+      const d = Math.hypot(dx, dz);
+      sendDrive(room, sessionId, dx / d, dz / d);
+      tickDrive(room);
+      maxJump = Math.max(maxJump, Math.abs(player.y - prevY));
+      prevY = player.y;
+    }
+    const left = Math.hypot(wx - player.x, wz - player.z);
+    if (left >= 0.35) {
+      throw new Error(`leg ${label} stalled ${left.toFixed(3)}m from [${wx}, ${wz}] (y=${player.y.toFixed(3)})`);
+    }
+    return maxJump;
+  }
+
+  interface EdgeClimb {
+    name: string;
+    start: readonly [number, number];
+    nearTop: readonly [number, number];
+    across: readonly [number, number];
+    center: readonly [number, number];
+    topY: number;
+  }
+
+  // Edge laterals sit inside the strict band (halfW - 0.15..0.25) so the
+  // S->A climb is in-lane; the A->B diagonal exits the strict band while the
+  // feet are still slope-high at outward ~0.3 (pre-fix drop + eject corner).
+  // B laterals sit inside band + body radius but outside the strict band, and
+  // inside the expanded footprint (no snap-up path, no teleport).
+  function edgeClimbs(): EdgeClimb[] {
+    return [
+      {
+        name: "P0",
+        start: [14.65, 2.5],
+        nearTop: [14.65, -6.9],
+        across: [15.25, -7.35],
+        center: [13.8, -8.5],
+        topY: 2.6,
+      },
+      {
+        name: "P1",
+        start: [-12.85, 2.3],
+        nearTop: [-12.85, 8.6],
+        across: [-12.3, 9.05],
+        center: [-13.5, 10.0],
+        topY: 1.8,
+      },
+      {
+        name: "P2",
+        start: [-2.0, -8.75],
+        nearTop: [-9.7, -8.75],
+        across: [-10.15, -8.15],
+        center: [-11.5, -9.5],
+        topY: 2.2,
+      },
+      {
+        name: "P3",
+        start: [-3.3, 14.15],
+        nearTop: [3.6, 14.15],
+        across: [3.98, 14.7],
+        center: [5.0, 13.5],
+        topY: 2.0,
+      },
+    ];
+  }
+
+  it("ramp-edge climb + diagonal top transition reaches the center with no drop", async () => {
+    for (const climb of edgeClimbs()) {
+      const room = await playingRoom();
+      const { s1 } = parkDuel(room);
+      s1.x = climb.start[0];
+      s1.z = climb.start[1];
+      s1.y = BODY_CENTER_Y;
+      const climbJump = driveLeg(room, "s1", `${climb.name}:S->A`, climb.nearTop[0], climb.nearTop[1]);
+      const acrossJump = driveLeg(room, "s1", `${climb.name}:A->B`, climb.across[0], climb.across[1]);
+      const homeJump = driveLeg(room, "s1", `${climb.name}:B->C`, climb.center[0], climb.center[1]);
+      // Pre-fix the A->B step drops the feet ~2m to the ground (support reads
+      // strict) and ejects to the expanded corner: acrossJump >> 0.3 and the
+      // B leg stalls at the corner (driveLeg names it).
+      const maxJump = Math.max(climbJump, acrossJump, homeJump);
+      expect(maxJump).toBeLessThan(0.3);
+      const after = getPlayer(room, "s1");
+      expect(Math.hypot((after?.x ?? 99) - climb.center[0], (after?.z ?? 99) - climb.center[1])).toBeLessThan(
+        0.6,
+      );
+      expect(after?.y ?? 0).toBeCloseTo(climb.topY + BODY_CENTER_Y, 1);
+    }
+  });
+});
+
+// Bug round 6, BUG 2 (server contract): a fighter that is ON TOP (feet at the
+// top) walking from the center out to the edge ring and back must move freely
+// on every elevated block. This WALKED excursion (not a teleport) passes on
+// the pre-fix server too — it pins the server-clean contract so a future
+// regression cannot reintroduce a server-side walk-back wall. The live BUG 2
+// wall at platforms was the BUG 1 aftermath (feet dropped to 0 by the
+// band exit, then the eject loop blocks every inward step); the tower-top
+// live wall needs the client Y-divergence heal (see SelfSync UP-snap).
+describe("bug round 6 BUG2: walked on-top edge excursion + return stays free", () => {
+  function sendDrive(room: ArenaRoom, sessionId: string, x: number, y: number): void {
+    (room as unknown as { handleInput(sessionId: string, payload: unknown): void }).handleInput(sessionId, {
+      x,
+      y,
+      rotY: 0,
+      seq: 1,
+      charging: false,
+    });
+  }
+
+  function tickDrive(room: ArenaRoom): void {
+    room.testNow = (room.testNow ?? 0) + 50;
+    room.tickRoom(50);
+  }
+
+  function parkDuel(room: ArenaRoom): { s1: PlayerState; s2: PlayerState } {
+    removeBots(room);
+    const s1 = getPlayer(room, "s1");
+    const s2 = getPlayer(room, "s2");
+    if (s1 === undefined || s2 === undefined) {
+      throw new Error("duel room missing fighters");
+    }
+    s2.x = -14;
+    s2.z = 14;
+    s1.invulnUntil = 1e15;
+    s2.invulnUntil = 1e15;
+    s1.reloadUntil = 0;
+    s1.superBuff = false;
+    return { s1, s2 };
+  }
+
+  const STEP = (PLAYER_SPEED * SIM_TICK_MS) / 1000;
+
+  interface Excursion {
+    name: string;
+    centerX: number;
+    centerZ: number;
+    topY: number;
+    edgeX: number;
+    edgeZ: number;
+  }
+
+  // Edge spots: off-corridor ring (lateral halfW + 0.3, 0.3 outside the strict
+  // footprint, inside the expanded ring) for platforms; the west ring for the
+  // central towers. Starts are on top (feet = topY), the live steady state.
+  function excursions(): Excursion[] {
+    const out: Excursion[] = [
+      { name: "P0", centerX: 13.8, centerZ: -8.5, topY: 2.6, edgeX: 15.1, edgeZ: -7.0 },
+      { name: "P1", centerX: -13.5, centerZ: 10.0, topY: 1.8, edgeX: -12.4, edgeZ: 8.7 },
+      { name: "P2", centerX: -11.5, centerZ: -9.5, topY: 2.2, edgeX: -10.0, edgeZ: -8.3 },
+      { name: "P3", centerX: 5.0, centerZ: 13.5, topY: 2.0, edgeX: 3.7, edgeZ: 14.6 },
+    ];
+    for (const block of SERVER_OBSTACLES) {
+      if (Math.abs(block.x) === 4.8 && Math.abs(block.z) === 4.8) {
+        out.push({
+          name: `T${block.x > 0 ? "+" : "-"}${block.z > 0 ? "+" : "-"}`,
+          centerX: block.x,
+          centerZ: block.z,
+          topY: block.topY,
+          edgeX: block.x - block.hx - 0.3,
+          edgeZ: block.z,
+        });
+      }
+    }
+    return out;
+  }
+
+  it("walks center -> edge ring -> center with y held on all elevated blocks", async () => {
+    expect(STEP).toBeCloseTo(0.225, 9);
+    for (const trip of excursions()) {
+      const room = await playingRoom();
+      const { s1 } = parkDuel(room);
+      s1.x = trip.centerX;
+      s1.z = trip.centerZ;
+      s1.y = trip.topY + BODY_CENTER_Y;
+      for (const [wx, wz] of [
+        [trip.edgeX, trip.edgeZ],
+        [trip.centerX, trip.centerZ],
+      ] as const) {
+        for (let i = 0; i < 120; i += 1) {
+          const current = getPlayer(room, "s1");
+          if (current === undefined) {
+            throw new Error("missing s1");
+          }
+          const dist = Math.hypot(current.x - wx, current.z - wz);
+          if (dist < 0.35) {
+            break;
+          }
+          const prevX = current.x;
+          const prevZ = current.z;
+          const dx = wx - current.x;
+          const dz = wz - current.z;
+          const length = Math.hypot(dx, dz);
+          sendDrive(room, "s1", dx / length, dz / length);
+          tickDrive(room);
+          const next = getPlayer(room, "s1");
+          if (next === undefined) {
+            throw new Error("missing s1");
+          }
+          // Every tick is one clean step: no eject jump, no clamp stall, no
+          // support drop (y must read the top throughout, both legs).
+          expect(Math.hypot(next.x - prevX, next.z - prevZ)).toBeLessThanOrEqual(STEP + 0.05);
+          expect(dist - Math.hypot(next.x - wx, next.z - wz)).toBeGreaterThan(STEP - 0.075);
+          expect(next.y).toBeCloseTo(trip.topY + BODY_CENTER_Y, 1);
+        }
+        const after = getPlayer(room, "s1");
+        expect(Math.hypot((after?.x ?? 99) - wx, (after?.z ?? 99) - wz)).toBeLessThan(0.35);
+      }
+    }
+  });
+});

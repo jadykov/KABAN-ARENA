@@ -201,6 +201,68 @@ export const SNAP_DISTANCE = 6;
 export const SELF_RECONCILE_MIN_M = 0.7;
 export const SELF_RECONCILE_SNAP_M = 6;
 export const SELF_RECONCILE_RATE = 8;
+// Self-reconciliation stall-snap (bug round 7 — replaces the round 6/6b/6c
+// UP-snap design, which live F3 telemetry proved dead). Live evidence from
+// the owner's video (P2 platform x=-11.5,z=-9.5,hx=hz=1.4,topY=2.2, nominal
+// server levelY 3.30): healthy Rapier rest sits EXACTLY 0.100 below nominal
+// (surfaceTop + 1.0 vs server surfaceTop + 1.1) and the resting lip-wedge
+// ALSO sits at 0.100 — so Y-divergence alone can never distinguish healthy
+// rest from a wedge, and any threshold-based Y-only trigger is mathematically
+// blind (the 0.11 gate sat 0.01 above the wedge: structurally blind; the only
+// viable window at t=5.2s, div 0.154, was blocked by our own speed gate at
+// 3.108 m/s > 1.5). The discriminator must be STALL EVIDENCE: input active
+// but XZ not progressing. The old SELF_RECONCILE_UP_SNAP_DY (0.11) and
+// SELF_RECONCILE_UP_SNAP_MAX_SPEED (1.5) constants are DELETED (the speed
+// gate blocked the only live heal window; descent false-snaps it prevented
+// are cosmetic vs a hard wall) — the trigger below fires only on a genuine
+// run-in-place stall, so descents (XZ progresses) never match it.
+// Gates (ALL must hold): playing && alive (call-site) && NOT airborne &&
+// cooldown == 0 && serverY within TOP_TOL of a support top && client XZ in
+// that top's expanded footprint (hx + AVATAR_BODY_RADIUS per axis) &&
+// serverY - localY >= STALL_MIN_DIV && |move| >= STALL_INPUT_MIN && XZ
+// displacement over the last STALL_WINDOW_S < STALL_MIN_PROGRESS_M.
+// Action: teleportSelf(serverX, serverZ, serverY - REST_OFFSET) (true Rapier
+// rest — no post-snap drop), cooldown 0.3s, SNAPS counter, [up-snap] log.
+// STALL_MIN_DIV 0.03 sits above solver noise (~0.01) and below the 0.100 rest
+// offset, so the resting wedge qualifies while exact agreement never does.
+export const SELF_RECONCILE_STALL_MIN_DIV = 0.03;
+export const SELF_RECONCILE_STALL_INPUT_MIN = 0.5;
+export const SELF_RECONCILE_STALL_WINDOW_S = 0.25;
+export const SELF_RECONCILE_STALL_MIN_PROGRESS_M = 0.12;
+// Stall-window ring buffer: STALL_SLOTS slots of WINDOW_S/SLOTS each
+// (8 x ~31ms ≈ 0.25s). At 60fps each frame adds ~17ms to the current slot,
+// so ~2 frames share a slot. Normal walk covers 4.5 m/s x 0.25 s ≈ 1.1 m
+// per window (>> 0.12, never stalls); a lip wedge runs in place (net ~0,
+// physics push canceled by the reconcile drag-back each frame) and the
+// window sum stays under 0.12. Preallocated, zero per-frame allocs.
+export const SELF_RECONCILE_STALL_SLOTS = 8;
+// Downward-desync heal (bug round 7 — fixes the video's t=6.9-14.4s frozen
+// state: server XZ drifted off the footprint, server Y fell 3.30 -> 1.10
+// while the client stayed at 3.20, div -2.100 forever, no down-pull
+// existed). When |serverY - localY| >= BIG_DIV holds continuously for
+// BIG_DIV_HOLD_S while NOT airborne, teleport to the FULL server pose
+// (serverX, serverZ, serverY — far-snap semantics, no rest offset) and arm
+// the cooldown; counted separately as big heals. The hold timer resets
+// whenever |div| < BIG_DIV, on airborne, or on any teleport. Trampoline
+// flight never trips it (airborne gate); ramp descents track the server Y,
+// so |div| never reaches 0.5 grounded.
+export const SELF_RECONCILE_BIG_DIV = 0.5;
+export const SELF_RECONCILE_BIG_DIV_HOLD_S = 0.4;
+export const SELF_RECONCILE_TOP_TOL = 0.02;
+// Snap cooldown (bug round 6c reviewer B2 backstop, kept in round 7): minimum
+// time between snaps on any path (stall, big-div, far) — breaks any
+// snap-then-dip-then-resnap loop. 0.3 s also exceeds the 0.25 s stall window,
+// so a post-teleport empty window can never fire before the cooldown ends.
+export const SELF_RECONCILE_UP_SNAP_COOLDOWN_S = 0.3;
+// Stall-snap target = serverY - REST_OFFSET (true Rapier rest on a top =
+// nominal topY + 1.1 - 0.1), not serverY — lands at rest height with no
+// post-snap drop. 0.1 = SELF_SPAWN_Y 1.1 (server body-center height) minus
+// the capsule rest height above its support (half-height 0.5 + radius 0.5).
+export const SELF_RECONCILE_REST_OFFSET = 0.1;
+// Capsule body radius (mirrors server PLAYER_BODY_RADIUS and the Rapier
+// capsule(0.5, 0.5) in physics/World): the authoritative XZ is the body
+// center, so the UP-snap same-block test spans one radius past each face.
+export const AVATAR_BODY_RADIUS = 0.5;
 // Follow-camera smoothing: desired position + lookAt ease at this exp rate
 // (1/s), so per-frame avatar corrections never translate into camera jumps.
 // Yaw stays instant (responsive mouse); remote-avatar yaw wrap already uses
