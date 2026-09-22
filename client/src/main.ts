@@ -336,7 +336,7 @@ async function boot(): Promise<void> {
       aimOverlay.setSuper(false);
     }
     if (self !== undefined && isPlaying && !self.alive) {
-      hud.setStatus("Fragged — respawn in 3s…");
+      hud.setStatus("Fragged — respawning…");
     } else {
       hud.setStatus(counters);
     }
@@ -1095,11 +1095,16 @@ async function boot(): Promise<void> {
     }
     // R1: spectators send no movement — gate inputs by the playing flag
     // (SceneManager also ignores them while spectating; belt and braces).
+    // Dead fighters drive nothing: with instant respawn the dead window is
+    // ~1 tick, but while a dead snapshot is live the avatar must freeze
+    // instead of running on (movement + upstream input gated here; camera
+    // look below stays free so the death read is never disorienting).
     // Look deltas are still consumed so they never pile up before welcome.
     const rawMove = input.getMoveVector();
     const rawLook = input.consumeLookDelta();
     const playing = isPlaying && !sceneManager.isSpectating();
-    const move = playing ? rawMove : { x: 0, y: 0 };
+    const selfAlive = lastSelfAlive !== false;
+    const move = playing && selfAlive ? rawMove : { x: 0, y: 0 };
     // While charging the camera mirrors aim (one-thumb 360 turn); RMB
     // free-look applies only when NOT charging.
     const look = playing ? (isCharging ? { dx: 0, dy: 0 } : rawLook) : { dx: 0, dy: 0 };
@@ -1301,8 +1306,11 @@ async function boot(): Promise<void> {
     // formula as SceneManager.update local physics) + avatar facing rotY.
     // The server applies input.x -> world X, input.y -> world Z directly.
     // R1: gated by the playing flag — spectators have no body to drive.
+    // Dead fighters send nothing either (the server ignores dead inputs;
+    // with instant respawn the gap is ~1 tick, but a dead snapshot must
+    // never drive the corpse for even a frame).
     // R2: charging flag slows the server 50% while aiming a shot.
-    if (net.isConnected && isPlaying) {
+    if (net.isConnected && isPlaying && selfAlive) {
       inputAccumulator += deltaSeconds;
       if (inputAccumulator >= INPUT_SEND_INTERVAL_S) {
         inputAccumulator = 0;

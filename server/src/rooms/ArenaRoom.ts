@@ -26,6 +26,7 @@ import {
   PLAYER_SPEED,
   RAMP_ADMIT_MIN_FEET,
   RAMP_ENTRY_TOL,
+  RAMP_LANE_CAPTURE_TOL,
   RELOAD_MS,
   REMATCH_DELAY_MS,
   RESPAWN_DELAY_MS,
@@ -209,6 +210,18 @@ function feetYOf(bodyY: number): number {
 //   passes freely as well; below the top anywhere else the mover is ejected
 //   toward the nearest face on each axis — nobody gets trapped, and nobody
 //   walks THROUGH to the far side.
+// - Climb-lane capture (bug round 4, defect 2): an admitted mover crossing a
+//   ramped solid's OPEN face off-corridor is re-laned instead of clamped when
+//   the target lateral sits within corridorHalf + RAMP_LANE_CAPTURE_TOL and
+//   the lane-projected target is at slope height near the feet (ramp-band
+//   surface in (0, feet + RAMP_ENTRY_TOL]). The projection is lateral-only
+//   and bounded (at most the tolerance past the corridor edge, toward the
+//   lane, strictly inside the face span — it can never cross a sheer face),
+//   and the surface match keeps grounded movers out (face-high surfaces never
+//   match feet ~0) with no y jump on entry (support follows the slope).
+//   Both a from-lane drift-out and (for axis-x ramps) a mid-crossing target drift-out
+//   are captured; for axis-z ramps a mid-crossing target drift-out falls through
+//   to the next-tick eject-and-drop path (no trap).
 export function resolvePlayerMove(
   fromX: number,
   fromZ: number,
@@ -235,7 +248,44 @@ export function resolvePlayerMove(
     admitted &&
     ((solid.corridorAxis === "z" && Math.abs(pz - solid.corridorCenter) <= solid.corridorHalf) ||
       (solid.corridorAxis === "x" && Math.abs(px - solid.corridorCenter) <= solid.corridorHalf));
+  // Climb-lane capture target (defect 2): when an admitted mover's target
+  // lateral is off-corridor but within reach (corridorHalf +
+  // RAMP_LANE_CAPTURE_TOL), returns the lane-clamped lateral; otherwise null
+  // (in-lane targets need no capture, far-outside targets stay blocked).
+  // The clamp stops FOOTPRINT_EPS infield of the lane edge: the ramp-band
+  // test is strict, so an exact-edge lateral can read as off-band by float
+  // dust (observed 7e-16 on decimal lane edges) and the capture would fail
+  // its own surface check — or pass it, then eject the next tick. A hair
+  // infield is physically identical and keeps every exact <= half gate green.
+  // Callers additionally require the ramp surface at the projected point near
+  // the feet before admitting + projecting, so grounded movers never enter
+  // and entries never jump in y.
+  const laneCaptureTarget = (solid: MoveSolid, lateralTarget: number): number | null => {
+    if (!admitted || solid.corridorAxis === null) {
+      return null;
+    }
+    const offset = Math.abs(lateralTarget - solid.corridorCenter);
+    if (offset <= solid.corridorHalf || offset > solid.corridorHalf + RAMP_LANE_CAPTURE_TOL) {
+      return null;
+    }
+    return Math.max(
+      solid.corridorCenter - solid.corridorHalf + FOOTPRINT_EPS,
+      Math.min(solid.corridorCenter + solid.corridorHalf - FOOTPRINT_EPS, lateralTarget),
+    );
+  };
+  // Slope-height match at the projected entry point: the ramp-band surface
+  // (band only, no platform tops) must sit just at/above the feet — a genuine
+  // slope step, never a wall climb and never a teleport onto the top.
+  const laneSurfaceOk = (sx: number, sz: number): boolean => {
+    const surface = rampBandHeightAt(sx, sz);
+    return surface > 0 && surface <= feet + RAMP_ENTRY_TOL;
+  };
   let x = toX;
+  // Z goal for the Z loop: an X-ramp lane capture re-lanes the lateral (z)
+  // here, and the Z loop then processes the pulled goal with all its usual
+  // face checks — a capture can admit through the open face but can never
+  // undo a sheer-face clamp.
+  let zGoal = toZ;
   for (const solid of MOVE_SOLIDS) {
     if (solid.top <= feet + COLLISION_Y_EPS) {
       continue;
@@ -251,16 +301,36 @@ export function resolvePlayerMove(
       continue;
     }
     if (fromZ >= solid.z - solid.hz - radius && fromZ <= solid.z + solid.hz + radius) {
-      const minPass =
+      let minPass =
         admitted &&
         solid.openMinX &&
         solid.corridorAxis === "z" &&
         Math.abs(fromZ - solid.corridorCenter) <= solid.corridorHalf;
-      const maxPass =
+      let maxPass =
         admitted &&
         solid.openMaxX &&
         solid.corridorAxis === "z" &&
         Math.abs(fromZ - solid.corridorCenter) <= solid.corridorHalf;
+      // Off-corridor capture at the open ±x faces (ramps only): re-lane the
+      // lateral (z) goal instead of clamping when the target is within reach
+      // and at slope height. In-lane targets need no capture (z is frozen in
+      // this loop, so target lateral always equals the from lateral here).
+      if (solid.corridorAxis === "z" && admitted) {
+        if (!minPass && solid.openMinX && fromX <= minFaceX && x > minFaceX) {
+          const cap = laneCaptureTarget(solid, fromZ);
+          if (cap !== null && laneSurfaceOk(x, cap)) {
+            minPass = true;
+            zGoal = cap;
+          }
+        }
+        if (!maxPass && solid.openMaxX && fromX >= maxFaceX && x < maxFaceX) {
+          const cap = laneCaptureTarget(solid, fromZ);
+          if (cap !== null && laneSurfaceOk(x, cap)) {
+            maxPass = true;
+            zGoal = cap;
+          }
+        }
+      }
       if (!minPass && fromX <= minFaceX && x > minFaceX) {
         x = minFaceX;
       }
@@ -269,7 +339,7 @@ export function resolvePlayerMove(
       }
     }
   }
-  let z = toZ;
+  let z = zGoal;
   for (const solid of MOVE_SOLIDS) {
     if (solid.top <= feet + COLLISION_Y_EPS) {
       continue;
@@ -285,16 +355,37 @@ export function resolvePlayerMove(
       continue;
     }
     if (x >= solid.x - solid.hx - radius && x <= solid.x + solid.hx + radius) {
-      const minPass =
+      let minPass =
         admitted &&
         solid.openMinZ &&
         solid.corridorAxis === "x" &&
         Math.abs(fromX - solid.corridorCenter) <= solid.corridorHalf;
-      const maxPass =
+      let maxPass =
         admitted &&
         solid.openMaxZ &&
         solid.corridorAxis === "x" &&
         Math.abs(fromX - solid.corridorCenter) <= solid.corridorHalf;
+      // Off-corridor capture at the open ±z faces (ramps only): re-lane the
+      // target x instead of clamping when within reach and at slope height.
+      // Also covers drifting out mid-crossing (from in-lane, target out):
+      // the crossing still passes, but the target is pulled back into the
+      // lane so the climber lands on the ramp instead of ejecting.
+      if (solid.corridorAxis === "x" && admitted) {
+        if (solid.openMinZ && fromZ <= minFaceZ && z > minFaceZ) {
+          const cap = laneCaptureTarget(solid, x);
+          if (cap !== null && laneSurfaceOk(cap, z)) {
+            minPass = true;
+            x = cap;
+          }
+        }
+        if (solid.openMaxZ && fromZ >= maxFaceZ && z < maxFaceZ) {
+          const cap = laneCaptureTarget(solid, x);
+          if (cap !== null && laneSurfaceOk(cap, z)) {
+            maxPass = true;
+            x = cap;
+          }
+        }
+      }
       if (!minPass && fromZ <= minFaceZ && z > minFaceZ) {
         z = minFaceZ;
       }

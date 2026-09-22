@@ -20,9 +20,14 @@ export const SPAWN_INSET = 2.4; // mirrors client SPAWN_INSET (scaled)
 // the body CENTER, so solid faces stop it one radius out.
 export const PLAYER_BODY_RADIUS = 0.5;
 
-// Short-round loop C2: lobby countdown 3s, respawn 3s, invuln 2s.
+// Short-round loop C2: lobby countdown 3s, respawn 100ms, invuln 2s.
+// Death is effectively instant but NOT same-tick: the victim respawns via
+// the existing scheduled tickRespawns path ~2 ticks after the kill, so at
+// least one dead snapshot is broadcast (the client's pixel death burst fires
+// on alive->false) while the 2-3s dead-running window stays gone.
+// Killfeed/score/invuln (from the respawn moment) are unchanged.
 export const LOBBY_COUNTDOWN_MS = 3000;
-export const RESPAWN_DELAY_MS = 3000;
+export const RESPAWN_DELAY_MS = 100;
 export const INVULN_MS = 2000;
 // First to WIN_SCORE points OR ROUND_DURATION_MS timer, whichever first.
 // Hard cap ROUND_HARD_CAP_MS stays under 5 minutes (300000ms).
@@ -180,6 +185,15 @@ export const TRAMPOLINE_MAX_AIR_S = 3;
 // grounded fighter skirting the ramp mouth at feet ~0 is clamped like any
 // sheer face, matching the client's solid platform box.
 export const RAMP_ADMIT_MIN_FEET = 0.3;
+// Climb-lane capture tolerance (m): an admitted climber (feet above
+// RAMP_ADMIT_MIN_FEET) crossing a ramped platform's OPEN face off-corridor is
+// re-laned instead of clamped when the target lateral sits within
+// corridorHalf + this tolerance AND the lane-projected target is at slope
+// height near the feet. One body radius: the capsule still overlaps the ramp
+// lane, so the capture is a small lateral slide, never a teleport. Grounded
+// movers are excluded by the admitted gate (face-high surfaces never match
+// feet ~0), so ground entry stays blocked exactly as before.
+export const RAMP_LANE_CAPTURE_TOL = 0.5;
 // Wedge-side tolerance (m): legit ramp climbing changes height by at most
 // slope x speed x tick (~0.06m), so stepping onto a ramp surface more than
 // this above the feet means walking into the wedge SIDE (client Rapier

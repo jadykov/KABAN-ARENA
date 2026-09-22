@@ -92,8 +92,8 @@ describe("damage model hitscan A (100HP / 25dmg = 4 hits = 4 hearts)", () => {
     expect(validateHit(shooter, dead, 1000, undefined).reason).toBe("dead");
   });
 
-  it("respawn restores full HP + 2s invuln (respawn 3s scheduled by room)", () => {
-    expect(RESPAWN_DELAY_MS).toBe(3000);
+  it("respawn restores full HP + 2s invuln (respawn 100ms instant, scheduled by room)", () => {
+    expect(RESPAWN_DELAY_MS).toBe(100);
     const target = makePlayer("target", { alive: false, hp: 0, x: 99, z: 99 });
     respawnPlayer(target, 1, 7000);
     expect(target.alive).toBe(true);

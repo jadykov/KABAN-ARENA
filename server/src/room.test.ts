@@ -8,6 +8,9 @@ import {
   BODY_CENTER_Y,
   CHARGE_MOVE_MULT,
   FULL_DAMAGE,
+  HIT_SCORE,
+  INVULN_MS,
+  KILL_SCORE,
   LOBBY_COUNTDOWN_MS,
   MAX_LIVE_BALLS,
   MAX_PLAYERS,
@@ -24,6 +27,7 @@ import {
 import {
   bodyCenterYAt,
   bodyCenterYAtExpanded,
+  getSpawnForIndex,
   groundTopAt,
   isOnTrampolinePad,
   muzzleForShot,
@@ -294,27 +298,53 @@ describe("round loop: score-or-timer end, respawn, clean reset", () => {
     expect(room.state.winner).toBe("s1");
   });
 
-  it("cannon kill respawns after 3s with full HP, no buff, no reload", async () => {
+  it("cannon kill respawns instantly with full HP, no buff, no reload", async () => {
     const room = await playingRoom();
     const { shooter, target } = isolateDuel(room);
     target.hp = FULL_DAMAGE;
     target.superBuff = true;
+    const killfeed: unknown[] = [];
+    (room as unknown as { broadcast: (type: string, message?: unknown) => void }).broadcast = (
+      type: string,
+      message?: unknown,
+    ): void => {
+      if (type === "killfeed") {
+        killfeed.push(message);
+      }
+    };
+    const scoreBefore = shooter.score;
+    const fireNow = room.testNow ?? 0;
+    // Deterministic spawn cycle: handlePlay/bots consume the cursor, so the
+    // victim's respawn slot is whatever the cursor reads now (no other death
+    // can consume it in between — bots are removed, the shooter is safe).
+    const cursorBefore = (room as unknown as { spawnCursor: number }).spawnCursor;
     fireAs(room, "s1", { power01: 1, yaw: 0, pitch: 0.1, super: false });
     expect(room.state.balls.size).toBe(1);
-    // Fly the ball into the victim (up to 3s of 50ms steps).
-    for (let i = 0; i < 60 && target.alive; i += 1) {
+    // Death is effectively instant (RESPAWN_DELAY_MS 100ms): the killing
+    // tick registers killfeed + hit/kill score exactly as before, the dead
+    // state stays visible for ~2 ticks (client death burst reads it), then
+    // the scheduled respawn lands — no 3s corpse.
+    for (let i = 0; i < 60 && killfeed.length === 0; i += 1) {
       advance(room, 50);
       room.tickRoom(50);
     }
+    expect(killfeed.length).toBeGreaterThan(0);
+    expect(shooter.score).toBe(scoreBefore + HIT_SCORE + KILL_SCORE);
     expect(target.alive).toBe(false);
-    expect(shooter.score).toBeGreaterThan(0);
-    advance(room, RESPAWN_DELAY_MS + 10);
-    room.tickRoom();
+    advance(room, RESPAWN_DELAY_MS + 50);
+    room.tickRoom(50);
     const respawned = getPlayer(room, "s2");
     expect(respawned?.alive).toBe(true);
     expect(respawned?.hp).toBe(100);
     expect(respawned?.superBuff).toBe(false);
     expect(respawned?.reloadUntil).toBe(0);
+    // Deterministic spawn cycle, invuln counted from the respawn moment.
+    const spawn = getSpawnForIndex(cursorBefore % MAX_PLAYERS);
+    expect(respawned?.x).toBeCloseTo(spawn.x, 9);
+    expect(respawned?.z).toBeCloseTo(spawn.z, 9);
+    const respawnedAt = (respawned?.invulnUntil ?? 0) - INVULN_MS;
+    expect(respawnedAt).toBeGreaterThanOrEqual(fireNow);
+    expect(respawnedAt).toBeLessThanOrEqual(room.testNow ?? 0);
   });
 
   it("single client fills bots and can start/finish a round vs bots", async () => {
@@ -1746,5 +1776,207 @@ describe("ball-hit-player broadcast (blood only on player damage)", () => {
     expect(target.hp).toBe(100);
     expect(shooter.hp).toBe(100);
     expect(hitMessages(captured)).toHaveLength(0);
+  });
+});
+
+// Bug round 4: ramp re-climb (defect 1), lane capture (defect 2), and the
+// recoil walk-back. Defect-1 guarantee, verified by probes and locked here:
+// no invisible-wall trap anywhere on the walk-around -> ramp-foot -> climb ->
+// center path for any of the 4 platforms (direct grounded return through a
+// face stays blocked by design — these paths steer around to the foot).
+describe("bug round 4: ramp-foot re-entry, lane capture, recoil walk-back", () => {
+  function sendDrive(room: ArenaRoom, sessionId: string, x: number, y: number): void {
+    (room as unknown as { handleInput(sessionId: string, payload: unknown): void }).handleInput(sessionId, {
+      x,
+      y,
+      rotY: 0,
+      seq: 1,
+      charging: false,
+    });
+  }
+
+  function tickDrive(room: ArenaRoom): void {
+    room.testNow = (room.testNow ?? 0) + 50;
+    room.tickRoom(50);
+  }
+
+  function parkDuel(room: ArenaRoom): { s1: PlayerState; s2: PlayerState } {
+    removeBots(room);
+    const s1 = getPlayer(room, "s1");
+    const s2 = getPlayer(room, "s2");
+    if (s1 === undefined || s2 === undefined) {
+      throw new Error("duel room missing fighters");
+    }
+    s2.x = -14;
+    s2.z = 14;
+    s1.invulnUntil = 1e15;
+    s2.invulnUntil = 1e15;
+    s1.reloadUntil = 0;
+    s1.superBuff = false;
+    return { s1, s2 };
+  }
+
+  // Drives a waypoint path with per-tick homing; every leg must complete.
+  // Returns the largest single-tick y jump (climbs must read smoothly).
+  function drivePath(
+    room: ArenaRoom,
+    sessionId: string,
+    waypoints: ReadonlyArray<readonly [number, number]>,
+  ): number {
+    const player = getPlayer(room, sessionId);
+    if (player === undefined) {
+      throw new Error("missing fighter");
+    }
+    let maxJump = 0;
+    let prevY = player.y;
+    for (const [wx, wz] of waypoints) {
+      for (let i = 0; i < 500; i += 1) {
+        const left = Math.hypot(wx - player.x, wz - player.z);
+        if (left < 0.3) {
+          break;
+        }
+        const dx = wx - player.x;
+        const dz = wz - player.z;
+        const d = Math.hypot(dx, dz);
+        sendDrive(room, sessionId, dx / d, dz / d);
+        tickDrive(room);
+        maxJump = Math.max(maxJump, Math.abs(player.y - prevY));
+        prevY = player.y;
+      }
+      expect(Math.hypot(wx - player.x, wz - player.z)).toBeLessThan(0.35);
+    }
+    return maxJump;
+  }
+
+  it("P0 (+z ramp): walk-around, foot climb, platform center", async () => {
+    const room = await playingRoom();
+    const { s1 } = parkDuel(room);
+    s1.x = 13.8;
+    s1.z = -11.2;
+    s1.y = BODY_CENTER_Y;
+    const maxJump = drivePath(room, "s1", [
+      [16.6, -11.2],
+      [16.6, 4.3],
+      [13.8, 4.3],
+      [13.8, -8.5],
+    ]);
+    expect(maxJump).toBeLessThan(0.3);
+    const after = getPlayer(room, "s1");
+    expect(Math.hypot((after?.x ?? 99) - 13.8, (after?.z ?? 99) + 8.5)).toBeLessThan(0.6);
+    expect(after?.y ?? 0).toBeCloseTo(2.6 + BODY_CENTER_Y, 1);
+  });
+
+  it("P1 (-z ramp): walk-around past the outer block, foot climb, center", async () => {
+    const room = await playingRoom();
+    const { s1 } = parkDuel(room);
+    s1.x = -13.5;
+    s1.z = 12.6;
+    s1.y = BODY_CENTER_Y;
+    const maxJump = drivePath(room, "s1", [
+      [-8.0, 12.6],
+      [-8.0, 1.5],
+      [-13.5, 1.5],
+      [-13.5, 10.0],
+    ]);
+    expect(maxJump).toBeLessThan(0.3);
+    const after = getPlayer(room, "s1");
+    expect(Math.hypot((after?.x ?? 99) + 13.5, (after?.z ?? 99) - 10.0)).toBeLessThan(0.6);
+    expect(after?.y ?? 0).toBeCloseTo(1.8 + BODY_CENTER_Y, 1);
+  });
+
+  it("P2 (+x ramp): walk-around threading the outer block, foot climb, center", async () => {
+    const room = await playingRoom();
+    const { s1 } = parkDuel(room);
+    s1.x = -14.5;
+    s1.z = -9.5;
+    s1.y = BODY_CENTER_Y;
+    const maxJump = drivePath(room, "s1", [
+      [-14.5, -6.4],
+      [0, -6.4],
+      [0, -8.2],
+      [-2.0, -8.2],
+      [-2.0, -9.5],
+      [-11.5, -9.5],
+    ]);
+    expect(maxJump).toBeLessThan(0.3);
+    const after = getPlayer(room, "s1");
+    expect(Math.hypot((after?.x ?? 99) + 11.5, (after?.z ?? 99) + 9.5)).toBeLessThan(0.6);
+    expect(after?.y ?? 0).toBeCloseTo(2.2 + BODY_CENTER_Y, 1);
+  });
+
+  it("P3 (-x ramp): walk-around south of the outer block, foot climb, center", async () => {
+    const room = await playingRoom();
+    const { s1 } = parkDuel(room);
+    s1.x = 7.6;
+    s1.z = 13.5;
+    s1.y = BODY_CENTER_Y;
+    const maxJump = drivePath(room, "s1", [
+      [7.6, 8.2],
+      [-5.2, 8.2],
+      [-5.2, 13.5],
+      [5.0, 13.5],
+    ]);
+    expect(maxJump).toBeLessThan(0.3);
+    const after = getPlayer(room, "s1");
+    expect(Math.hypot((after?.x ?? 99) - 5.0, (after?.z ?? 99) - 13.5)).toBeLessThan(0.6);
+    expect(after?.y ?? 0).toBeCloseTo(2.0 + BODY_CENTER_Y, 1);
+  });
+
+  it("a recoil-shoved off-lane drifter is re-laned at the face, climbs to top", async () => {
+    // P0 centerline near the face at slope height. Recoil/knockback shoves
+    // preserve y, so a shoved drifter starts the next tick off-band with
+    // stale climb height — exactly the state the lane capture admits.
+    const room = await playingRoom();
+    const { s1 } = parkDuel(room);
+    s1.x = 14.5;
+    s1.z = -6.6;
+    s1.y = 3.48;
+    // Shove 1: fire WEST (full) -> recoil EAST 0.8m, off the band, y kept.
+    fireAs(room, "s1", { power01: 1, yaw: Math.PI / 2, pitch: 0.1, super: false, throwerY: 3.48 });
+    expect(s1.x).toBeCloseTo(15.3, 2);
+    expect(s1.z).toBeCloseTo(-6.6, 9);
+    expect(s1.y).toBeCloseTo(3.48, 9);
+    // Shove 2: fire SOUTH (weak) -> recoil NORTH 0.4m toward the face. The
+    // off-corridor crossing is re-laned (x -> 14.8) instead of clamped.
+    s1.reloadUntil = 0;
+    fireAs(room, "s1", { power01: 0.5, yaw: Math.PI, pitch: 0.1, super: false, throwerY: 3.48 });
+    expect(s1.x).toBeCloseTo(14.8, 1);
+    expect(s1.z).toBeCloseTo(-7.0, 1);
+    // Home to the platform center from the lane edge: no clamp, no drop.
+    const maxJump = drivePath(room, "s1", [[13.8, -8.5]]);
+    expect(maxJump).toBeLessThan(0.3);
+    const after = getPlayer(room, "s1");
+    expect(Math.hypot((after?.x ?? 99) - 13.8, (after?.z ?? 99) + 8.5)).toBeLessThan(0.6);
+    expect(after?.y ?? 0).toBeCloseTo(2.6 + BODY_CENTER_Y, 1);
+  });
+
+  it("recoil off the sheer edge grounds the fighter, foot walk-back reaches the top", async () => {
+    // Defect-1 scenario: firing shoves the top fighter off the sheer east
+    // edge; they land grounded beside the platform, then re-climb via the
+    // ramp foot like a player would.
+    const room = await playingRoom();
+    const { s1 } = parkDuel(room);
+    s1.x = 15.0;
+    s1.z = -8.5;
+    s1.y = 2.6 + BODY_CENTER_Y;
+    // Fire WEST (full) -> recoil EAST 0.8m off the edge (y preserved).
+    fireAs(room, "s1", { power01: 1, yaw: Math.PI / 2, pitch: 0.1, super: false, throwerY: 3.7 });
+    expect(s1.x).toBeCloseTo(15.8, 2);
+    expect(s1.y).toBeCloseTo(3.7, 9);
+    // Next tick the support drops them to the ground beside the platform.
+    sendDrive(room, "s1", 0, 0);
+    tickDrive(room);
+    expect(s1.y).toBeCloseTo(BODY_CENTER_Y, 9);
+    // Walk back: clear the corner, north past the foot, climb the centerline.
+    const maxJump = drivePath(room, "s1", [
+      [16.6, -8.5],
+      [16.6, 4.3],
+      [13.8, 4.3],
+      [13.8, -8.5],
+    ]);
+    expect(maxJump).toBeLessThan(0.3);
+    const after = getPlayer(room, "s1");
+    expect(Math.hypot((after?.x ?? 99) - 13.8, (after?.z ?? 99) + 8.5)).toBeLessThan(0.6);
+    expect(after?.y ?? 0).toBeCloseTo(2.6 + BODY_CENTER_Y, 1);
   });
 });

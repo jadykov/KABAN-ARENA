@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { PLAYER_BODY_RADIUS } from "./config.js";
+import {
+  PLAYER_BODY_RADIUS,
+  RAMP_LANE_CAPTURE_TOL,
+  SERVER_OBSTACLES,
+  SERVER_PLATFORMS,
+} from "./config.js";
 import { resolveGroundMove, resolvePlayerMove } from "./rooms/ArenaRoom.js";
 
 // Through-wall fix: authoritative per-axis XZ collision for humans + bots.
@@ -184,6 +189,51 @@ describe("resolvePlayerMove elevation gate + ramp corridor", () => {
     expect(sheer.x).toBeCloseTo(12.1, 9);
   });
 
+  it("captures just-outside-corridor climbers into the lane, blocks the rest", () => {
+    // Bug round 4, defect 2: platform 0 (+z ramp, corridor |x - 13.8| <= 1.0,
+    // open max-z face -6.8, slope at the face ~2.53m). An admitted climber
+    // crossing just outside the corridor is re-laned instead of clamped.
+    expect(RAMP_LANE_CAPTURE_TOL).toBe(0.5);
+    const captured = resolvePlayerMove(15.0, -6.5, 15.0, -7.0, 0.5, 2.4);
+    expect(captured.z).toBeCloseTo(-7.0, 9);
+    // Precision 6: the projection sits FOOTPRINT_EPS infield of the lane
+    // edge (float-dust guard), not exactly on it.
+    expect(captured.x).toBeCloseTo(14.8, 6);
+    // Drifting out mid-crossing (from in-lane, target just out) is pulled
+    // back into the lane instead of landing off-lane and ejecting.
+    const relaned = resolvePlayerMove(14.7, -6.5, 14.9, -7.2, 0.5, 2.4);
+    expect(relaned.z).toBeCloseTo(-7.2, 9);
+    expect(relaned.x).toBeCloseTo(14.8, 6);
+    // Well outside the reach (1.6 > 1.0 + 0.5): the face stays closed.
+    const far = resolvePlayerMove(15.4, -6.5, 15.4, -7.0, 0.5, 2.4);
+    expect(far.z).toBeCloseTo(-6.8, 9);
+    expect(far.x).toBeCloseTo(15.4, 9);
+    // Grounded at the same geometry: never admitted through any face.
+    const grounded = resolvePlayerMove(15.0, -6.5, 15.0, -7.0, 0.5, 0);
+    expect(grounded.z).toBeCloseTo(-6.8, 9);
+    expect(grounded.x).toBeCloseTo(15.0, 9);
+  });
+
+  it("captures off-corridor climbers at ±x ramps too", () => {
+    // Platform 4 (-x ramp, open min-x face 3.5, lane z in [12.7, 14.3],
+    // slope at the projected entry ~1.93m): an admitted climber crossing
+    // just north of the lane is re-laned south instead of clamped.
+    const captured = resolvePlayerMove(3.3, 12.4, 3.7, 12.4, 0.5, 1.85);
+    expect(captured.x).toBeCloseTo(3.7, 9);
+    expect(captured.z).toBeCloseTo(12.7, 6);
+    // Same geometry grounded: the sheer-side behavior is unchanged.
+    const grounded = resolvePlayerMove(3.3, 12.4, 3.7, 12.4, 0.5, 0);
+    expect(grounded.x).toBeCloseTo(3.5, 9);
+  });
+
+  it("lane capture never touches obstacles (corridorAxis null)", () => {
+    // Central tower (4.8, 4.8) topY 2.0: an admitted mover below the top
+    // still stops at the max-x face (6.3) — no open face, no capture.
+    const tower = resolvePlayerMove(6.5, 4.8, 5.5, 4.8, 0.5, 1.0);
+    expect(tower.x).toBeCloseTo(6.3, 9);
+    expect(tower.z).toBeCloseTo(4.8, 9);
+  });
+
   it("treats non-finite feet as ground level (never a free pass)", () => {
     const grounded = resolvePlayerMove(1.0, 4.8, 4.0, 4.8, 0.5, Number.NaN);
     expect(grounded.x).toBeCloseTo(3.3, 9);
@@ -216,5 +266,67 @@ describe("resolveGroundMove wedge-side block", () => {
   it("refuses garbage instead of teleporting", () => {
     expect(resolveGroundMove(1, 2, Number.NaN, 4, 0.5, 0)).toEqual({ x: 1, z: 2 });
     expect(resolveGroundMove(1, 2, 3, 4, -1, 0)).toEqual({ x: 1, z: 2 });
+  });
+});
+
+// Grounded airtightness fuzz (bug round 4): an exhaustive deterministic grid
+// around every solid sweeps 8 directions at walk-step (0.225m) and knockback
+// length (1.2m) with feet 0. A grounded mover must never finish strictly
+// inside a radius-expanded footprint below its top: faces clamp, embeds eject
+// to the boundary, and the lane capture never fires without feet. 1e-6 slack
+// is far above float dust (~1e-15 at these magnitudes) and far below any real
+// penetration, so boundary rests pass and any pass-through fails.
+describe("resolveGroundMove airtightness fuzz (grounded)", () => {
+  it("a grounded sweep never ends inside any solid below its top", () => {
+    const solids: ReadonlyArray<{ x: number; z: number; hx: number; hz: number; topY: number }> = [
+      ...SERVER_OBSTACLES,
+      ...SERVER_PLATFORMS,
+    ];
+    const dirs: ReadonlyArray<readonly [number, number]> = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+      [1, 1],
+      [1, -1],
+      [-1, 1],
+      [-1, -1],
+    ];
+    const r = PLAYER_BODY_RADIUS;
+    let checked = 0;
+    let violations = 0;
+    for (const solid of solids) {
+      for (
+        let gx = solid.x - solid.hx - r - 1;
+        gx <= solid.x + solid.hx + r + 1 + 1e-9;
+        gx += 0.25
+      ) {
+        for (
+          let gz = solid.z - solid.hz - r - 1;
+          gz <= solid.z + solid.hz + r + 1 + 1e-9;
+          gz += 0.25
+        ) {
+          for (const [dx, dz] of dirs) {
+            for (const step of [0.225, 1.2]) {
+              const out = resolveGroundMove(gx, gz, gx + dx * step, gz + dz * step, r, 0);
+              checked += 1;
+              if (!Number.isFinite(out.x) || !Number.isFinite(out.z)) {
+                violations += 1;
+                continue;
+              }
+              for (const other of solids) {
+                const insideX = Math.abs(out.x - other.x) < other.hx + r - 1e-6;
+                const insideZ = Math.abs(out.z - other.z) < other.hz + r - 1e-6;
+                if (insideX && insideZ && other.topY > 1e-6) {
+                  violations += 1;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(10000);
+    expect(violations).toBe(0);
   });
 });
