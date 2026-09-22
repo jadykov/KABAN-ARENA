@@ -16,12 +16,15 @@ import {
   MAX_PLAYERS,
   PATCH_RATE_MS,
   PLAYER_BODY_RADIUS,
+  PLAYER_SPEED,
   RELOAD_MS,
   REMATCH_DELAY_MS,
   RESPAWN_DELAY_MS,
   ROUND_DURATION_MS,
   SERVER_PLATFORMS,
+  SIM_TICK_MS,
   SUPER_SPAWN_S,
+  SUPPORT_STICK_TOL,
   WEAK_DAMAGE,
 } from "./config.js";
 import {
@@ -1978,5 +1981,204 @@ describe("bug round 4: ramp-foot re-entry, lane capture, recoil walk-back", () =
     const after = getPlayer(room, "s1");
     expect(Math.hypot((after?.x ?? 99) - 13.8, (after?.z ?? 99) + 8.5)).toBeLessThan(0.6);
     expect(after?.y ?? 0).toBeCloseTo(2.6 + BODY_CENTER_Y, 1);
+  });
+});
+
+// Bug round 5, defect 1: invisible wall at the platform edge while STILL ON
+// TOP. The elevation gate used to skip only solids within COLLISION_Y_EPS
+// below the feet, while groundSupport still holds the radius-expanded top
+// through the 0.5m ring for feet up to SUPPORT_STICK_TOL below the top.
+// Ring moves in that TOL window OFF the ramp corridor hit the inside eject /
+// face clamp pre-fix: platform walk-backs stalled at the boundary while
+// tower walk-backs ejected (~hx + radius laterally) to the corner — the
+// invisible wall exactly at the footprint boundary, only in the ring state.
+// The gate now matches the stick band, so on-top movement is fully free
+// everywhere including the ring: edge walk-back to the center always works,
+// while ground entry through any face stays blocked (pinned by the
+// airtightness fuzz + AC1/AC-B control tests, unchanged).
+describe("bug round 5: on-top ring walk-back to the center", () => {
+  function sendDrive(room: ArenaRoom, sessionId: string, x: number, y: number): void {
+    (room as unknown as { handleInput(sessionId: string, payload: unknown): void }).handleInput(sessionId, {
+      x,
+      y,
+      rotY: 0,
+      seq: 1,
+      charging: false,
+    });
+  }
+
+  function tickDrive(room: ArenaRoom): void {
+    room.testNow = (room.testNow ?? 0) + 50;
+    room.tickRoom(50);
+  }
+
+  function parkDuel(room: ArenaRoom): { s1: PlayerState; s2: PlayerState } {
+    removeBots(room);
+    const s1 = getPlayer(room, "s1");
+    const s2 = getPlayer(room, "s2");
+    if (s1 === undefined || s2 === undefined) {
+      throw new Error("duel room missing fighters");
+    }
+    s2.x = -14;
+    s2.z = 14;
+    s1.invulnUntil = 1e15;
+    s2.invulnUntil = 1e15;
+    s1.reloadUntil = 0;
+    s1.superBuff = false;
+    return { s1, s2 };
+  }
+
+  // One full walk-step per 50ms tick (uncharged).
+  const STEP = (PLAYER_SPEED * SIM_TICK_MS) / 1000;
+
+  interface RingCase {
+    name: string;
+    centerX: number;
+    centerZ: number;
+    topY: number;
+    ringX: number;
+    ringZ: number;
+  }
+
+  // Ring spots OFF the ramp corridor (|lateral| = half + 0.25, inside the
+  // expanded band): the state where pre-fix the eject / face clamp fires.
+  // Centerline starts are deliberately NOT used — in-lane ring moves were
+  // already free pre-fix via inClimbLane, so they cannot discriminate the
+  // gate fix. Both platform sides are covered (sheer side opposite the ramp
+  // AND the ramp side, each off-corridor) plus the 4 central towers (sheer
+  // on all sides). All starts sit 0.25m outside the strict footprint and
+  // inside the 0.5m expanded ring on both axes.
+  function ringCases(): RingCase[] {
+    const cases: RingCase[] = [];
+    SERVER_PLATFORMS.forEach((platform, index): void => {
+      const lateral = platform.rampWidth / 2 + 0.25;
+      const ringGap = 0.25;
+      if (platform.rampSide === "+z" || platform.rampSide === "-z") {
+        // corridorAxis "x": the lateral runs on x around platform.x.
+        const sign = platform.rampSide === "+z" ? 1 : -1;
+        for (const side of [-1, 1] as const) {
+          cases.push({
+            name: `P${index}${side > 0 ? "r" : "s"}`,
+            centerX: platform.x,
+            centerZ: platform.z,
+            topY: platform.topY,
+            ringX: platform.x + lateral,
+            ringZ: platform.z + sign * side * (platform.hz + ringGap),
+          });
+        }
+      } else {
+        // corridorAxis "z": the lateral runs on z around platform.z.
+        const sign = platform.rampSide === "+x" ? 1 : -1;
+        for (const side of [-1, 1] as const) {
+          cases.push({
+            name: `P${index}${side > 0 ? "r" : "s"}`,
+            centerX: platform.x,
+            centerZ: platform.z,
+            topY: platform.topY,
+            ringX: platform.x + sign * side * (platform.hx + ringGap),
+            ringZ: platform.z + lateral,
+          });
+        }
+      }
+    });
+    SERVER_OBSTACLES.filter((block) => Math.abs(block.x) === 4.8 && Math.abs(block.z) === 4.8).forEach(
+      (tower, index): void => {
+        cases.push({
+          name: `T${index}`,
+          centerX: tower.x,
+          centerZ: tower.z,
+          topY: tower.topY,
+          ringX: tower.x - tower.hx - 0.25,
+          ringZ: tower.z,
+        });
+      },
+    );
+    return cases;
+  }
+
+  function driveHome(room: ArenaRoom, sessionId: string, centerX: number, centerZ: number): void {
+    const current = getPlayer(room, sessionId);
+    if (current === undefined) {
+      throw new Error("missing fighter");
+    }
+    const dx = centerX - current.x;
+    const dz = centerZ - current.z;
+    const length = Math.hypot(dx, dz);
+    sendDrive(room, sessionId, dx / length, dz / length);
+  }
+
+  it("off-corridor ring walk-back advances a full step with y held", async () => {
+    expect(SUPPORT_STICK_TOL).toBe(0.05);
+    expect(STEP).toBeCloseTo(0.225, 9);
+    expect(ringCases()).toHaveLength(12);
+    for (const ring of ringCases()) {
+      // Feet at the top and 20mm below it: both still supported per
+      // hysteresis with margin (the exact band edge top-0.05 is left out —
+      // the stick equality there is float-dust sensitive by design, while
+      // the gate carries COLLISION_Y_EPS slack; pipeline feet never sit
+      // exactly on it).
+      for (const feetBelow of [0, 0.02]) {
+        const room = await playingRoom();
+        const { s1 } = parkDuel(room);
+        s1.x = ring.ringX;
+        s1.z = ring.ringZ;
+        s1.y = ring.topY - feetBelow + BODY_CENTER_Y;
+        // Snapshot scalars: s1 is a live reference mutated by the tick.
+        const startX = s1.x;
+        const startZ = s1.z;
+        const before = Math.hypot(startX - ring.centerX, startZ - ring.centerZ);
+        driveHome(room, "s1", ring.centerX, ring.centerZ);
+        tickDrive(room);
+        const after = getPlayer(room, "s1");
+        if (after === undefined) {
+          throw new Error("missing s1");
+        }
+        const moved = Math.hypot(after.x - startX, after.z - startZ);
+        const now = Math.hypot(after.x - ring.centerX, after.z - ring.centerZ);
+        // Full-step progress toward the center (pre-fix: stalled by the
+        // clamp or pushed away by the eject) with no teleport jump (pre-fix
+        // tower Z-eject leapt ~hx + radius to the corner).
+        expect(moved).toBeLessThanOrEqual(STEP + 0.05);
+        expect(before - now).toBeGreaterThan(STEP - 0.075);
+        expect(after.y).toBeCloseTo(ring.topY + BODY_CENTER_Y, 1);
+      }
+    }
+  });
+
+  it("off-corridor ring walk-back reaches the center on all platforms + towers", async () => {
+    for (const ring of ringCases()) {
+      const room = await playingRoom();
+      const { s1 } = parkDuel(room);
+      s1.x = ring.ringX;
+      s1.z = ring.ringZ;
+      s1.y = ring.topY - 0.02 + BODY_CENTER_Y;
+      for (let i = 0; i < 120; i += 1) {
+        const current = getPlayer(room, "s1");
+        if (current === undefined) {
+          throw new Error("missing s1");
+        }
+        const dist = Math.hypot(current.x - ring.centerX, current.z - ring.centerZ);
+        if (dist < 0.35) {
+          break;
+        }
+        // Snapshot scalars: getPlayer returns the live mutated reference.
+        const prevX = current.x;
+        const prevZ = current.z;
+        driveHome(room, "s1", ring.centerX, ring.centerZ);
+        tickDrive(room);
+        const next = getPlayer(room, "s1");
+        if (next === undefined) {
+          throw new Error("missing s1");
+        }
+        // Every tick is one clean step home: no eject jump, no clamp stall.
+        expect(Math.hypot(next.x - prevX, next.z - prevZ)).toBeLessThanOrEqual(STEP + 0.05);
+        expect(dist - Math.hypot(next.x - ring.centerX, next.z - ring.centerZ)).toBeGreaterThan(
+          STEP - 0.075,
+        );
+      }
+      const after = getPlayer(room, "s1");
+      expect(Math.hypot((after?.x ?? 99) - ring.centerX, (after?.z ?? 99) - ring.centerZ)).toBeLessThan(0.35);
+      expect(after?.y ?? 0).toBeCloseTo(ring.topY + BODY_CENTER_Y, 1);
+    }
   });
 });

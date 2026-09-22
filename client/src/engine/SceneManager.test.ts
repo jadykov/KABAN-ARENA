@@ -14,9 +14,13 @@ import {
   CAMERA_REST_PITCH,
   CAMERA_SENSITIVITY,
   CAMERA_WALL_MARGIN,
+  DEATH_BURST_CHARTREUSE,
   DEATH_BURST_COUNT,
+  DEATH_BURST_LIFE_S,
   DEATH_BURST_ORANGE,
   DEATH_BURST_RED,
+  DEATH_BURST_SPREAD,
+  DEATH_BURST_UP,
   DEATH_BURST_YELLOW,
   FIREFLY_COUNT,
   IDLE_FOLLOW_PITCH,
@@ -233,20 +237,48 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
   });
 });
 
-describe("SceneManager death burst (30, palette 10/30/60)", () => {
-  it("spawns 30 pooled particles with the white/pale-violet/muted-red split", async () => {
-    expect(DEATH_BURST_COUNT).toBe(30);
+describe("SceneManager death burst (80, palette + identity + chartreuse)", () => {
+  it("spawns 80 pooled particles with the white/pale/red/identity/chartreuse split", async () => {
+    expect(DEATH_BURST_COUNT).toBe(80);
     expect(DEATH_BURST_YELLOW).toBe(0xf5f0ff);
     expect(DEATH_BURST_ORANGE).toBe(0xb9a3e6);
     expect(DEATH_BURST_RED).toBe(0xa8434e);
-    // 10% white / 30% pale violet / 60% muted red of the 30-burst.
-    expect(Math.round(DEATH_BURST_COUNT * 0.1)).toBe(3);
-    expect(Math.round(DEATH_BURST_COUNT * 0.3)).toBe(9);
-    expect(DEATH_BURST_COUNT - 3 - 9).toBe(18);
+    expect(DEATH_BURST_CHARTREUSE).toBe(0xb8e04a);
+    expect(DEATH_BURST_SPREAD).toBe(4.5);
+    expect(DEATH_BURST_UP).toBe(4.5);
+    expect(DEATH_BURST_LIFE_S).toBe(0.9);
+    // 10% white / 30% pale violet / 15% identity / 5% chartreuse of the
+    // 80-burst, muted red remainder.
+    expect(Math.round(DEATH_BURST_COUNT * 0.1)).toBe(8);
+    expect(Math.round(DEATH_BURST_COUNT * 0.3)).toBe(24);
+    expect(Math.round(DEATH_BURST_COUNT * 0.15)).toBe(12);
+    expect(Math.round(DEATH_BURST_COUNT * 0.05)).toBe(4);
+    expect(DEATH_BURST_COUNT - 8 - 24 - 12 - 4).toBe(32);
     const manager = await createManager();
     expect(manager.getAliveParticleCount()).toBe(0);
     manager.spawnDeathBurst(0, 1.2, 0);
-    expect(manager.getAliveParticleCount()).toBe(30);
+    expect(manager.getAliveParticleCount()).toBe(80);
+  });
+
+  it("tints the identity chunk with the victim color, stays unconfusable with hit blood", async () => {
+    // A custom victim color still pops the full 80-burst (identity chunk
+    // tinted, not resized), and the burst dwarfs the 16-particle all-red
+    // hit-blood burst it must never read as.
+    expect(BLOOD_BURST_COUNT).toBe(16);
+    expect(DEATH_BURST_COUNT).toBeGreaterThan(BLOOD_BURST_COUNT * 2);
+    const manager = await createManager();
+    expect(manager.getAliveParticleCount()).toBe(0);
+    manager.spawnDeathBurst(0, 1.2, 0, 0x9a5fd0);
+    expect(manager.getAliveParticleCount()).toBe(80);
+  });
+
+  it("ignores non-finite death positions (no phantom bursts)", async () => {
+    const manager = await createManager();
+    expect(manager.getAliveParticleCount()).toBe(0);
+    manager.spawnDeathBurst(Number.NaN, 1.2, 0);
+    manager.spawnDeathBurst(0, Number.NaN, 0);
+    manager.spawnDeathBurst(0, 1.2, Number.POSITIVE_INFINITY);
+    expect(manager.getAliveParticleCount()).toBe(0);
   });
 });
 

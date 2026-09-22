@@ -194,11 +194,19 @@ function feetYOf(bodyY: number): number {
 // clamp against every solid face (X first, then Z), so diagonal input slides
 // along faces instead of sticking. A step can never tunnel (max ~0.23m per
 // 50ms tick vs 1.25m+ expanded half extents).
-// Elevation gates (bugs A/B): feetY carries the mover's feet height
-// (body-center y minus BODY_CENTER_Y).
-// - A solid whose top sits at or below the feet is skipped entirely — the
-//   fighter stands on top of it or flies above it. Defaults to 0 (ground
-//   crawler) so pre-elevation call sites behave exactly as before.
+// Elevation gates (bugs A/B + round 5 defect 1): feetY carries the mover's
+// feet height (body-center y minus BODY_CENTER_Y).
+// - A solid whose top sits at or below the feet (within the hysteresis stick
+//   band) is skipped entirely — the fighter stands on top of it or flies
+//   just at its level. The skip band is SUPPORT_STICK_TOL + COLLISION_Y_EPS
+//   (not EPS alone): groundSupport keeps the radius-expanded top through the
+//   0.5m ring while feet still match within SUPPORT_STICK_TOL, so a fighter
+//   in the ring with feet up to 5cm below the top is still supported on top
+//   and must walk freely (edge walk-back to center always works). The old
+//   EPS-only gate blocked those TOL-window ring moves (invisible wall exactly
+//   at the footprint boundary, only in the ring state). Ground entry stays
+//   blocked: every solid top (0.8+) exceeds feet 0 + 0.05 by far. Defaults to
+//   0 (ground crawler) so pre-elevation call sites behave exactly as before.
 // - The ramp-side open face admits ONLY a mover that is actually climbing
 //   (feet above RAMP_ADMIT_MIN_FEET) and ONLY inside the support band
 //   (|lateral| <= rampWidth/2, no radius widening — the widening created a
@@ -287,7 +295,7 @@ export function resolvePlayerMove(
   // undo a sheer-face clamp.
   let zGoal = toZ;
   for (const solid of MOVE_SOLIDS) {
-    if (solid.top <= feet + COLLISION_Y_EPS) {
+    if (solid.top <= feet + SUPPORT_STICK_TOL + COLLISION_Y_EPS) {
       continue;
     }
     const minFaceX = solid.x - solid.hx - radius;
@@ -341,7 +349,7 @@ export function resolvePlayerMove(
   }
   let z = zGoal;
   for (const solid of MOVE_SOLIDS) {
-    if (solid.top <= feet + COLLISION_Y_EPS) {
+    if (solid.top <= feet + SUPPORT_STICK_TOL + COLLISION_Y_EPS) {
       continue;
     }
     const minFaceZ = solid.z - solid.hz - radius;

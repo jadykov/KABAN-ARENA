@@ -18,9 +18,13 @@ import {
   BALL_TORSO_OFFSET,
   BLOOD_BURST_COUNT,
   CHARGE_MOVE_MULT,
+  DEATH_BURST_CHARTREUSE,
   DEATH_BURST_COUNT,
+  DEATH_BURST_LIFE_S,
   DEATH_BURST_ORANGE,
   DEATH_BURST_RED,
+  DEATH_BURST_SPREAD,
+  DEATH_BURST_UP,
   DEATH_BURST_YELLOW,
   ICE_SPEED_MULT,
   IDLE_RECENTER_MOVE_MAX,
@@ -480,10 +484,16 @@ export class SceneManager {
     this.hasAim = true;
   }
 
-  // Death burst: 30 pooled particles at the given position with the fixed
-  // palette (yellow 10% / orange 30% / red 60%). No alloc, no lights, one
-  // Points draw call via the shared ParticlePool.
-  public spawnDeathBurst(x?: number, y?: number, z?: number): void {
+  // Death burst (bug round 5: unmistakable shatter, never hit-blood): 80
+  // pooled particles — white 10% / pale violet 30% / muted red remainder /
+  // victim identity 15% / chartreuse 5% glint — with a bigger radial spread,
+  // a stronger upward pop, and a slightly longer life than the 16-particle
+  // all-red hit-blood burst. The identity chunk reuses the victim's fighter
+  // color (resolved by the caller through the shared identity derivation),
+  // so the burst reads as THAT fighter shattering. Event-time allocations
+  // only (per-burst Colors, never per-frame), no lights, one Points draw
+  // call via the shared ParticlePool.
+  public spawnDeathBurst(x?: number, y?: number, z?: number, identityColor?: number): void {
     const avatar = this.avatar;
     const px = x ?? avatar?.position.x ?? 0;
     const py = y ?? (avatar !== null ? avatar.position.y + 0.2 : 1.2);
@@ -491,18 +501,28 @@ export class SceneManager {
     if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(pz)) {
       return;
     }
-    const total = DEATH_BURST_COUNT > 0 ? DEATH_BURST_COUNT : 30;
+    const identity =
+      identityColor !== undefined && Number.isFinite(identityColor) ? identityColor : LOCAL_AVATAR_COLOR;
+    const total = DEATH_BURST_COUNT > 0 ? DEATH_BURST_COUNT : 80;
     const yellow = Math.round(total * 0.1);
     const orange = Math.round(total * 0.3);
-    const red = total - yellow - orange;
+    const identityCount = Math.round(total * 0.15);
+    const chartreuse = Math.round(total * 0.05);
+    const red = total - yellow - orange - identityCount - chartreuse;
     if (yellow > 0) {
-      this.particles.spawn(px, py, pz, yellow, new THREE.Color(DEATH_BURST_YELLOW));
+      this.particles.spawn(px, py, pz, yellow, new THREE.Color(DEATH_BURST_YELLOW), DEATH_BURST_SPREAD, DEATH_BURST_UP, DEATH_BURST_LIFE_S);
     }
     if (orange > 0) {
-      this.particles.spawn(px, py, pz, orange, new THREE.Color(DEATH_BURST_ORANGE));
+      this.particles.spawn(px, py, pz, orange, new THREE.Color(DEATH_BURST_ORANGE), DEATH_BURST_SPREAD, DEATH_BURST_UP, DEATH_BURST_LIFE_S);
     }
     if (red > 0) {
-      this.particles.spawn(px, py, pz, red, new THREE.Color(DEATH_BURST_RED));
+      this.particles.spawn(px, py, pz, red, new THREE.Color(DEATH_BURST_RED), DEATH_BURST_SPREAD, DEATH_BURST_UP, DEATH_BURST_LIFE_S);
+    }
+    if (identityCount > 0) {
+      this.particles.spawn(px, py, pz, identityCount, new THREE.Color(identity), DEATH_BURST_SPREAD, DEATH_BURST_UP, DEATH_BURST_LIFE_S);
+    }
+    if (chartreuse > 0) {
+      this.particles.spawn(px, py, pz, chartreuse, new THREE.Color(DEATH_BURST_CHARTREUSE), DEATH_BURST_SPREAD, DEATH_BURST_UP, DEATH_BURST_LIFE_S);
     }
   }
 

@@ -42,6 +42,7 @@ import {
   halvesForHp,
   muzzleForShot,
   normalizePlayNick,
+  ownerColorForSession,
   powerToSpeed,
   previewTimeAt,
   worldMoveFromYaw,
@@ -111,7 +112,14 @@ async function boot(): Promise<void> {
   // net/touchAim.test.ts). Desktop mouse/keyboard paths below are untouched.
   const touchState = new TouchAimState();
 
-  const remotes = new RemoteAvatars(engine.scene);
+  // Remote deaths shatter visibly at the victim's last tracked position
+  // (bug round 5): players and bots share this path, and spectators see it
+  // too — particles render in the spectate path, and this callback has no
+  // spectating gate (unlike the local-avatar burst below, which needs a
+  // visible local body).
+  const remotes = new RemoteAvatars(engine.scene, (x, y, z, color): void => {
+    sceneManager.spawnDeathBurst(x, y, z, color);
+  });
 
   let latest: RoomSnapshot | null = null;
   let isPlaying = false;
@@ -360,7 +368,7 @@ async function boot(): Promise<void> {
       lastSelfAlive = true;
     } else if (self !== undefined && isPlaying) {
       if (lastSelfAlive === true && self.alive === false && !sceneManager.isSpectating()) {
-        sceneManager.spawnDeathBurst(self.x, 1.2, self.z);
+        sceneManager.spawnDeathBurst(self.x, 1.2, self.z, ownerColorForSession(self.sessionId, selfId));
         sceneManager.cancelShotBodyTurn();
       }
       lastSelfAlive = false;

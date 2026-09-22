@@ -2,6 +2,10 @@
 // player (self excluded — the local SceneManager avatar stays authoritative
 // for the local view). Max 6 draw-call pairs, inside the mobile budget.
 // Positions ease through RemoteTrack (lerp/slerp); dead players hide.
+// Remote deaths pop the shared pixel death burst at the victim's last
+// tracked position (bug round 5): the alive true→false edge per entry fires
+// the onRemoteDeath callback once — players and bots share this path, and
+// spectators see it too (particles render in the spectate path).
 
 import * as THREE from "three";
 import { MOVE_SPEED } from "../config";
@@ -22,6 +26,11 @@ import { paletteForSession, type NetPlayerSnapshot } from "./protocol";
 import { NEUTRAL_WHITE, NEUTRAL_WHITE_CSS } from "../palette";
 
 export { paletteForSession as paletteFor };
+
+// Death-burst seam (bug round 5): fired once per remote alive→false edge
+// with the victim's last tracked position + identity color. Scalar numbers
+// only — zero per-frame allocation (fires on transitions, never per frame).
+export type RemoteDeathHandler = (x: number, y: number, z: number, color: number) => void;
 
 function makeNameSprite(nick: string): THREE.Sprite {
   const canvas = document.createElement("canvas");
@@ -64,6 +73,13 @@ interface RemoteEntry {
   // Two-level flight gate (shared AirborneGate): entry trips it, sustained
   // low vertical speed clears it — same apex-flutter protection as locals.
   gate: AirborneGate;
+  // Identity color baked at creation (same paletteForSession value the rig's
+  // shirt/hand-ball use) so the death burst reads as THIS fighter.
+  color: number;
+  // Last seen alive flag (init = first snapshot's alive): the true→false
+  // edge fires the death burst exactly once. First sighting of an
+  // already-dead remote (late join, respawn window) never bursts.
+  wasAlive: boolean;
 }
 
 // Damping rate (1/s) for the remote vertical-speed estimate.
@@ -71,13 +87,15 @@ const REMOTE_VY_SMOOTH_RATE = 8;
 
 export class RemoteAvatars {
   private readonly scene: THREE.Scene;
+  private readonly onRemoteDeath: RemoteDeathHandler | null;
   // Template only: each entry clones it and bakes its own two-tone vertex
   // colors (shared geometry can't carry per-player clothing).
   private readonly templateGeometry = new THREE.CapsuleGeometry(0.5, 1.0, 6, 12);
   private readonly entries = new Map<string, RemoteEntry>();
 
-  public constructor(scene: THREE.Scene) {
+  public constructor(scene: THREE.Scene, onRemoteDeath: RemoteDeathHandler | null = null) {
     this.scene = scene;
+    this.onRemoteDeath = onRemoteDeath;
   }
 
   public get size(): number {
@@ -116,6 +134,15 @@ export class RemoteAvatars {
       // Idle hold bob on the remote hand-ball (no charge data replicates, so
       // remotes never swell/flick — local-only anims stay in SceneManager).
       entry.visuals.update(deltaSeconds);
+      // Death-burst edge (bug round 5): capture the last tracked position
+      // BEFORE easing toward the new snapshot — a death snapshot carries no
+      // meaningful position; the avatar was last seen alive HERE. Self never
+      // reaches this code (skipped above), so the local burst can't double.
+      const lastX = entry.group.position.x;
+      const lastY = entry.group.position.y;
+      const lastZ = entry.group.position.z;
+      const died = entry.wasAlive && !snapshot.alive;
+      entry.wasAlive = snapshot.alive;
       const target: RemoteTarget = { x: snapshot.x, y: snapshot.y, z: snapshot.z, rotY: snapshot.rotY };
       const prevX = entry.group.position.x;
       const prevZ = entry.group.position.z;
@@ -136,6 +163,13 @@ export class RemoteAvatars {
         const airborne = entry.gate.update(Math.abs(entry.vySmooth), deltaSeconds);
         updateHopVisual(entry.rig, 0, speed01, entry.hop, deltaSeconds, airborne);
       } else {
+        // Fresh kill: burst once at the last tracked position with the
+        // entry's identity color, then hide like before. Fires for players
+        // and bots alike, playing or spectating (particles render in both
+        // paths); removals (leave/reset) go through removeEntry, never here.
+        if (died && this.onRemoteDeath !== null) {
+          this.onRemoteDeath(lastX, lastY, lastZ, entry.color);
+        }
         // Dead and hidden: clear any residual bounce/glide for the respawn.
         resetHopState(entry.hop);
         resetHopVisual(entry.rig, 0);
@@ -188,6 +222,8 @@ export class RemoteAvatars {
       vySmooth: 0,
       prevY: snapshot.y,
       gate: new AirborneGate(),
+      color: shirt,
+      wasAlive: snapshot.alive,
     };
     return entry;
   }

@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   PLAYER_BODY_RADIUS,
+  RAMP_ENTRY_TOL,
   RAMP_LANE_CAPTURE_TOL,
   SERVER_OBSTACLES,
   SERVER_PLATFORMS,
+  SUPPORT_STICK_TOL,
 } from "./config.js";
+import { rampBandHeightAt } from "./hits.js";
 import { resolveGroundMove, resolvePlayerMove } from "./rooms/ArenaRoom.js";
 
 // Through-wall fix: authoritative per-axis XZ collision for humans + bots.
@@ -328,5 +331,85 @@ describe("resolveGroundMove airtightness fuzz (grounded)", () => {
     }
     expect(checked).toBeGreaterThan(10000);
     expect(violations).toBe(0);
+  });
+
+  it("ring-zone supported-band walks stay fully free (never clamp-hover stuck)", () => {
+    // Bug round 5, defect 1 companion: from every ring-zone position (inside
+    // the radius-expanded footprint, outside the strict one) with feet in the
+    // hysteresis stick band [top - SUPPORT_STICK_TOL, top], an 8-direction
+    // walk-step must pass through untouched — the mover is still supported on
+    // top there (groundSupport holds the expanded top), so the elevation gate
+    // must skip the solid instead of clamping/ejecting. Pre-fix the TOL
+    // window below EPS clamped or ejected (invisible wall at the footprint
+    // boundary). 1e-9 exactness: a skipped solid leaves the target
+    // bit-identical (scalar copy, no math), far above float dust and far
+    // below any real clamp (>= 0.05 shortfall to count as stuck).
+    expect(SUPPORT_STICK_TOL).toBe(0.05);
+    const solids: ReadonlyArray<{ x: number; z: number; hx: number; hz: number; topY: number }> = [
+      ...SERVER_OBSTACLES,
+      ...SERVER_PLATFORMS,
+    ];
+    const dirs: ReadonlyArray<readonly [number, number]> = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+      [1, 1],
+      [1, -1],
+      [-1, 1],
+      [-1, -1],
+    ];
+    const r = PLAYER_BODY_RADIUS;
+    let checked = 0;
+    let stuck = 0;
+    for (const solid of solids) {
+      for (const feetBelow of [0, 0.02, SUPPORT_STICK_TOL]) {
+        const feet = solid.topY - feetBelow;
+        for (
+          let gx = solid.x - solid.hx - r - 0.25;
+          gx <= solid.x + solid.hx + r + 0.25 + 1e-9;
+          gx += 0.25
+        ) {
+          for (
+            let gz = solid.z - solid.hz - r - 0.25;
+            gz <= solid.z + solid.hz + r + 0.25 + 1e-9;
+            gz += 0.25
+          ) {
+            const strictIn =
+              Math.abs(gx - solid.x) <= solid.hx && Math.abs(gz - solid.z) <= solid.hz;
+            const expandIn =
+              Math.abs(gx - solid.x) <= solid.hx + r && Math.abs(gz - solid.z) <= solid.hz + r;
+            if (strictIn || !expandIn) {
+              continue;
+            }
+            for (const [dx, dz] of dirs) {
+              const length = Math.hypot(dx, dz);
+              const tx = gx + (dx / length) * 0.225;
+              const tz = gz + (dz / length) * 0.225;
+              // Wedge-governed targets (stepping into another solid's ramp
+              // band below its surface) are held by design — bug A leak 2,
+              // pinned by the wedge-side block tests. The gate assertion
+              // below only covers targets the wedge lets through, so it
+              // isolates the round-5 gate behavior instead of re-pinning the
+              // wedge.
+              if (rampBandHeightAt(tx, tz) > feet + RAMP_ENTRY_TOL) {
+                continue;
+              }
+              const out = resolveGroundMove(gx, gz, tx, tz, r, feet);
+              checked += 1;
+              if (!Number.isFinite(out.x) || !Number.isFinite(out.z)) {
+                stuck += 1;
+                continue;
+              }
+              if (Math.abs(out.x - tx) > 1e-9 || Math.abs(out.z - tz) > 1e-9) {
+                stuck += 1;
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(10000);
+    expect(stuck).toBe(0);
   });
 });

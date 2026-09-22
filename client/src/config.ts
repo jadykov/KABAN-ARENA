@@ -12,6 +12,7 @@ import {
   ACCENT_DEATH_PALE,
   ACCENT_DEATH_RED,
   ACCENT_DEATH_WHITE,
+  HL_CHARTREUSE,
   HL_CHARTREUSE_CSS,
   IDENTITY_LOCAL,
   IDENTITY_REMOTES,
@@ -348,12 +349,23 @@ export const HANDBALL_OFFSET_Z = 0.1;
 // fade to this opacity from charge start until the actual shot/cancel.
 // Hit-flash emissive is independent of opacity, so it keeps working.
 export const AVATAR_CHARGE_OPACITY = 0.3;
-// Death burst palette (white 10% / pale violet 30% / muted red 60%).
-// Names kept for consumers; values live in palette.ts (scheme buckets).
+// Death burst (bug round 5: unmistakable shatter, never hit-blood): 80 pooled
+// particles (~2.7x the old 30), split white 10% / pale violet 30% / muted
+// red remainder / victim identity 15% / chartreuse 5% sparkle. The identity
+// chunk reuses the victim's fighter color (same mapping RemoteAvatars paints
+// bodies with) so the burst reads as THAT fighter; chartreuse is a 4-particle
+// transient glint, not a persistent highlight item. Bigger radial spread +
+// stronger upward pop than the hit-blood burst (16, all red, default
+// spread/up), slightly longer life (0.9s vs the shared 0.6s pool default).
+// 80 fits the 128-particle pool with headroom for a concurrent hit burst.
 export const DEATH_BURST_YELLOW = ACCENT_DEATH_WHITE;
 export const DEATH_BURST_ORANGE = ACCENT_DEATH_PALE;
 export const DEATH_BURST_RED = ACCENT_DEATH_RED;
-export const DEATH_BURST_COUNT = 30;
+export const DEATH_BURST_CHARTREUSE = HL_CHARTREUSE;
+export const DEATH_BURST_COUNT = 80;
+export const DEATH_BURST_SPREAD = 4.5;
+export const DEATH_BURST_UP = 4.5;
+export const DEATH_BURST_LIFE_S = 0.9;
 // Tap shorter than this never fires (touch blip, not a shot).
 export const TAP_FIRE_MIN_S = 0.08;
 // Chest-exit muzzle mirror of server BALL_MUZZLE_OFFSET (single constants:

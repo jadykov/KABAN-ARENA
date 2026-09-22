@@ -60,7 +60,9 @@ export class ParticlePool {
     color: THREE.Color,
     spread = 3,
     up = 2.5,
+    life = PARTICLE_LIFETIME_S,
   ): void {
+    const slotLife = Number.isFinite(life) && life > 0 ? life : PARTICLE_LIFETIME_S;
     for (let n = 0; n < count; n += 1) {
       const i = this.cursor;
       this.cursor = (this.cursor + 1) % this.capacity;
@@ -70,7 +72,7 @@ export class ParticlePool {
       this.velocities[i * 3] = (Math.random() - 0.5) * spread * 2;
       this.velocities[i * 3 + 1] = Math.random() * up + 1;
       this.velocities[i * 3 + 2] = (Math.random() - 0.5) * spread * 2;
-      this.life[i] = PARTICLE_LIFETIME_S;
+      this.life[i] = slotLife;
       const colorAttribute = this.geometry.getAttribute("color") as THREE.BufferAttribute;
       colorAttribute.setXYZ(i, color.r, color.g, color.b);
       colorAttribute.needsUpdate = true;
