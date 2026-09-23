@@ -32,8 +32,17 @@
   - `npm run dev` — client Vite `--host 0.0.0.0 --port 5173`; server `tsx --watch src/index.ts`.
 - Local URLs after compose up: client `http://localhost:5173/`, server health `http://localhost:2567/health`.
 - After any change: `npm run typecheck` + `lint` + `test` + `build`, then `docker compose up --build -d` and confirm client HTTP 200 + `/health {"ok":true}` (established session cadence, see `LOG.md`).
-- Server URL resolution: `VITE_SERVER_URL` env wins, else `ws://<page-host>:2567` (`client/src/config.ts:269-280`); server port from `PORT` env, default 2567 (`server/src/index.ts:24-31`).
+- Server URL resolution: `VITE_SERVER_URL` env wins, else `ws://<page-host>:2567` (`client/src/config.ts:269-280`); server port from `PORT` env, default 2567 (`server/src/index.ts:79-86`).
 - Ads: owner drops `fence-*.png/jpg` + `banner.png/jpg` into `client/assets/ads/`, synced to `public/ads` by `npm run sync-ads`, restart to pick up.
+
+## Production deploy (VPS)
+
+- Single container serves the game client (static `client/dist`) + the Colyseus server on one express port (2567); bundle dir is configurable via `KABAN_CLIENT_DIST` (default `/app/client/dist`, `server/src/index.ts`).
+- `Dockerfile.prod` (multi-stage: client build → server build → `node:20-alpine` runtime with prod deps only) and `docker-compose.prod.yml` (service `kaban-arena`, host ports `80:2567` + `2567:2567`, `restart: always`, no volumes) are the only deploy files; dev `docker-compose.yml` / `Dockerfile.client` / `Dockerfile.server` are untouched.
+- Build the image locally (the VPS is too small to build on): `docker build -f Dockerfile.prod -t kaban-arena:prod .`
+- Transfer + load on the server: `docker save kaban-arena:prod | gzip > kaban-arena-prod.tgz`, copy over, `docker load < kaban-arena-prod.tgz`.
+- Start: `docker compose -f docker-compose.prod.yml up -d --no-build` (`--no-build` fails loudly if the `kaban-arena:prod` image was not loaded — compose must use the prebuilt image, never silently build a different one on the VPS).
+- Verify: `http://<server-IP>/` serves the game, `http://<server-IP>/health` returns `{"ok":true}`; the client auto-connects to `ws://<server-IP>:2567`.
 
 ## Repo map
 

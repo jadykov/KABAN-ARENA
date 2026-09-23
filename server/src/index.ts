@@ -1,15 +1,70 @@
 import { createServer, type Server as HttpServer } from "http";
+import { statSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import express, { type Express } from "express";
 import { Server } from "colyseus";
 import { ArenaRoom } from "./rooms/ArenaRoom.js";
 
 export const DEFAULT_PORT = 2567;
 
+// Name of the env var pointing at the built client bundle served by the
+// production single-container image (see Dockerfile.prod).
+export const CLIENT_DIST_ENV_VAR = "KABAN_CLIENT_DIST";
+// Default client bundle location: `<repoRoot>/client/dist` resolved relative
+// to the compiled server output (`server/dist/index.js`). The prod image
+// keeps the same layout (`/app/server/dist` + `/app/client/dist`), so this
+// default is correct both for a local `server/dist` build and in production.
+export const DEFAULT_CLIENT_DIST_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../client/dist",
+);
+// Request prefixes owned by Colyseus (HTTP matchmaking) or by the API: the
+// SPA fallback must never swallow them — they keep the pre-static behavior
+// (express 404; Colyseus answers its own routes via its httpServer listener).
+const API_PATH_PREFIXES: ReadonlyArray<string> = ["/health", "/matchmake", "/colyseus"];
+
+export function resolveClientDistDir(): string | null {
+  const raw = process.env[CLIENT_DIST_ENV_VAR];
+  const dir = raw === undefined || raw === "" ? DEFAULT_CLIENT_DIST_DIR : raw;
+  try {
+    if (!statSync(dir).isDirectory()) {
+      return null;
+    }
+    if (!statSync(path.join(dir, "index.html")).isFile()) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  return dir;
+}
+
 export function createApp(): Express {
   const app: Express = express();
   app.get("/health", (_req, res): void => {
     res.json({ ok: true });
   });
+  // Static client bundle: no-op when the dir (or its index.html) is missing,
+  // so dev/test flows without a client build behave exactly as before.
+  const clientDist = resolveClientDistDir();
+  if (clientDist !== null) {
+    app.use(express.static(clientDist));
+    // SPA fallback: any non-API, extensionless path renders the client
+    // entry. Paths with a file extension that matched no static file (a
+    // missing asset) fall through to 404 instead of serving HTML as JS/CSS.
+    app.get("*", (req, res, next): void => {
+      if (API_PATH_PREFIXES.some((prefix) => req.path === prefix || req.path.startsWith(`${prefix}/`))) {
+        next();
+        return;
+      }
+      if (path.extname(req.path) !== "") {
+        next();
+        return;
+      }
+      res.sendFile(path.join(clientDist, "index.html"));
+    });
+  }
   return app;
 }
 

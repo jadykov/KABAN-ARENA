@@ -1,0 +1,18 @@
+# KABAN ARENA — production compose for the VPS deploy.
+# Single service: one container serves the game client (static) + the
+# Colyseus server on port 2567. No bind mounts — the image is self-contained
+# (built from Dockerfile.prod). Host port 80 lets players visit http://IP
+# directly; the client auto-connects to ws://IP:2567.
+services:
+  kaban-arena:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    image: kaban-arena:prod
+    container_name: kaban-arena
+    ports:
+      - "80:2567"
+      - "2567:2567"
+    environment:
+      - PORT=2567
+    restart: always

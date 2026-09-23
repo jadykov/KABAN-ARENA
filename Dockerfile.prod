@@ -1,0 +1,64 @@
+# KABAN ARENA — production single-container image.
+# Serves the built client (static) + the Colyseus server on one express port
+# (2567). Dev flow (Dockerfile.client / Dockerfile.server / docker-compose.yml)
+# is untouched; this file is only for the VPS deploy.
+# NOTE: node:20-alpine matches the existing dev Dockerfiles.
+
+# Stage 1: build the client bundle (produces client/dist).
+FROM node:20-alpine AS client-build
+
+WORKDIR /build
+
+# Install workspace deps first for layer caching.
+COPY package.json package-lock.json tsconfig.base.json tsconfig.json .eslintrc.json ./
+COPY client/package.json ./client/package.json
+COPY server/package.json ./server/package.json
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+
+COPY client/ ./client/
+COPY server/ ./server/
+RUN npm run build --workspace @kaban-arena/client
+
+# Stage 2: compile the server (produces server/dist).
+FROM node:20-alpine AS server-build
+
+WORKDIR /build
+
+COPY package.json package-lock.json tsconfig.base.json tsconfig.json .eslintrc.json ./
+COPY client/package.json ./client/package.json
+COPY server/package.json ./server/package.json
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+
+COPY server/ ./server/
+RUN npm run build --workspace @kaban-arena/server
+
+# Final stage: production runtime only — prod deps + compiled server +
+# client bundle. No dev dependencies, no sources.
+FROM node:20-alpine AS runtime
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=2567
+ENV KABAN_CLIENT_DIST=/app/client/dist
+
+COPY package.json package-lock.json ./
+COPY client/package.json ./client/package.json
+COPY server/package.json ./server/package.json
+# Server-only prod deps: the client bundle is prebuilt static output, so the
+# runtime never needs client prod deps (three, rapier wasm, colyseus.js).
+# `--workspace` scoping is supported by the npm 10 in node:20-alpine
+# (`npm ci --help` lists `-w|--workspace`).
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --workspace @kaban-arena/server --include-workspace-root --no-audit --no-fund
+
+COPY --from=server-build /build/server/dist ./server/dist
+# The server build compiles colocated *.test.ts next to runtime code (the dev
+# Dockerfile.server build is intentionally unchanged); drop test artifacts +
+# sourcemaps so the prod image ships runtime code only.
+RUN rm -f ./server/dist/*.test.js ./server/dist/*.test.d.ts ./server/dist/*.map \
+  ./server/dist/rooms/*.test.js ./server/dist/rooms/*.test.d.ts ./server/dist/rooms/*.map
+COPY --from=client-build /build/client/dist ./client/dist
+
+EXPOSE 2567
+
+CMD ["node", "server/dist/index.js"]
