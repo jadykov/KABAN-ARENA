@@ -1186,12 +1186,18 @@ describe("central towers (doubled topY intercepts mid-height shots)", () => {
     );
   });
 
-  it("a flat full-power shot down the central lane dies on the tower (<=8 ticks)", async () => {
+  it("a flat full-power shot down the central lane reflects off the tower side (ricochet, stays live)", async () => {
     // Muzzle y is 1.4 (body 1.1 + torso 0.3): above the OLD top 1.0 (used to
-    // fly over) but below the NEW top 2.0, so the doubled tower must
-    // intercept (y ~= 1.5 at the footprint). Wall/ground impact needs ~16
-    // ticks, so death within 8 ticks pins the tower as the killer. Godmode
-    // + off-lane parking rule out victim hits; bots are removed.
+    // fly over) but below the NEW top 2.0, so the doubled tower intercepts
+    // (y ~= 1.5 at the footprint). Owner spec: "miss into wall/obstacle =
+    // ricochet" — the arrival at the -z SIDE face is mostly horizontal, so
+    // the ball REFLECTS. The substepped flight (BALL_STEP_MAX_M) samples the
+    // thin side-entry band first; the old 1m/step flight tunneled past it
+    // and sampled deep inside, where the top penetration is shallowest, and
+    // wrongly SETTLED on the tower top (that expectation was the tunneling
+    // bug, now fixed). Wall/ground impact needs ~16 ticks, so the tower
+    // reflection within 8 ticks pins the tower as the interceptor.
+    // Godmode + off-lane parking rule out victim hits; bots are removed.
     const room = await playingRoom();
     removeBots(room);
     room.state.players.forEach((player: PlayerState): void => {
@@ -1211,11 +1217,29 @@ describe("central towers (doubled topY intercepts mid-height shots)", () => {
     // through the (4.8, 4.8) tower footprint.
     fireAs(room, "s1", { power01: 1, yaw: Math.PI, pitch: 0.05, super: false });
     expect(room.state.balls.size).toBe(1);
+    let bounced = false;
     for (let i = 0; i < 8; i += 1) {
       advance(room, 50);
       room.tickRoom(50);
+      room.state.balls.forEach((ball): void => {
+        if (ball.ricochet) {
+          bounced = true;
+        }
+      });
+      if (bounced) {
+        break;
+      }
     }
-    expect(room.state.balls.size).toBe(0);
+    expect(bounced).toBe(true);
+    expect(room.state.balls.size).toBe(1);
+    let reflected = false;
+    room.state.balls.forEach((ball): void => {
+      // Ricocheted off the side face: flagged, still flying (never settled),
+      // z axis flipped (heads back -Z), never climbed onto the top.
+      reflected =
+        ball.ricochet === true && ball.resting === false && ball.settleMs === 0 && ball.vz < 0 && ball.y < 2.0;
+    });
+    expect(reflected).toBe(true);
     expect(target.hp).toBe(100);
     expect(shooter.hp).toBe(100);
   });
@@ -1576,7 +1600,7 @@ describe("server elevation (tower tops walkable, ground impenetrable)", () => {
     expect(target.hp).toBe(75);
   });
 
-  it("AC3 control: a sub-top ball into the wall despawns, victim unharmed", async () => {
+  it("AC3 control: a sub-top ball ricochets off the tower side, victim unharmed", async () => {
     const room = await playingRoom();
     const { shooter, target } = isolateDuel(room);
     shooter.x = 1.0;
@@ -1588,13 +1612,50 @@ describe("server elevation (tower tops walkable, ground impenetrable)", () => {
     target.y = 3.1;
     target.hp = 100;
     // Flat ground shot +X into the tower wall (muzzle 1.4 < top 2.0).
+    // Owner spec: "miss into wall/obstacle = ricochet" — the substepped
+    // flight samples the -x side-entry band first and REFLECTS (the old
+    // 1m/step flight tunneled past it and wrongly SETTLED on the tower top).
+    // The tower-top victim beside the bounce spot is unharmed (dy ~1.7m
+    // exceeds the 0.9m hit radius); the shooter is unharmed too because
+    // post-ricochet victim bounces never damage (the return lane runs
+    // straight back at the shooter, so this pins the harmless-bounce path).
     fireAs(room, "s1", { power01: 1, yaw: -Math.PI / 2, pitch: 0, super: false, throwerY: 1.1 });
     expect(room.state.balls.size).toBe(1);
-    for (let i = 0; i < 20 && room.state.balls.size > 0; i += 1) {
+    let bounced = false;
+    for (let i = 0; i < 6; i += 1) {
+      advance(room, 50);
+      room.tickRoom(50);
+      room.state.balls.forEach((ball): void => {
+        if (ball.ricochet) {
+          bounced = true;
+        }
+      });
+      if (bounced) {
+        break;
+      }
+    }
+    expect(bounced).toBe(true);
+    // Right after the side reflection: flagged, still flying (never
+    // settled), x axis flipped (heads back -X), never climbed onto the top.
+    let reflected = false;
+    room.state.balls.forEach((ball): void => {
+      reflected =
+        ball.ricochet === true && ball.resting === false && ball.settleMs === 0 && ball.vx < 0 && ball.y < 2.0;
+    });
+    expect(reflected).toBe(true);
+    // The ping-pong tail (tower -> shooter bounce -> tower -> eventual floor
+    // settle) never damages and never despawns the ball.
+    for (let i = 0; i < 14; i += 1) {
       advance(room, 50);
       room.tickRoom(50);
     }
-    expect(room.state.balls.size).toBe(0);
+    expect(room.state.balls.size).toBe(1);
+    room.state.balls.forEach((ball): void => {
+      expect(ball.ricochet).toBe(true);
+      // Never parked on the tower top: still flying the lanes or settling on
+      // the floor after the bounces (y only ever descends from 1.4).
+      expect(ball.y).toBeLessThan(2.0);
+    });
     expect(target.hp).toBe(100);
     expect(shooter.hp).toBe(100);
   });
@@ -1721,9 +1782,14 @@ describe("ball-hit-player broadcast (blood only on player damage)", () => {
     expect(Math.abs((hy as number) - 1.1)).toBeLessThanOrEqual(0.9);
   });
 
-  it("tower/block impact broadcasts nothing", async () => {
+  it("tower/block side impact ricochets and broadcasts nothing", async () => {
     // Same flat lane as the central-tower test: the doubled (4.8, 4.8) tower
-    // intercepts, and godmode rules out victim hits — pure block death.
+    // intercepts, and godmode rules out victim hits. The mostly horizontal
+    // arrival at the SIDE face REFLECTS (substepped entry-face sampling);
+    // the old 1m/step flight tunneled into a settle on the top (that
+    // expectation was the tunneling bug, now fixed). Either way the wire
+    // stays silent (ricochet/settle/rest never broadcast; only the
+    // player-damage path does).
     const room = await playingRoom();
     removeBots(room);
     room.state.players.forEach((player: PlayerState): void => {
@@ -1742,17 +1808,34 @@ describe("ball-hit-player broadcast (blood only on player damage)", () => {
     const captured = captureBroadcasts(room);
     fireAs(room, "s1", { power01: 1, yaw: Math.PI, pitch: 0.05, super: false });
     expect(room.state.balls.size).toBe(1);
+    let bounced = false;
     for (let i = 0; i < 8; i += 1) {
       advance(room, 50);
       room.tickRoom(50);
+      room.state.balls.forEach((ball): void => {
+        if (ball.ricochet) {
+          bounced = true;
+        }
+      });
+      if (bounced) {
+        break;
+      }
     }
-    expect(room.state.balls.size).toBe(0);
+    expect(bounced).toBe(true);
+    expect(room.state.balls.size).toBe(1);
+    let reflected = false;
+    room.state.balls.forEach((ball): void => {
+      reflected = ball.ricochet === true && ball.resting === false && ball.settleMs === 0 && ball.vz < 0;
+    });
+    expect(reflected).toBe(true);
     expect(hitMessages(captured)).toHaveLength(0);
   });
 
-  it("ground/boundary impact broadcasts nothing", async () => {
-    // Open x=0 lane: the flat shot clears the low outer cube and dies on the
-    // far boundary — no victim anywhere near the flight line.
+  it("ground/boundary impact broadcasts nothing (boundary now ricochets)", async () => {
+    // Open x=0 lane: the flat shot clears the low outer cube and ricochets
+    // off the far boundary — no victim anywhere near the flight line.
+    // Stage 4d.4: the wall reflects instead of despawning, so the ball stays
+    // live; the broadcast assertion is unchanged (env contacts stay silent).
     const room = await playingRoom();
     removeBots(room);
     room.state.players.forEach((player: PlayerState): void => {
@@ -1775,7 +1858,12 @@ describe("ball-hit-player broadcast (blood only on player damage)", () => {
       advance(room, 50);
       room.tickRoom(50);
     }
-    expect(room.state.balls.size).toBe(0);
+    expect(room.state.balls.size).toBe(1);
+    let reflected = false;
+    room.state.balls.forEach((ball): void => {
+      reflected = ball.ricochet === true;
+    });
+    expect(reflected).toBe(true);
     expect(target.hp).toBe(100);
     expect(shooter.hp).toBe(100);
     expect(hitMessages(captured)).toHaveLength(0);

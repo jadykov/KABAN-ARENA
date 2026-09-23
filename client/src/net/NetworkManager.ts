@@ -93,6 +93,8 @@ interface WireBall {
   z?: unknown;
   power01?: unknown;
   super?: unknown;
+  ricochet?: unknown;
+  resting?: unknown;
 }
 
 interface WireBalls {
@@ -157,6 +159,8 @@ export function decodeSnapshot(state: unknown, selfId: string | null = null): Ro
         power01: toNumber(ball.power01, 0.5),
         super: toBoolean(ball.super),
         color: ownerColorForSession(ownerId, selfId),
+        ricochet: toBoolean(ball.ricochet),
+        resting: toBoolean(ball.resting),
       });
     });
   } catch {

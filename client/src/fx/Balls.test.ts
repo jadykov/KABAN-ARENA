@@ -19,7 +19,7 @@ import {
 } from "./Balls";
 
 function makeBall(ballId: string, superShot: boolean, color: number = BALL_CAP_COLOR): NetBallSnapshot {
-  return { ballId, ownerId: "owner", x: 1, y: 1.4, z: 2, power01: 1, super: superShot, color };
+  return { ballId, ownerId: "owner", x: 1, y: 1.4, z: 2, power01: 1, super: superShot, color, ricochet: false, resting: false };
 }
 
 function makeBallAt(
@@ -29,7 +29,7 @@ function makeBallAt(
   z = 0,
   color: number = BALL_CAP_COLOR,
 ): NetBallSnapshot {
-  return { ballId, ownerId: "owner", x, y, z, power01: 1, super: false, color };
+  return { ballId, ownerId: "owner", x, y, z, power01: 1, super: false, color, ricochet: false, resting: false };
 }
 
 function ballGroups(scene: THREE.Scene): THREE.Group[] {
@@ -317,6 +317,42 @@ describe("BallsPool impact differentiation (blood only on player damage)", () =>
       pool.render([]);
       pool.update(1 / 60);
       expect(puffSprites(scene).filter((sprite) => sprite.visible).length).toBeGreaterThan(0);
+    } finally {
+      pool.dispose();
+    }
+  });
+});
+
+// Stage 4d.4 (resting balls lie on the ground): the pool renders the
+// authoritative y verbatim through the existing lerp/snap — no offset clamp,
+// no new visuals. A resting core at ground height (ball radius 0.38) must sit
+// exactly there, pinned across follow-up snapshots.
+describe("BallsPool resting balls (ground y, no offset clamp)", () => {
+  it("renders a resting ball at ground y and keeps it pinned", () => {
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      const resting: NetBallSnapshot = {
+        ballId: "rest",
+        ownerId: "owner",
+        x: 1,
+        y: 0.38,
+        z: 2,
+        power01: 0.5,
+        super: false,
+        color: BALL_CAP_COLOR,
+        ricochet: false,
+        resting: true,
+      };
+      pool.render([resting]);
+      const visible = ballGroups(scene).filter((group) => group.visible);
+      expect(visible).toHaveLength(1);
+      // New ids snap once to the authoritative position — ground y verbatim.
+      expect(visible[0]?.position.y).toBeCloseTo(0.38, 9);
+      // Follow-up snapshots ease in XZ without lifting y off the ground.
+      pool.render([{ ...resting, x: 1.05 }]);
+      pool.update(1 / 60);
+      expect(visible[0]?.position.y).toBeCloseTo(0.38, 2);
     } finally {
       pool.dispose();
     }

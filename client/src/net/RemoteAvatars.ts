@@ -21,9 +21,10 @@ import {
   type AvatarVisualsHandle,
   type HopState,
 } from "../fx/AvatarVisuals";
+import { HitFlash } from "../fx/CameraShake";
 import { RemoteTrack, type RemoteTarget } from "./interpolation";
 import { paletteForSession, type NetPlayerSnapshot } from "./protocol";
-import { NEUTRAL_WHITE, NEUTRAL_WHITE_CSS } from "../palette";
+import { ACCENT_HIT_FLASH, NEUTRAL_WHITE, NEUTRAL_WHITE_CSS } from "../palette";
 
 export { paletteForSession as paletteFor };
 
@@ -63,6 +64,13 @@ interface RemoteEntry {
   visuals: AvatarVisualsHandle;
   track: RemoteTrack;
   hop: HopState;
+  // Per-remote victim hit-flash (Stage 4d.4): own HitFlash timer ticked in
+  // sync() against the body's material (emissive ACCENT_HIT_FLASH, 2.5 -> 0
+  // over 0.18s — the same wiring as the local avatar). Scalar only, zero
+  // per-frame allocs; vertex-colored clothing is unaffected (emissive is
+  // independent of diffuse).
+  flash: HitFlash;
+  material: THREE.MeshStandardMaterial;
   // Airborne estimator: the eased Y trail's vertical speed, damped so a
   // single snapshot jitter never flips the flight gate. The server now
   // replicates body height every tick (grounded derivation + trampoline
@@ -134,6 +142,10 @@ export class RemoteAvatars {
       // Idle hold bob on the remote hand-ball (no charge data replicates, so
       // remotes never swell/flick — local-only anims stay in SceneManager).
       entry.visuals.update(deltaSeconds);
+      // Victim hit-flash tick (Stage 4d.4): fades a triggered flash back to
+      // emissiveIntensity 0 over 0.18s; idle entries rewrite 0 (scalar, no
+      // alloc). Runs for dead entries too so a lethal hit still fades out.
+      entry.flash.update(deltaSeconds, entry.material);
       // Death-burst edge (bug round 5): capture the last tracked position
       // BEFORE easing toward the new snapshot — a death snapshot carries no
       // meaningful position; the avatar was last seen alive HERE. Self never
@@ -190,9 +202,17 @@ export class RemoteAvatars {
     // Per-entry geometry clone: two-tone clothing is baked as vertex colors,
     // which a shared geometry could never carry per player. Base material is
     // white (identity comes from the vertex colors); disposed with the entry.
+    // Emissive is the shared hit-flash red at rest intensity 0 (same wiring
+    // as the local avatar in SceneManager) so flashVictim can spike it.
     const geometry = this.templateGeometry.clone();
     const shirt = paletteForSession(snapshot.sessionId);
-    const material = new THREE.MeshStandardMaterial({ color: NEUTRAL_WHITE, roughness: 0.6, vertexColors: true });
+    const material = new THREE.MeshStandardMaterial({
+      color: NEUTRAL_WHITE,
+      emissive: ACCENT_HIT_FLASH,
+      emissiveIntensity: 0,
+      roughness: 0.6,
+      vertexColors: true,
+    });
     const body = new THREE.Mesh(geometry, material);
     body.castShadow = false;
     // Rig carries every visual (body, ball, face) so the hop bounce never
@@ -219,6 +239,8 @@ export class RemoteAvatars {
       visuals,
       track: new RemoteTrack(snapshot.x, snapshot.y, snapshot.z, snapshot.rotY),
       hop: createHopState(snapshot.sessionId),
+      flash: new HitFlash(),
+      material,
       vySmooth: 0,
       prevY: snapshot.y,
       gate: new AirborneGate(),
@@ -226,6 +248,17 @@ export class RemoteAvatars {
       wasAlive: snapshot.alive,
     };
     return entry;
+  }
+
+  // Remote victim hit-flash (Stage 4d.4): spikes THAT remote's body emissive
+  // (visible to all viewers — the flash lives on the replicated avatar, not
+  // on the local camera). Unknown ids are a no-op (leave/reset races).
+  public flashVictim(sessionId: string): void {
+    const entry = this.entries.get(sessionId);
+    if (entry === undefined) {
+      return;
+    }
+    entry.flash.trigger();
   }
 
   private removeEntry(sessionId: string, entry: RemoteEntry): void {

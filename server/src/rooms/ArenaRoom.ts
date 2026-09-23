@@ -5,6 +5,10 @@ import {
   BALL_GROUND_Y,
   BALL_HIT_RADIUS,
   BALL_HIT_PLAYER_MESSAGE,
+  BALL_RADIUS,
+  BALL_SETTLE_DAMP_RATE,
+  BALL_SETTLE_TIME_MS,
+  BALL_STEP_MAX_M,
   BODY_CENTER_Y,
   BOT_NAMES,
   BOT_SPEED,
@@ -52,6 +56,7 @@ import {
   bodyCenterYAtExpanded,
   canDamage,
   damageForPower,
+  describeBallSurface,
   groundTopAt,
   isOnTrampolinePad,
   muzzleForShot,
@@ -64,6 +69,7 @@ import {
   sanitizeNick,
   sanitizeThrowerY,
   trampolineArcY,
+  type BallContact,
 } from "../hits.js";
 import { ArenaState, BallState, PlayerState, type RoundPhase } from "../state.js";
 // Re-exported for unit-test compat (layout data now lives in config).
@@ -482,6 +488,9 @@ export class ArenaRoom extends Room<ArenaState> {
   private readonly airSince = new Map<string, number>();
   private botCounter = 0;
   private ballCounter = 0;
+  // Scratch ball-surface contact (Stage 4d.4): reused as the describeBallSurface
+  // out-param every ball tick, so the surface path allocates nothing per tick.
+  private readonly scratchContact: BallContact = { kind: "none", axis: null, face: 0, restY: 0 };
   private countdownEndsAt = 0;
   private roundEndsAt = 0;
   private playingStartedAt = 0;
@@ -712,6 +721,8 @@ export class ArenaRoom extends Room<ArenaState> {
     });
     this.respawnAt.clear();
     this.airSince.clear();
+    // Fresh round: all balls go, including ricocheted/settling/resting ones —
+    // rest state lives on BallState itself, so clear() leaks nothing.
     this.state.balls.clear();
     this.ballCounter = 0;
     this.state.superActive = false;
@@ -752,6 +763,8 @@ export class ArenaRoom extends Room<ArenaState> {
     this.state.countdownMs = 0;
     this.respawnAt.clear();
     this.airSince.clear();
+    // Rematch reset: same full clear as round start — no resting ball or
+    // settle timer leaks across rounds.
     this.state.balls.clear();
     this.state.superActive = false;
     this.state.superNextAt = 0;
@@ -854,6 +867,10 @@ export class ArenaRoom extends Room<ArenaState> {
     if (!shooter.alive || !shooter.ready || shooter.spectator) {
       return null;
     }
+    // Stage 4d.4 resting cores: the thrower's next shot despawns his resting
+    // ball (humans and bots share this path). Firing frees the slot first so
+    // the new ball never evicts a stranger's live ball on a full pool.
+    this.despawnRestingBallsOf(shooter.sessionId);
     this.ballCounter += 1;
     const finalYaw = yaw;
     const speed = powerToSpeed(power01);
@@ -897,6 +914,10 @@ export class ArenaRoom extends Room<ArenaState> {
     ball.super = superShot;
     ball.ageMs = 0;
     ball.distM = 0;
+    ball.ricochet = false;
+    ball.resting = false;
+    ball.settleMs = 0;
+    ball.restY = 0;
     this.state.balls.set(ball.ballId, ball);
     // Perf cap: max 12 live balls server-side, oldest despawns first.
     if (this.state.balls.size > MAX_LIVE_BALLS) {
@@ -916,12 +937,29 @@ export class ArenaRoom extends Room<ArenaState> {
     return ball;
   }
 
-  // Authoritative ball step: gravity arc, ground/wall/block impact despawn,
-  // player hits (radius ~0.9, self-damage armed after 1m / 0.3s), damage to
-  // ALL incl. self + knockback impulse. Kill/respawn/killfeed reuse existing.
+  // Authoritative ball step (Stage 4d.4): gravity arc, substepped flight
+  // (each tick move is split into BALL_STEP_MAX_M substeps so the ENTRY face
+  // is sampled before deep-penetration misclassification — no tunneling past
+  // thin side-entry bands), ricochet/settle contacts, player hits (radius
+  // ~0.9, self-damage armed after 1m / 0.3s), damage to ALL incl. self +
+  // knockback impulse. Kill/respawn/killfeed reuse existing paths.
+  // - Resting balls: purely decorative — aged (so pool overflow evicts
+  //   oldest-first, resting included) but never moved or damage-checked.
+  // - Settling balls: velocity damps exponentially over BALL_SETTLE_TIME_MS
+  //   (~0.4s slide pinned at restY), then resting=true with velocity 0.
+  // - Normal flying balls: vertical surfaces (boundary walls, sheer
+  //   obstacle/platform sides) REFLECT on the hit axis (ricochet=true, no
+  //   damage ever after); floor/up-facing tops ENTER SETTLE. SUPER balls
+  //   despawn on first environmental contact, exactly as before.
+  // - Ricochet balls reaching a player bounce off (velocity reflected away,
+  //   no damage/knockback/broadcast); pre-ricochet direct hits damage, knock
+  //   back, broadcast, and despawn exactly as before.
   // First-tick hold: a newborn ball (prevAge < PATCH_RATE_MS) is aged but NOT
   // integrated until the next tick, so the first patched frame still sits at
   // the muzzle instead of 0.7-1m downrange (pre-patch teleport fix).
+  // Scratch contact (describeBallSurface out-param) is a room-owned field —
+  // no per-tick allocation on the surface path. The dead-id list + forEach
+  // closures are the same pre-existing per-tick shapes as before.
   private stepBalls(now: number, dt: number): void {
     const dead: string[] = [];
     this.state.balls.forEach((ball: BallState, ballId: string): void => {
@@ -930,58 +968,96 @@ export class ArenaRoom extends Room<ArenaState> {
       if (prevAge < PATCH_RATE_MS) {
         return;
       }
+      if (ball.resting) {
+        return;
+      }
+      if (ball.settleMs > 0) {
+        this.slideSettlingBall(ball, dt);
+        ball.settleMs += dt * 1000;
+        if (ball.settleMs >= BALL_SETTLE_TIME_MS) {
+          ball.vx = 0;
+          ball.vy = 0;
+          ball.vz = 0;
+          // Final re-snap: the slide may have carried the ball off its entry
+          // surface (tower edge, block side) on this last sub-step — pin y at
+          // the TRUE support under the final xz, never the stale entry restY.
+          ball.restY = Math.max(BALL_GROUND_Y, groundTopAt(ball.x, ball.z)) + BALL_RADIUS;
+          ball.y = ball.restY;
+          ball.settleMs = 0;
+          ball.resting = true;
+          this.enforceRestingCap(ball);
+        }
+        return;
+      }
       ball.vy -= BALL_GRAVITY * dt;
       const stepX = ball.vx * dt;
       const stepY = ball.vy * dt;
       const stepZ = ball.vz * dt;
-      ball.x += stepX;
-      ball.y += stepY;
-      ball.z += stepZ;
-      ball.distM += Math.hypot(stepX, stepY, stepZ);
-      if (ball.y <= BALL_GROUND_Y || Math.abs(ball.x) > ARENA_HALF_SIZE || Math.abs(ball.z) > ARENA_HALF_SIZE) {
-        dead.push(ballId);
-        return;
+      // Tunneling guard: subdivide the ~1m tick step into straight substeps
+      // no longer than BALL_STEP_MAX_M, sampling the surface/victim contact
+      // at every substep point so the ENTRY face is detected before
+      // deep-penetration misclassification (see the config rationale). Each
+      // substep integrates the LIVE velocity (re-read every substep over a
+      // fixed subDt), so a mid-tick reflection or victim bounce redirects
+      // the REMAINING substeps — precomputing the increments once per tick
+      // is wrong here (the stale increment marches the ball back across the
+      // face it just bounced off: wall pin + flip-flop instead of flight).
+      // Scalar math only, no allocation; the substep count is bounded (<= 5
+      // even at max speed with falling vy), so per-tick work stays trivial.
+      const stepLen = Math.sqrt(stepX * stepX + stepY * stepY + stepZ * stepZ);
+      let subCount = Math.ceil(stepLen / BALL_STEP_MAX_M);
+      if (!(subCount >= 1)) {
+        subCount = 1;
       }
-      if (this.hitsBlock(ball.x, ball.y, ball.z)) {
-        dead.push(ballId);
-        return;
-      }
-      const victim = this.findBallVictim(ball);
-      if (victim !== null) {
-        const shooter = this.state.players.get(ball.ownerId);
-        const damage = damageForPower(ball.power01, ball.super);
-        if (shooter !== undefined) {
-          const result = applyHit(shooter, victim, now, damage);
-          this.applyKnockback(victim, ball);
-          if (result.killed) {
-            victim.superBuff = false;
-            this.respawnAt.set(victim.sessionId, now + RESPAWN_DELAY_MS);
-            this.broadcast("killfeed", { message: `${shooter.nick} fragged ${victim.nick}` });
-          }
-        } else {
-          // Owner left mid-flight: still damage the victim, no scorer.
-          victim.hp = Math.max(0, victim.hp - damage);
-          this.applyKnockback(victim, ball);
-          if (victim.hp <= 0) {
-            victim.alive = false;
-            victim.hp = 0;
-            victim.superBuff = false;
-            this.respawnAt.set(victim.sessionId, now + RESPAWN_DELAY_MS);
-          }
+      const subDt = dt / subCount;
+      for (let sub = 0; sub < subCount; sub += 1) {
+        const moveX = ball.vx * subDt;
+        const moveY = ball.vy * subDt;
+        const moveZ = ball.vz * subDt;
+        ball.x += moveX;
+        ball.y += moveY;
+        ball.z += moveZ;
+        ball.distM += Math.sqrt(moveX * moveX + moveY * moveY + moveZ * moveZ);
+        if (this.collideBoundaryWalls(ball)) {
+          dead.push(ballId);
+          return;
         }
-        // Blood-FX trigger: damage registered on a player — clients show the
-        // red hit burst ONLY for this event. Environmental deaths (boundary,
-        // block, pool overflow) broadcast nothing. Position is the ball spot
-        // at hit (post-integration); payload stays minimal (ids + position).
-        this.broadcast(BALL_HIT_PLAYER_MESSAGE, {
-          ballId,
-          victimId: victim.sessionId,
-          x: ball.x,
-          y: ball.y,
-          z: ball.z,
-          super: ball.super,
-        });
-        dead.push(ballId);
+        const contact = describeBallSurface(ball.x, ball.y, ball.z, ball.vx, ball.vz, this.scratchContact);
+        if (contact.kind === "vertical") {
+          if (ball.super) {
+            dead.push(ballId);
+            return;
+          }
+          if (contact.axis === "x") {
+            ball.x = contact.face;
+            ball.vx = -ball.vx;
+          } else {
+            ball.z = contact.face;
+            ball.vz = -ball.vz;
+          }
+          ball.ricochet = true;
+        } else if (contact.kind === "up") {
+          if (ball.super) {
+            dead.push(ballId);
+            return;
+          }
+          this.enterSettle(ball, contact.restY, dt);
+          return;
+        }
+        const victim = this.findBallVictim(ball);
+        if (victim !== null) {
+          if (ball.super || !ball.ricochet) {
+            this.damageVictim(ball, victim, ballId, now);
+            dead.push(ballId);
+            return;
+          }
+          // Bounced balls never damage: simple bounce away from the victim
+          // (~0.9m sphere via findBallVictim) — no damage, no knockback push
+          // on the victim, no victim flash (no broadcast). Idempotent: the
+          // velocity points away, so repeat contacts keep the same vector
+          // until the ball leaves the radius.
+          this.bounceBallOffVictim(ball, victim);
+        }
       }
     });
     for (const ballId of dead) {
@@ -989,21 +1065,174 @@ export class ArenaRoom extends Room<ArenaState> {
     }
   }
 
-  private hitsBlock(x: number, y: number, z: number): boolean {
-    for (const block of SERVER_OBSTACLES) {
-      if (Math.abs(x - block.x) <= block.hx && Math.abs(z - block.z) <= block.hz && y <= block.topY) {
-        return true;
+  // Arena boundary walls (±ARENA_HALF_SIZE): SUPER balls despawn on first
+  // contact (returns true); normal balls clamp + reflect per crossed axis
+  // (ricochet=true) and keep flying (returns false). Scalar, no allocation.
+  private collideBoundaryWalls(ball: BallState): boolean {
+    let hit = false;
+    if (ball.x > ARENA_HALF_SIZE) {
+      ball.x = ARENA_HALF_SIZE;
+      if (!ball.super) {
+        ball.vx = -ball.vx;
+        ball.ricochet = true;
+      }
+      hit = true;
+    } else if (ball.x < -ARENA_HALF_SIZE) {
+      ball.x = -ARENA_HALF_SIZE;
+      if (!ball.super) {
+        ball.vx = -ball.vx;
+        ball.ricochet = true;
+      }
+      hit = true;
+    }
+    if (ball.z > ARENA_HALF_SIZE) {
+      ball.z = ARENA_HALF_SIZE;
+      if (!ball.super) {
+        ball.vz = -ball.vz;
+        ball.ricochet = true;
+      }
+      hit = true;
+    } else if (ball.z < -ARENA_HALF_SIZE) {
+      ball.z = -ARENA_HALF_SIZE;
+      if (!ball.super) {
+        ball.vz = -ball.vz;
+        ball.ricochet = true;
+      }
+      hit = true;
+    }
+    return hit && ball.super;
+  }
+
+  // Settle entry: pin y at the surface rest height, kill vertical motion, run
+  // the first slide sub-step immediately so settleMs always holds real elapsed
+  // time (never a magic epsilon marker).
+  private enterSettle(ball: BallState, restY: number, dt: number): void {
+    ball.restY = Number.isFinite(restY) ? restY : ball.y;
+    ball.vy = 0;
+    ball.y = ball.restY;
+    this.slideSettlingBall(ball, dt);
+    ball.settleMs = dt * 1000;
+  }
+
+  // One settling sub-step: exponential velocity damp (rate
+  // BALL_SETTLE_DAMP_RATE), planar slide, y glued to the live support height,
+  // arena-clamped (a slide into the boundary stops on that axis instead of
+  // tunneling or bouncing — settling balls never ricochet). The support is
+  // re-snapped every sub-step (Math.max(BALL_GROUND_Y, groundTopAt) +
+  // BALL_RADIUS): a slide off a tower/block edge drops the ball to the true
+  // surface below instead of hovering, and a floor slide into a block
+  // footprint climbs onto the block top instead of resting embedded inside
+  // the solid. Scalar, no allocation.
+  private slideSettlingBall(ball: BallState, dt: number): void {
+    const damp = Math.exp(-BALL_SETTLE_DAMP_RATE * dt);
+    ball.vx *= damp;
+    ball.vz *= damp;
+    ball.x += ball.vx * dt;
+    ball.z += ball.vz * dt;
+    if (ball.x > ARENA_HALF_SIZE) {
+      ball.x = ARENA_HALF_SIZE;
+      ball.vx = 0;
+    } else if (ball.x < -ARENA_HALF_SIZE) {
+      ball.x = -ARENA_HALF_SIZE;
+      ball.vx = 0;
+    }
+    if (ball.z > ARENA_HALF_SIZE) {
+      ball.z = ARENA_HALF_SIZE;
+      ball.vz = 0;
+    } else if (ball.z < -ARENA_HALF_SIZE) {
+      ball.z = -ARENA_HALF_SIZE;
+      ball.vz = 0;
+    }
+    ball.restY = Math.max(BALL_GROUND_Y, groundTopAt(ball.x, ball.z)) + BALL_RADIUS;
+    ball.y = ball.restY;
+  }
+
+  // Per-owner resting cap (Stage 4d.4 3Б): at most ONE resting ball per
+  // thrower — when a ball comes to rest, an older resting ball of the same
+  // owner despawns. Rare event path (not per-tick hot), single-id local.
+  private enforceRestingCap(rested: BallState): void {
+    let olderId: string | null = null;
+    this.state.balls.forEach((entry: BallState, key: string): void => {
+      if (key !== rested.ballId && entry.resting && entry.ownerId === rested.ownerId) {
+        olderId = key;
+      }
+    });
+    if (olderId !== null) {
+      this.state.balls.delete(olderId);
+    }
+  }
+
+  // Thrower's next shot clears his resting ball (hooked in spawnBall, so
+  // humans and bots share it). Single-id local, no allocation.
+  private despawnRestingBallsOf(ownerId: string): void {
+    let restingId: string | null = null;
+    this.state.balls.forEach((entry: BallState, key: string): void => {
+      if (entry.resting && entry.ownerId === ownerId) {
+        restingId = key;
+      }
+    });
+    if (restingId !== null) {
+      this.state.balls.delete(restingId);
+    }
+  }
+
+  // Ricochet bounce off a victim: horizontal velocity points radially away
+  // from the victim with its magnitude preserved (speed kept, direction out);
+  // vertical motion is untouched. Degenerate overlap (exact coincidence or
+  // zero planar speed) falls back to a plain axis flip. Scalar, no allocation.
+  private bounceBallOffVictim(ball: BallState, victim: PlayerState): void {
+    const dx = ball.x - victim.x;
+    const dz = ball.z - victim.z;
+    const dist = Math.hypot(dx, dz);
+    const speedH = Math.hypot(ball.vx, ball.vz);
+    if (!(dist > 0) || !(speedH > 0)) {
+      ball.vx = -ball.vx;
+      ball.vz = -ball.vz;
+      return;
+    }
+    ball.vx = (dx / dist) * speedH;
+    ball.vz = (dz / dist) * speedH;
+  }
+
+  // Pre-ricochet direct hit (unchanged damage model): FULL 25 / WEAK 12.5
+  // (SUPER x2), knockback impulse, kill/respawn/killfeed, plus the
+  // BALL_HIT_PLAYER_MESSAGE blood-FX broadcast (ids + impact position).
+  // Owner-left mid-flight still damages with no scorer.
+  private damageVictim(ball: BallState, victim: PlayerState, ballId: string, now: number): void {
+    const shooter = this.state.players.get(ball.ownerId);
+    const damage = damageForPower(ball.power01, ball.super);
+    if (shooter !== undefined) {
+      const result = applyHit(shooter, victim, now, damage);
+      this.applyKnockback(victim, ball);
+      if (result.killed) {
+        victim.superBuff = false;
+        this.respawnAt.set(victim.sessionId, now + RESPAWN_DELAY_MS);
+        this.broadcast("killfeed", { message: `${shooter.nick} fragged ${victim.nick}` });
+      }
+    } else {
+      // Owner left mid-flight: still damage the victim, no scorer.
+      victim.hp = Math.max(0, victim.hp - damage);
+      this.applyKnockback(victim, ball);
+      if (victim.hp <= 0) {
+        victim.alive = false;
+        victim.hp = 0;
+        victim.superBuff = false;
+        this.respawnAt.set(victim.sessionId, now + RESPAWN_DELAY_MS);
       }
     }
-    // Two-level platform tops (server SERVER_PLATFORMS mirror of client
-    // Arena PLATFORM_FIGURES, 4 asymmetric figures): cannonballs impact
-    // the solid tops.
-    for (const platform of SERVER_PLATFORMS) {
-      if (Math.abs(x - platform.x) <= platform.hx && Math.abs(z - platform.z) <= platform.hz && y <= platform.topY) {
-        return true;
-      }
-    }
-    return false;
+    // Blood-FX trigger: damage registered on a player — clients show the
+    // red hit burst ONLY for this event. Environmental contacts (boundary,
+    // block, settle, pool overflow) and victim bounces broadcast nothing.
+    // Position is the ball spot at hit (post-integration); payload stays
+    // minimal (ids + position).
+    this.broadcast(BALL_HIT_PLAYER_MESSAGE, {
+      ballId,
+      victimId: victim.sessionId,
+      x: ball.x,
+      y: ball.y,
+      z: ball.z,
+      super: ball.super,
+    });
   }
 
   private findBallVictim(ball: BallState): PlayerState | null {

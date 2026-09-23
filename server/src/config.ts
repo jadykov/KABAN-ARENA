@@ -80,7 +80,35 @@ export const BALL_MUZZLE_OFFSET = 0.7;
 export const SPRAY_DEG = 0;
 export const BALL_HIT_RADIUS = 0.9;
 export const BALL_GROUND_Y = 0.2;
+// Visual/physical ball radius (mirrors client BALL_RADIUS 0.38): a resting
+// ball pins its center at surfaceTop + this, so cores lie ON the floor/tops.
+export const BALL_RADIUS = 0.38;
+// Stage 4d.4 ricochet + rest tuning (scalar math only, no allocations):
+// - vertical surfaces (arena boundary walls, sheer obstacle/platform sides)
+//   REFLECT normal balls (unlimited bounces, ricochet=true, no damage after);
+// - floor (y <= BALL_GROUND_Y) and up-facing tops (obstacle/platform topY)
+//   SETTLE: velocity damps exponentially at BALL_SETTLE_DAMP_RATE over
+//   BALL_SETTLE_TIME_MS (~0.4s slide), then resting=true with y pinned at
+//   surface + BALL_RADIUS and velocity 0. SUPER balls ignore both paths and
+//   despawn on first environmental contact, exactly as before.
+export const BALL_SETTLE_TIME_MS = 400;
+export const BALL_SETTLE_DAMP_RATE = 8;
 export const MAX_LIVE_BALLS = 12;
+// Flight substep cap (m): each 50ms ball step (up to ~1.0m at BALL_MAX_SPEED
+// 20 m/s) is subdivided into straight substeps no longer than this, and the
+// surface/victim contact is sampled at every substep point. Rationale: the
+// min-penetration classifier (hits.describeBallSurface) can only report the
+// ENTRY face when a sample lands inside the thin side-entry band next to the
+// face. A flat shot at a central tower side arrives with top penetration
+// 2.0 - y ~= 0.6m; a full 1m step samples up to ~1m deep inside, where the
+// top penetration is shallowest and the side hit misclassifies as "up"
+// (tunnels into a settle on the top instead of ricocheting). A 0.3m cap
+// guarantees a sample within 0.3m of the face — side penetration <= 0.3m <
+// 0.6m top penetration, so the ENTRY face wins and the side reflects — while
+// a genuinely descending arrival onto a top still samples the top plane
+// first (top penetration ~0 there) and settles. Cost is bounded scalar math:
+// at most ceil(1.5m / 0.3m) = 5 substeps per ball per tick, <= 12 balls.
+export const BALL_STEP_MAX_M = 0.3;
 // Self-damage arming: point-blank spawn does not insta-suicide.
 export const SELF_ARMING_DIST_M = 1.0;
 export const SELF_ARMING_TIME_S = 0.3;

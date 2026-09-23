@@ -767,6 +767,14 @@ export class SceneManager {
     this.spawnBallHitBurst(x, y, z, superShot);
   }
 
+  // Local victim hit-flash (Stage 4d.4): spikes the local avatar emissive
+  // through the existing HitFlash wiring (update() fades it back over
+  // HIT_FLASH_DURATION_S). Flash only — the blood burst stays in
+  // notifyBallHit/spawnBallHitBurst, shield/shake stay in applyTestHit.
+  public flashLocalHit(): void {
+    this.flash.trigger();
+  }
+
   public getWallOpacity(): number {
     return this.arena.getWallOpacity();
   }

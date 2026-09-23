@@ -23,6 +23,7 @@ import {
   DEATH_BURST_UP,
   DEATH_BURST_YELLOW,
   FIREFLY_COUNT,
+  HIT_FLASH_DURATION_S,
   IDLE_FOLLOW_PITCH,
   MIRROR_PITCH_MAX,
   MIRROR_PITCH_MIN,
@@ -374,6 +375,22 @@ describe("SceneManager charge translucency (local avatar only)", () => {  it("fa
     expect(manager.getAvatarOpacity()).toBeCloseTo(AVATAR_CHARGE_OPACITY, 10);
     manager.setChargeTranslucent(false);
     expect(manager.getAvatarOpacity()).toBe(1);
+  });
+});
+
+describe("SceneManager local victim hit-flash (Stage 4d.4 ball-hit-player routing)", () => {
+  it("flashLocalHit spikes the avatar emissive, fading over ~0.18s", async () => {
+    expect(HIT_FLASH_DURATION_S).toBe(0.18);
+    const manager = await createManager();
+    expect(manager.debugGetAvatarEmissive()).toBe(0);
+    manager.flashLocalHit();
+    manager.update(FRAME, NO_MOVE, NO_LOOK);
+    expect(manager.debugGetAvatarEmissive()).toBeGreaterThan(0);
+    const frames = Math.ceil(HIT_FLASH_DURATION_S / FRAME) + 5;
+    for (let i = 0; i < frames; i += 1) {
+      manager.update(FRAME, NO_MOVE, NO_LOOK);
+    }
+    expect(manager.debugGetAvatarEmissive()).toBe(0);
   });
 });
 

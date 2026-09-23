@@ -37,6 +37,10 @@ export class PlayerState extends Schema {
 
 // R2 cannonball: authoritative parabolic projectile (gravity arc, collides,
 // impact despawn). Replicated minimally for client render (pos + flags).
+// Stage 4d.4: ricochet marks a bounced ball (never damages again), resting
+// marks a settled decorative core (no movement, no damage). settleMs/restY
+// are server-only (plain fields, never replicated): ms spent sliding on the
+// rest surface + the pinned surface height (surfaceTop + BALL_RADIUS).
 export class BallState extends Schema {
   @type("string") ballId = "";
   @type("string") ownerId = "";
@@ -50,6 +54,10 @@ export class BallState extends Schema {
   @type("boolean") super = false;
   @type("number") ageMs = 0;
   @type("number") distM = 0;
+  @type("boolean") ricochet = false;
+  @type("boolean") resting = false;
+  public settleMs = 0;
+  public restY = 0;
 }
 
 export type RoundPhase = "lobby" | "countdown" | "playing" | "ended";

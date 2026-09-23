@@ -1,8 +1,10 @@
 import {
   ARENA_HALF_SIZE,
+  BALL_GROUND_Y,
   BALL_MAX_SPEED,
   BALL_MIN_SPEED,
   BALL_MUZZLE_OFFSET,
+  BALL_RADIUS,
   BALL_TORSO_OFFSET,
   BODY_CENTER_Y,
   CHARGE_MAX_S,
@@ -406,6 +408,90 @@ function pseudo01(seed: number): number {
 
 export function canDamage(target: PlayerState, nowMs: number): boolean {
   return target.alive && nowMs >= target.invulnUntil;
+}
+
+// Stage 4d.4 ball-vs-geometry contact (replaces the old boolean hitsBlock):
+// - "vertical": the point sits inside an obstacle/platform footprint at or
+//   below its top and the SHALLOWEST penetration is a side face (min-pen
+//   axis) — the ball reflects on that axis and keeps flying. axis/face carry
+//   the reflection axis and the face coordinate to clamp to (computed from
+//   the velocity sign when the center sits exactly on the box midline, so
+//   the clamp never teleports across the box).
+// - "up": the point rests on an up-facing surface — floor (y <=
+//   BALL_GROUND_Y) or a box top reached from above (top penetration is the
+//   shallowest) — the ball settles: restY = surfaceTop + BALL_RADIUS.
+// - "none": open air.
+// Boxes are evaluated in layout order (obstacles, then platforms); layout
+// has no overlaps, so the first containing box owns the contact. Pure scalar
+// math, zero allocation when given a reusable out object (the room passes a
+// scratch contact; unit tests may pass a fresh literal).
+export type BallContactKind = "none" | "vertical" | "up";
+
+export interface BallContact {
+  kind: BallContactKind;
+  axis: "x" | "z" | null;
+  face: number;
+  restY: number;
+}
+
+export function describeBallSurface(
+  x: number,
+  y: number,
+  z: number,
+  vx: number,
+  vz: number,
+  out: BallContact,
+): BallContact {
+  out.kind = "none";
+  out.axis = null;
+  out.face = 0;
+  out.restY = 0;
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+    return out;
+  }
+  const velX = Number.isFinite(vx) ? vx : 0;
+  const velZ = Number.isFinite(vz) ? vz : 0;
+  for (let box = 0; box < 2; box += 1) {
+    const list = box === 0 ? SERVER_OBSTACLES : SERVER_PLATFORMS;
+    for (const solid of list) {
+      const dx = x - solid.x;
+      const dz = z - solid.z;
+      const penX = solid.hx - Math.abs(dx);
+      if (!(penX > 0)) {
+        continue;
+      }
+      const penZ = solid.hz - Math.abs(dz);
+      if (!(penZ > 0)) {
+        continue;
+      }
+      const penTop = solid.topY - y;
+      if (!(penTop >= 0)) {
+        continue;
+      }
+      if (penTop <= penX && penTop <= penZ) {
+        out.kind = "up";
+        out.restY = solid.topY + BALL_RADIUS;
+        return out;
+      }
+      if (penX <= penZ) {
+        out.kind = "vertical";
+        out.axis = "x";
+        // Degenerate midline (dx == 0, measure-zero): clamp to the face the
+        // ball came through (behind its motion); a still ball takes +hx.
+        out.face = dx > 0 ? solid.x + solid.hx : dx < 0 ? solid.x - solid.hx : solid.x + (velX > 0 ? -solid.hx : solid.hx);
+        return out;
+      }
+      out.kind = "vertical";
+      out.axis = "z";
+      out.face = dz > 0 ? solid.z + solid.hz : dz < 0 ? solid.z - solid.hz : solid.z + (velZ > 0 ? -solid.hz : solid.hz);
+      return out;
+    }
+  }
+  if (y <= BALL_GROUND_Y) {
+    out.kind = "up";
+    out.restY = BALL_GROUND_Y + BALL_RADIUS;
+  }
+  return out;
 }
 
 export interface HitCheck {

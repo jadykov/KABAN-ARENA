@@ -208,6 +208,54 @@ describe("snapshot decoding (tolerant late-join states)", () => {
     expect(snapshot.players[0]?.ready).toBe(false);
     expect(snapshot.players[0]?.spectator).toBe(true);
   });
+
+  it("defaults missing ball ricochet/resting to false (legacy snapshots)", () => {
+    const balls = new Map([
+      ["b1", { ballId: "b1", ownerId: "s1", x: 1, y: 1.4, z: 2, power01: 1, super: false }],
+    ]);
+    const snapshot = decodeSnapshot({
+      phase: "playing",
+      tick: 3,
+      countdownMs: 0,
+      remainingMs: 1000,
+      winner: "",
+      balls: { forEach: (cb: (v: unknown, k: string) => void): void => balls.forEach((v, k) => cb(v, k)) },
+    });
+    expect(snapshot.balls).toHaveLength(1);
+    expect(snapshot.balls[0]?.ballId).toBe("b1");
+    expect(snapshot.balls[0]?.ricochet).toBe(false);
+    expect(snapshot.balls[0]?.resting).toBe(false);
+  });
+
+  it("decodes present ball ricochet/resting flags", () => {
+    const balls = new Map([
+      [
+        "b1",
+        {
+          ballId: "b1",
+          ownerId: "s1",
+          x: 1,
+          y: 0.38,
+          z: 2,
+          power01: 0.5,
+          super: false,
+          ricochet: true,
+          resting: true,
+        },
+      ],
+    ]);
+    const snapshot = decodeSnapshot({
+      phase: "playing",
+      tick: 4,
+      countdownMs: 0,
+      remainingMs: 1000,
+      winner: "",
+      balls: { forEach: (cb: (v: unknown, k: string) => void): void => balls.forEach((v, k) => cb(v, k)) },
+    });
+    expect(snapshot.balls).toHaveLength(1);
+    expect(snapshot.balls[0]?.ricochet).toBe(true);
+    expect(snapshot.balls[0]?.resting).toBe(true);
+  });
 });
 
 describe("R1 play nick (empty -> Guest-XXXX)", () => {

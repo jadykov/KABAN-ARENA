@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Client } from "colyseus";
-import { ARENA_HALF_SIZE, LOBBY_COUNTDOWN_MS, PATCH_RATE_MS, RECOIL_FULL_M, RECOIL_WEAK_M } from "./config.js";
+import { ARENA_HALF_SIZE, BALL_RADIUS, LOBBY_COUNTDOWN_MS, PATCH_RATE_MS, RECOIL_FULL_M, RECOIL_WEAK_M } from "./config.js";
 import { recoilDistanceForPower } from "./hits.js";
 import { ArenaRoom } from "./rooms/ArenaRoom.js";
 import { BallState, type PlayerState } from "./state.js";
@@ -114,7 +114,9 @@ describe("spawnBall recoil kick (opposite fire dir, clamped to arena)", () => {
 });
 
 describe("cannonball vs platform tops (server SERVER_PLATFORMS mirror)", () => {
-  it("despawns a ball inserted directly into state.balls on a platform top", async () => {
+  it("settles a ball inserted directly into state.balls on a platform top", async () => {
+    // Stage 4d.4: up-facing hits SETTLE instead of despawning — the probe
+    // slides to a stop pinned at top + BALL_RADIUS with velocity 0.
     const room = await playingRoom();
     isolateDuel(room);
     room.state.balls.clear();
@@ -140,6 +142,21 @@ describe("cannonball vs platform tops (server SERVER_PLATFORMS mirror)", () => {
     expect(room.state.balls.size).toBe(1);
     advance(room, 50);
     room.tickRoom(50);
-    expect(room.state.balls.size).toBe(0);
+    // Still live, now sliding on the surface...
+    expect(room.state.balls.size).toBe(1);
+    const settling = room.state.balls.get("platform-probe");
+    expect(settling?.resting).toBe(false);
+    expect(settling?.settleMs ?? 0).toBeGreaterThan(0);
+    // ...then fully resting: pinned at the top, zero velocity.
+    for (let i = 0; i < 11; i += 1) {
+      advance(room, 50);
+      room.tickRoom(50);
+    }
+    const rested = room.state.balls.get("platform-probe");
+    expect(rested?.resting).toBe(true);
+    expect(rested?.vx).toBe(0);
+    expect(rested?.vy).toBe(0);
+    expect(rested?.vz).toBe(0);
+    expect(rested?.y).toBeCloseTo(platform.topY + BALL_RADIUS, 9);
   });
 });

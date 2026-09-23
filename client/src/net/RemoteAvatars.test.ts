@@ -1,5 +1,7 @@
 import * as THREE from "three";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { HIT_FLASH_DURATION_S } from "../config";
+import { ACCENT_HIT_FLASH } from "../palette";
 import { RemoteAvatars } from "./RemoteAvatars";
 import { paletteForSession, type NetPlayerSnapshot } from "./protocol";
 
@@ -236,6 +238,87 @@ describe("RemoteAvatars remote death burst (alive→false edge)", () => {
       avatars.dispose();
       expect(bursts).toHaveLength(1);
       expect(avatars.size).toBe(0);
+    } finally {
+      avatars.dispose();
+    }
+  });
+});
+
+// Stage 4d.4: remote victim hit-flash — flashVictim spikes THAT remote's body
+// emissive (ACCENT_HIT_FLASH, 2.5 -> 0 over 0.18s via its own HitFlash,
+// ticked in sync), visible to all viewers. Non-victims stay dark, unknown
+// ids are a no-op.
+describe("RemoteAvatars victim hit-flash (flashVictim routing)", () => {
+  function bodyMaterialOf(scene: THREE.Scene, index: number): THREE.MeshStandardMaterial {
+    const group = scene.children[index];
+    if (!(group instanceof THREE.Group)) {
+      throw new Error("remote entry group missing from scene");
+    }
+    const rig = group.children[0];
+    if (!(rig instanceof THREE.Group)) {
+      throw new Error("remote rig missing from entry group");
+    }
+    const body = rig.children[0];
+    if (!(body instanceof THREE.Mesh)) {
+      throw new Error("remote body missing from rig");
+    }
+    return body.material as THREE.MeshStandardMaterial;
+  }
+
+  function twoRemotes(): NetPlayerSnapshot[] {
+    return [makeSnapshot({ sessionId: "r1" }), makeSnapshot({ sessionId: "r2", x: 3 })];
+  }
+
+  it("rests at emissiveIntensity 0 with the hit-flash emissive color", () => {
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    try {
+      avatars.sync(twoRemotes(), null, FRAME);
+      for (const index of [0, 1]) {
+        const material = bodyMaterialOf(scene, index);
+        expect(material.emissive.getHex()).toBe(ACCENT_HIT_FLASH);
+        expect(material.emissiveIntensity).toBe(0);
+      }
+    } finally {
+      avatars.dispose();
+    }
+  });
+
+  it("flashVictim spikes only that remote, fading over ~0.18s", () => {
+    expect(HIT_FLASH_DURATION_S).toBe(0.18);
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    try {
+      avatars.sync(twoRemotes(), null, FRAME);
+      avatars.flashVictim("r1");
+      avatars.sync(twoRemotes(), null, FRAME);
+      // One frame ticked: spiked high, still fading (2.5 * remaining share).
+      expect(bodyMaterialOf(scene, 0).emissiveIntensity).toBeGreaterThan(1);
+      // Non-victim remotes stay dark.
+      expect(bodyMaterialOf(scene, 1).emissiveIntensity).toBe(0);
+      // Past the flash duration every entry is dark again.
+      const frames = Math.ceil(HIT_FLASH_DURATION_S / FRAME) + 5;
+      for (let i = 0; i < frames; i += 1) {
+        avatars.sync(twoRemotes(), null, FRAME);
+      }
+      expect(bodyMaterialOf(scene, 0).emissiveIntensity).toBe(0);
+      expect(bodyMaterialOf(scene, 1).emissiveIntensity).toBe(0);
+    } finally {
+      avatars.dispose();
+    }
+  });
+
+  it("unknown ids are a no-op (leave/reset races never throw)", () => {
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    try {
+      avatars.sync(twoRemotes(), null, FRAME);
+      expect((): void => {
+        avatars.flashVictim("ghost");
+      }).not.toThrow();
+      avatars.sync(twoRemotes(), null, FRAME);
+      expect(bodyMaterialOf(scene, 0).emissiveIntensity).toBe(0);
+      expect(bodyMaterialOf(scene, 1).emissiveIntensity).toBe(0);
     } finally {
       avatars.dispose();
     }

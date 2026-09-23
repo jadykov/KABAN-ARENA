@@ -352,6 +352,15 @@ async function boot(): Promise<void> {
       // The ball id is marked inside notifyBallHit so the snapshot vanish
       // that follows skips the neutral env puff (no double effect).
       sceneManager.notifyBallHit(info.ballId, info.x, info.y, info.z, info.super);
+      // Victim hit-flash routing (Stage 4d.4): the local victim flashes
+      // through the existing local HitFlash wiring, any other victim flashes
+      // on its replicated remote avatar (visible to all viewers).
+      const selfId = net.ownSessionId;
+      if (selfId !== null && info.victimId === selfId) {
+        sceneManager.flashLocalHit();
+      } else {
+        remotes.flashVictim(info.victimId);
+      }
     },
     onLeave: (): void => {
       latest = null;
