@@ -5,6 +5,7 @@ import {
   BALL_GROUND_Y,
   BALL_HIT_PLAYER_MESSAGE,
   BALL_RADIUS,
+  BALL_ROLL_MIN_SPEED,
   BALL_SETTLE_DAMP_RATE,
   BALL_SETTLE_TIME_MS,
   FULL_DAMAGE,
@@ -157,6 +158,7 @@ function insertProbe(
   ball.distM = 5;
   ball.ricochet = false;
   ball.resting = false;
+  ball.rolling = false;
   ball.settleMs = 0;
   ball.restY = 0;
   room.state.balls.set(ball.ballId, ball);
@@ -370,29 +372,34 @@ describe("4d.4 settle: shots onto obstacle/platform tops come to rest", () => {
 });
 
 describe("4d.4 smooth rest: exponential slide, resting within 0.5s, stays put", () => {
-  it("floor contact damps velocity exponentially then pins the ball", async () => {
+  it("slow floor contact (below roll speed) damps exponentially then pins the ball", async () => {
     expect(BALL_SETTLE_TIME_MS).toBe(400);
     expect(BALL_SETTLE_DAMP_RATE).toBe(8);
+    // Rolling takes over at BALL_ROLL_MIN_SPEED: only a slow arrival settles.
+    expect(BALL_ROLL_MIN_SPEED).toBe(1.5);
     const room = await playingRoom();
     isolateDuel(room);
     room.state.balls.clear();
-    // Open ground at (-2, -2): falls onto the floor with horizontal speed.
-    insertProbe(room, "slide-probe", "s1", -2, 0.5, -2, 6, -1, 0);
+    // Open ground at (-2, -2): falls onto the floor with horizontal speed 1
+    // (below the 1.5 roll threshold, so this takes the settle path).
+    insertProbe(room, "slow-settle", "s1", -2, 0.5, -2, 1, -1, 0);
     let settleTicks = -1;
     for (let i = 0; i < 10; i += 1) {
       tick50(room);
-      if ((getBall(room, "slide-probe")?.settleMs ?? 0) > 0) {
+      if ((getBall(room, "slow-settle")?.settleMs ?? 0) > 0) {
         settleTicks = i;
         break;
       }
     }
     expect(settleTicks).toBeGreaterThanOrEqual(0);
+    const entered = getBall(room, "slow-settle");
+    expect(entered?.rolling).toBe(false);
     // Exponential damp per 50ms tick: vx *= exp(-8 * 0.05).
     const dampStep = Math.exp(-BALL_SETTLE_DAMP_RATE * 0.05);
-    const first = getBall(room, "slide-probe")?.vx ?? 0;
+    const first = getBall(room, "slow-settle")?.vx ?? 0;
     expect(first).toBeGreaterThan(0);
     tick50(room);
-    const second = getBall(room, "slide-probe")?.vx ?? 0;
+    const second = getBall(room, "slow-settle")?.vx ?? 0;
     expect(second).toBeGreaterThan(0);
     expect(second).toBeLessThan(first);
     expect(second / first).toBeCloseTo(dampStep, 6);
@@ -400,13 +407,13 @@ describe("4d.4 smooth rest: exponential slide, resting within 0.5s, stays put", 
     let restedAt = -1;
     for (let i = 0; i < 10; i += 1) {
       tick50(room);
-      if (getBall(room, "slide-probe")?.resting === true) {
+      if (getBall(room, "slow-settle")?.resting === true) {
         restedAt = i;
         break;
       }
     }
     expect(restedAt).toBeGreaterThanOrEqual(0);
-    const rested = getBall(room, "slide-probe");
+    const rested = getBall(room, "slow-settle");
     expect(rested?.y).toBeCloseTo(BALL_GROUND_Y + BALL_RADIUS, 9);
     // ...and stays put on later ticks (pinned, zero velocity).
     const px = rested?.x ?? 0;
@@ -415,7 +422,7 @@ describe("4d.4 smooth rest: exponential slide, resting within 0.5s, stays put", 
     for (let i = 0; i < 5; i += 1) {
       tick50(room);
     }
-    const held = getBall(room, "slide-probe");
+    const held = getBall(room, "slow-settle");
     expect(held?.resting).toBe(true);
     expect(held?.x).toBe(px);
     expect(held?.y).toBe(py);
@@ -423,8 +430,13 @@ describe("4d.4 smooth rest: exponential slide, resting within 0.5s, stays put", 
   });
 });
 
-describe("settle slide re-snaps support: tower-top slide-off never hovers", () => {
-  it("tower-top probe with vx=10 rests at the true support under its final xz", async () => {
+describe("rolling slide re-snaps support: tower-top fast arrival never hovers", () => {
+  it("tower-top probe with vx=10 rolls off and rests at the true support under its final xz", async () => {
+    // Fast arrivals (>= BALL_ROLL_MIN_SPEED) take the rolling path, not the
+    // settle path: the ball rolls on the tower top, slides off the edge, drops
+    // to the ground under per-tick support glue, and rests there — never
+    // hovering at tower height.
+    expect(BALL_ROLL_MIN_SPEED).toBe(1.5);
     const room = await playingRoom();
     isolateDuel(room);
     room.state.balls.clear();
@@ -432,28 +444,43 @@ describe("settle slide re-snaps support: tower-top slide-off never hovers", () =
     if (tower === undefined) {
       throw new Error("no central tower defined");
     }
-    // Inside the footprint below the top with realistic residual horizontal
-    // speed: the first tick enters settle on the tower top, then the ~0.4s
-    // slide carries the ball ~1m past the +x edge (2m-wide tower).
+    // Inside the footprint below the top with fast horizontal speed: the
+    // first tick enters ROLL on the tower top (no settleMs, rolling=true).
     insertProbe(room, "tower-slide", "s1", 4.9, tower.topY - 0.5, tower.z, 10, 0, 0);
     tick50(room);
-    const settling = getBall(room, "tower-slide");
-    expect(settling).toBeDefined();
-    expect(settling?.settleMs ?? 0).toBeGreaterThan(0);
+    const entered = getBall(room, "tower-slide");
+    expect(entered).toBeDefined();
+    expect(entered?.rolling).toBe(true);
+    expect(entered?.ricochet).toBe(true);
+    expect(entered?.resting).toBe(false);
+    expect(entered?.settleMs ?? 0).toBe(0);
+    // Roll until rest (friction window: ~1.5s from the scrubbed entry speed).
     let rested = false;
-    for (let i = 0; i < 20; i += 1) {
+    let droppedBelowTop = false;
+    for (let i = 0; i < 120; i += 1) {
       tick50(room);
-      if (getBall(room, "tower-slide")?.resting === true) {
+      const ball = getBall(room, "tower-slide");
+      if (ball === undefined) {
+        throw new Error("rolling ball vanished mid-roll");
+      }
+      // Per-tick support glue: once past the footprint edge the ball must
+      // already read ground height — no hover frames at tower height.
+      if (ball.x > tower.x + tower.hx && ball.y < tower.topY) {
+        droppedBelowTop = true;
+      }
+      if (ball.resting === true) {
         rested = true;
         break;
       }
     }
+    expect(droppedBelowTop).toBe(true);
     expect(rested).toBe(true);
     const final = getBall(room, "tower-slide");
+    expect(final?.rolling).toBe(false);
     expect(final?.vx).toBe(0);
     expect(final?.vy).toBe(0);
     expect(final?.vz).toBe(0);
-    // The slide must have carried the ball off the tower footprint — otherwise
+    // The roll must have carried the ball off the tower footprint — otherwise
     // this test cannot discriminate the hover bug.
     expect((final?.x ?? 0)).toBeGreaterThan(tower.x + tower.hx);
     // True support at the final xz is open ground beside the tower.
@@ -461,7 +488,7 @@ describe("settle slide re-snaps support: tower-top slide-off never hovers", () =
     expect(expected).toBeCloseTo(BALL_GROUND_Y + BALL_RADIUS, 9);
     expect(final?.restY).toBeCloseTo(expected, 9);
     expect(final?.y).toBeCloseTo(expected, 9);
-    // Discriminating: the stale-entry pin would hover at tower-top height.
+    // Discriminating: a stale-entry pin would hover at tower-top height.
     expect(final?.y ?? 0).toBeLessThan(tower.topY);
   });
 
@@ -610,7 +637,8 @@ describe("4d.4 resting cap: one rest per owner, resting is harmless, fire clears
     older.settleMs = 0;
     older.restY = BALL_GROUND_Y + BALL_RADIUS;
     room.state.balls.set(older.ballId, older);
-    // A second ball settles honestly through the slide path.
+    // A second fast ball rolls out through the roll path (planar 2 m/s entry
+    // is above the settle gate, so it never takes the slow slide) then rests.
     insertProbe(room, "rest-new", "s1", -3, 0.5, -3, 2, -1, 0);
     let rested = false;
     for (let i = 0; i < 30; i += 1) {

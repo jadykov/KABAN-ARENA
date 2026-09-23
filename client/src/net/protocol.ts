@@ -232,9 +232,11 @@ export function buildFirePayload(
 // color carries the owner's fighter color (local orange / remote palette
 // hash) so every core renders in its thrower's colors; SUPER shots keep the
 // purple body but scale up instead.
-// Stage 4d.4: ricochet/resting mirror the server BallState booleans
+// Stage 4d.4: ricochet/resting/rolling mirror the server BallState booleans
 // (optional for wire compat — legacy snapshots without them decode as
-// false, same default-false pattern as super).
+// false, same default-false pattern as super). vx/vz carry the authoritative
+// planar velocity (optional, default 0): the render pool spins rolling balls
+// at speed/BALL_RADIUS around the axis perpendicular to (vx, vz).
 export interface NetBallSnapshot {
   ballId: string;
   ownerId: string;
@@ -246,6 +248,9 @@ export interface NetBallSnapshot {
   color: number;
   ricochet?: boolean;
   resting?: boolean;
+  rolling?: boolean;
+  vx?: number;
+  vz?: number;
 }
 
 // Fighter color for a session: the local player reads identity red, every

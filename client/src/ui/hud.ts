@@ -1,4 +1,4 @@
-import { MAX_HALVES, MAX_HEARTS } from "../config";
+import { KILLFEED_MAX_LINES, KILLFEED_OPACITY, MAX_HALVES, MAX_HEARTS } from "../config";
 import { halvesPerHeart } from "../net/protocol";
 
 // Pure helper (unit-tested): hearts left after taking hits, never below 0.
@@ -139,12 +139,18 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
     setStatus(text: string): void {
       status.textContent = text;
     },
+    // Event feed (owner 4d.4): brief one-liners for join/kill/pickup only —
+    // newest on top, at most KILLFEED_MAX_LINES visible (older drop off, no
+    // history pile-up), painted at KILLFEED_OPACITY so the feed never blocks
+    // the gameplay HUD or touch-safe zones on a phone screen. The container
+    // lives under #hud (pointer-events none), so entries never eat input.
     addKillfeed(message: string): void {
       const entry = document.createElement("div");
       entry.className = "killfeed-entry";
       entry.textContent = message;
+      entry.style.opacity = String(KILLFEED_OPACITY);
       killfeed.prepend(entry);
-      while (killfeed.children.length > 5) {
+      while (killfeed.children.length > KILLFEED_MAX_LINES) {
         const last = killfeed.lastElementChild;
         if (last !== null) {
           killfeed.removeChild(last);

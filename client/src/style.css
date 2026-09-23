@@ -179,6 +179,7 @@ canvas {
   gap: 4px;
   max-width: 45vw;
   font-size: 11px;
+  pointer-events: none;
 }
 
 #hud-killfeed .killfeed-entry {
@@ -188,6 +189,12 @@ canvas {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* Event feed (owner 4d.4): mirror of KILLFEED_OPACITY in
+     client/src/config.ts (the inline style in ui/hud.ts is the source of
+     truth; this keeps static rendering identical). pointer-events none so
+     the feed never blocks gameplay HUD / touch-safe zones. */
+  opacity: 0.7;
+  pointer-events: none;
 }
 
 /* Virtual joystick: large transparent see-through disc, bottom-left,

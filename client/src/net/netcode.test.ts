@@ -209,7 +209,7 @@ describe("snapshot decoding (tolerant late-join states)", () => {
     expect(snapshot.players[0]?.spectator).toBe(true);
   });
 
-  it("defaults missing ball ricochet/resting to false (legacy snapshots)", () => {
+  it("defaults missing ball ricochet/resting/rolling/vx/vz (legacy snapshots)", () => {
     const balls = new Map([
       ["b1", { ballId: "b1", ownerId: "s1", x: 1, y: 1.4, z: 2, power01: 1, super: false }],
     ]);
@@ -225,9 +225,12 @@ describe("snapshot decoding (tolerant late-join states)", () => {
     expect(snapshot.balls[0]?.ballId).toBe("b1");
     expect(snapshot.balls[0]?.ricochet).toBe(false);
     expect(snapshot.balls[0]?.resting).toBe(false);
+    expect(snapshot.balls[0]?.rolling).toBe(false);
+    expect(snapshot.balls[0]?.vx).toBe(0);
+    expect(snapshot.balls[0]?.vz).toBe(0);
   });
 
-  it("decodes present ball ricochet/resting flags", () => {
+  it("decodes present ball ricochet/resting/rolling/vx/vz", () => {
     const balls = new Map([
       [
         "b1",
@@ -241,6 +244,9 @@ describe("snapshot decoding (tolerant late-join states)", () => {
           super: false,
           ricochet: true,
           resting: true,
+          rolling: true,
+          vx: 2.5,
+          vz: -1.25,
         },
       ],
     ]);
@@ -255,6 +261,9 @@ describe("snapshot decoding (tolerant late-join states)", () => {
     expect(snapshot.balls).toHaveLength(1);
     expect(snapshot.balls[0]?.ricochet).toBe(true);
     expect(snapshot.balls[0]?.resting).toBe(true);
+    expect(snapshot.balls[0]?.rolling).toBe(true);
+    expect(snapshot.balls[0]?.vx).toBeCloseTo(2.5, 9);
+    expect(snapshot.balls[0]?.vz).toBeCloseTo(-1.25, 9);
   });
 });
 

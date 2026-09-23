@@ -93,6 +93,20 @@ export const BALL_RADIUS = 0.38;
 //   despawn on first environmental contact, exactly as before.
 export const BALL_SETTLE_TIME_MS = 400;
 export const BALL_SETTLE_DAMP_RATE = 8;
+// Stage 4d.4 rolling (owner: ricocheted balls must keep rolling on the ground
+// with inertia instead of freezing "plasticky"). A non-super ball that touches
+// floor/up-facing ground WITH horizontal speed enters ROLLING: it keeps moving
+// along the ground under gentle friction, re-snaps to the live support every
+// tick (rolls off tower edges onto the true surface below, climbs low block
+// tops exactly like the settle re-snap), reflects damped off tall vertical
+// faces, and comes to rest once slow. Near-zero-speed landings keep the fast
+// settle path above (enterSettle). Scalar math only, zero per-tick allocation.
+export const BALL_ROLL_FRICTION = 2.2;
+export const BALL_ROLL_ENTER_KEEP = 0.7;
+export const BALL_ROLL_MIN_SPEED = 1.5;
+export const BALL_ROLL_STOP_SPEED = 0.3;
+export const BALL_ROLL_WALL_KEEP = 0.55;
+export const BALL_ROLL_CLIMB_MAX = 0.65;
 export const MAX_LIVE_BALLS = 12;
 // Flight substep cap (m): each 50ms ball step (up to ~1.0m at BALL_MAX_SPEED
 // 20 m/s) is subdivided into straight substeps no longer than this, and the
@@ -154,6 +168,14 @@ export const SUPER_SPAWN_S = 45;
 export const SUPER_LIFE_S = 15;
 export const SUPER_BLINK_S = 3;
 export const SUPER_PICKUP_RADIUS = 1.7;
+// Center-item kinds (extension hook, NOT implemented beyond "super"):
+export type CenterItemKind = "super"; // | "pineapple" | "heal" (future)
+// Display names for the event feed (who picked WHICH item): one entry per
+// CenterItemKind — a future item plugs in as a single line here and its
+// tick*Item pickup message reads the name from this map, no template edits.
+export const CENTER_ITEM_NAMES: Record<CenterItemKind, string> = {
+  super: "SUPER core",
+};
 // Server obstacle mirrors (client Arena.getObstacleLayout): AABB + topY for
 // cannonball impacts (a ball inside the footprint with y <= topY impacts)
 // AND authoritative movement collision (see rooms/ArenaRoom

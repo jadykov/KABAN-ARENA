@@ -192,4 +192,24 @@ describe("palette buckets (violet base / muted-red accents / chartreuse highligh
     }
     expect(minDist).toBeGreaterThan(40);
   });
+
+  it("every identity marking keeps >= ~0.25 lightness delta vs the dark ball base (BASE_BG)", () => {
+    // Palette-level ownership-contrast guard (ball base round): the ball skin
+    // base is BASE_BG (the darkest BASE tone), and the thrower's identity
+    // reads as a large marking in the raw fighter color — so ALL 7 fighter
+    // colors must stand off the base in lightness, not just the bright ones.
+    // Threshold ~0.25 per spec (0.24 admits the darkest fighter 0x7a2430 at
+    // exact delta ~0.243 — pinned here so a future palette edit cannot
+    // silently erode it).
+    const fighters = [IDENTITY_LOCAL, ...IDENTITY_REMOTES];
+    expect(fighters).toHaveLength(7);
+    const baseL = toHsl(BASE_BG).l;
+    let minDelta = Number.POSITIVE_INFINITY;
+    for (const fighter of fighters) {
+      const delta = Math.abs(toHsl(fighter).l - baseL);
+      minDelta = Math.min(minDelta, delta);
+      expect(delta).toBeGreaterThanOrEqual(0.24);
+    }
+    expect(minDelta).toBeCloseTo(0.243, 2);
+  });
 });

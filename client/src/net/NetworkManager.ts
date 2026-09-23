@@ -95,6 +95,9 @@ interface WireBall {
   super?: unknown;
   ricochet?: unknown;
   resting?: unknown;
+  rolling?: unknown;
+  vx?: unknown;
+  vz?: unknown;
 }
 
 interface WireBalls {
@@ -161,6 +164,12 @@ export function decodeSnapshot(state: unknown, selfId: string | null = null): Ro
         color: ownerColorForSession(ownerId, selfId),
         ricochet: toBoolean(ball.ricochet),
         resting: toBoolean(ball.resting),
+        // Stage 4d.4 rolling: optional for wire compat (legacy snapshots
+        // decode as standing still, same default-false/zero pattern as
+        // ricochet/resting/super above). vx/vz feed the pool roll-spin.
+        rolling: toBoolean(ball.rolling),
+        vx: toNumber(ball.vx, 0),
+        vz: toNumber(ball.vz, 0),
       });
     });
   } catch {

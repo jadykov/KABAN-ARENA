@@ -6,12 +6,20 @@ import {
   BALL_HIT_RADIUS,
   BALL_HIT_PLAYER_MESSAGE,
   BALL_RADIUS,
+  BALL_ROLL_CLIMB_MAX,
+  BALL_ROLL_ENTER_KEEP,
+  BALL_ROLL_FRICTION,
+  BALL_ROLL_MIN_SPEED,
+  BALL_ROLL_STOP_SPEED,
+  BALL_ROLL_WALL_KEEP,
   BALL_SETTLE_DAMP_RATE,
   BALL_SETTLE_TIME_MS,
   BALL_STEP_MAX_M,
   BODY_CENTER_Y,
   BOT_NAMES,
   BOT_SPEED,
+  CENTER_ITEM_NAMES,
+  type CenterItemKind,
   CHARGE_MOVE_MULT,
   FIRE_PITCH_MAX,
   FIRE_PITCH_MIN,
@@ -91,11 +99,10 @@ export interface FirePayload {
   throwerY?: number;
 }
 
-// Future center-item kinds (extension hook, NOT implemented): "super" is
-// the only live kind today (see tickCenterItems). "pineapple" (radius AoE
-// on throw) and "heal" (+1 heart on pickup) plug in as new tick*Item()
-// methods + ArenaState fields — no changes to the ball pipeline needed.
-export type CenterItemKind = "super"; // | "pineapple" | "heal" (future)
+// Future center-item kinds live in config (CENTER_ITEM_NAMES carries the
+// feed display name per kind: "super" is the only live kind today, see
+// tickCenterItems). Re-exported here so existing import sites keep working.
+export type { CenterItemKind };
 
 // Server obstacle mirrors now live in config (SERVER_OBSTACLES, re-exported
 // above for test compat) alongside SERVER_PLATFORMS.
@@ -623,6 +630,9 @@ export class ArenaRoom extends Room<ArenaState> {
     this.airSince.delete(client.sessionId);
     this.ensureBots();
     client.send("welcome", { sessionId: client.sessionId, nick, x: player.x, z: player.z });
+    // Event feed (owner 4d.4): everyone sees who entered the fight, in the
+    // same killfeed channel as kills and pickups (brief one-liner).
+    this.broadcast("killfeed", { message: `${nick} joined the fight` });
   }
 
   public async onLeave(client: Client): Promise<void> {
@@ -728,7 +738,8 @@ export class ArenaRoom extends Room<ArenaState> {
     this.state.superActive = false;
     this.state.superNextAt = now + SUPER_SPAWN_S * 1000;
     this.state.superExpiresAt = 0;
-    this.broadcast("killfeed", { message: "Fight!" });
+    // Event feed (owner 4d.4): join/kill/pickup one-liners ONLY — round
+    // start/end stay silent so the 2-line feed never fills with non-events.
   }
 
   private endRound(winnerSessionId: string): void {
@@ -736,10 +747,6 @@ export class ArenaRoom extends Room<ArenaState> {
     this.state.winner = winnerSessionId;
     this.state.remainingMs = 0;
     this.endedAt = this.currentTime();
-    const winner = this.state.players.get(winnerSessionId);
-    this.broadcast("killfeed", {
-      message: winner !== undefined ? `${winner.nick} wins the round!` : "Round over!",
-    });
   }
 
   private resetForRematch(): void {
@@ -916,6 +923,7 @@ export class ArenaRoom extends Room<ArenaState> {
     ball.distM = 0;
     ball.ricochet = false;
     ball.resting = false;
+    ball.rolling = false;
     ball.settleMs = 0;
     ball.restY = 0;
     this.state.balls.set(ball.ballId, ball);
@@ -940,17 +948,24 @@ export class ArenaRoom extends Room<ArenaState> {
   // Authoritative ball step (Stage 4d.4): gravity arc, substepped flight
   // (each tick move is split into BALL_STEP_MAX_M substeps so the ENTRY face
   // is sampled before deep-penetration misclassification — no tunneling past
-  // thin side-entry bands), ricochet/settle contacts, player hits (radius
+  // thin side-entry bands), ricochet/roll/settle contacts, player hits (radius
   // ~0.9, self-damage armed after 1m / 0.3s), damage to ALL incl. self +
   // knockback impulse. Kill/respawn/killfeed reuse existing paths.
   // - Resting balls: purely decorative — aged (so pool overflow evicts
   //   oldest-first, resting included) but never moved or damage-checked.
-  // - Settling balls: velocity damps exponentially over BALL_SETTLE_TIME_MS
-  //   (~0.4s slide pinned at restY), then resting=true with velocity 0.
+  // - Rolling balls (owner 4d.4: lively inertia after ricochets): gentle
+  //   friction-damped planar motion glued to the live support (rolls off
+  //   tower edges onto the true surface below, climbs low block tops like
+  //   the settle re-snap, reflects damped off tall faces), then resting=true
+  //   once slow. Post-ricochet state: no damage, no knockback, no broadcast.
+  // - Settling balls: near-zero-speed landings only — velocity damps
+  //   exponentially over BALL_SETTLE_TIME_MS (~0.4s slide pinned at restY),
+  //   then resting=true with velocity 0.
   // - Normal flying balls: vertical surfaces (boundary walls, sheer
   //   obstacle/platform sides) REFLECT on the hit axis (ricochet=true, no
-  //   damage ever after); floor/up-facing tops ENTER SETTLE. SUPER balls
-  //   despawn on first environmental contact, exactly as before.
+  //   damage ever after); floor/up-facing tops ENTER ROLL when fast or SETTLE
+  //   when slow. SUPER balls despawn on first environmental contact, exactly
+  //   as before.
   // - Ricochet balls reaching a player bounce off (velocity reflected away,
   //   no damage/knockback/broadcast); pre-ricochet direct hits damage, knock
   //   back, broadcast, and despawn exactly as before.
@@ -969,6 +984,10 @@ export class ArenaRoom extends Room<ArenaState> {
         return;
       }
       if (ball.resting) {
+        return;
+      }
+      if (ball.rolling) {
+        this.stepRollingBall(ball, dt);
         return;
       }
       if (ball.settleMs > 0) {
@@ -1041,7 +1060,13 @@ export class ArenaRoom extends Room<ArenaState> {
             dead.push(ballId);
             return;
           }
-          this.enterSettle(ball, contact.restY, dt);
+          // Lively touchdown (owner 4d.4): fast arrivals keep rolling with
+          // inertia; near-zero-speed landings take the fast settle path.
+          if (Math.hypot(ball.vx, ball.vz) >= BALL_ROLL_MIN_SPEED) {
+            this.enterRoll(ball, contact.restY);
+          } else {
+            this.enterSettle(ball, contact.restY, dt);
+          }
           return;
         }
         const victim = this.findBallVictim(ball);
@@ -1145,6 +1170,91 @@ export class ArenaRoom extends Room<ArenaState> {
     }
     ball.restY = Math.max(BALL_GROUND_Y, groundTopAt(ball.x, ball.z)) + BALL_RADIUS;
     ball.y = ball.restY;
+  }
+
+  // Roll entry (owner 4d.4 lively physics): pin y at the touchdown surface,
+  // kill vertical motion, keep a scrubbed share of the horizontal speed (the
+  // impact loses energy — full-power arrivals still roll several meters).
+  // Rolling is a post-ricochet state (ricochet=true: never damages again);
+  // motion starts on the next tick, no timer needed.
+  private enterRoll(ball: BallState, restY: number): void {
+    ball.restY = Number.isFinite(restY) ? restY : ball.y;
+    ball.vy = 0;
+    ball.y = ball.restY;
+    ball.vx *= BALL_ROLL_ENTER_KEEP;
+    ball.vz *= BALL_ROLL_ENTER_KEEP;
+    ball.settleMs = 0;
+    ball.ricochet = true;
+    ball.rolling = true;
+  }
+
+  // One rolling tick: gentle friction damp, axis-separated planar move glued
+  // to the live support, damped reflection off tall faces. Low block tops
+  // (step up <= BALL_ROLL_CLIMB_MAX, e.g. the outer 0.8m blocks from the
+  // floor) climb exactly like the settle re-snap; tall faces (towers,
+  // platforms, boundary walls) reflect that axis at BALL_ROLL_WALL_KEEP and
+  // keep rolling. Rolls off edges drop to the true support below (no hover,
+  // no embed); boundary clamps reflect instead of tunneling. Victim contact
+  // bounces off via the shared flight helper (no damage, no knockback, no
+  // broadcast). Speeds below BALL_ROLL_STOP_SPEED come to rest — the existing
+  // per-owner cap and fire-despawn paths take over from there. Scalar math
+  // only, zero per-tick allocation.
+  private stepRollingBall(ball: BallState, dt: number): void {
+    const step = Number.isFinite(dt) && dt > 0 ? dt : 0.05;
+    const damp = Math.exp(-BALL_ROLL_FRICTION * step);
+    ball.vx *= damp;
+    ball.vz *= damp;
+    ball.vy = 0;
+    if (Math.hypot(ball.vx, ball.vz) < BALL_ROLL_STOP_SPEED) {
+      ball.vx = 0;
+      ball.vy = 0;
+      ball.vz = 0;
+      ball.restY = Math.max(BALL_GROUND_Y, groundTopAt(ball.x, ball.z)) + BALL_RADIUS;
+      ball.y = ball.restY;
+      ball.settleMs = 0;
+      ball.rolling = false;
+      ball.resting = true;
+      this.enforceRestingCap(ball);
+      return;
+    }
+    const fromX = ball.x;
+    const fromZ = ball.z;
+    let nextX = ball.x + ball.vx * step;
+    if (nextX > ARENA_HALF_SIZE) {
+      nextX = ARENA_HALF_SIZE;
+      ball.vx = -ball.vx * BALL_ROLL_WALL_KEEP;
+    } else if (nextX < -ARENA_HALF_SIZE) {
+      nextX = -ARENA_HALF_SIZE;
+      ball.vx = -ball.vx * BALL_ROLL_WALL_KEEP;
+    }
+    const supportX = Math.max(BALL_GROUND_Y, groundTopAt(nextX, ball.z)) + BALL_RADIUS;
+    if (supportX - ball.y <= BALL_ROLL_CLIMB_MAX) {
+      ball.x = nextX;
+      ball.y = supportX;
+    } else {
+      ball.vx = -ball.vx * BALL_ROLL_WALL_KEEP;
+    }
+    let nextZ = ball.z + ball.vz * step;
+    if (nextZ > ARENA_HALF_SIZE) {
+      nextZ = ARENA_HALF_SIZE;
+      ball.vz = -ball.vz * BALL_ROLL_WALL_KEEP;
+    } else if (nextZ < -ARENA_HALF_SIZE) {
+      nextZ = -ARENA_HALF_SIZE;
+      ball.vz = -ball.vz * BALL_ROLL_WALL_KEEP;
+    }
+    const supportZ = Math.max(BALL_GROUND_Y, groundTopAt(ball.x, nextZ)) + BALL_RADIUS;
+    if (supportZ - ball.y <= BALL_ROLL_CLIMB_MAX) {
+      ball.z = nextZ;
+      ball.y = supportZ;
+    } else {
+      ball.vz = -ball.vz * BALL_ROLL_WALL_KEEP;
+    }
+    ball.restY = ball.y;
+    ball.distM += Math.hypot(ball.x - fromX, ball.z - fromZ);
+    const victim = this.findBallVictim(ball);
+    if (victim !== null) {
+      this.bounceBallOffVictim(ball, victim);
+    }
   }
 
   // Per-owner resting cap (Stage 4d.4 3Б): at most ONE resting ball per
@@ -1321,7 +1431,9 @@ export class ArenaRoom extends Room<ArenaState> {
             player.superBuff = true;
             this.state.superActive = false;
             this.state.superNextAt = now + SUPER_SPAWN_S * 1000;
-            this.broadcast("killfeed", { message: `${player.nick} grabbed SUPER core (x2 next shot)` });
+            // Event feed: who picked WHICH item — the display name comes from
+            // CENTER_ITEM_NAMES so future items plug in with one map line.
+            this.broadcast("killfeed", { message: `${player.nick} grabbed ${CENTER_ITEM_NAMES.super} (x2 next shot)` });
           }
         });
       }

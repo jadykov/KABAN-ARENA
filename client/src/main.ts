@@ -147,7 +147,6 @@ async function boot(): Promise<void> {
   hud.setTimer(ROUND_SECONDS);
   hud.setScore(START_SCORE);
   hud.setStatus("Watching live arena — pick a nick and press Play");
-  hud.addKillfeed("Welcome to KABAN ARENA");
 
   const joystick = createJoystick(document.body, {
     diameter: MOVE_STICK_DIAMETER,
@@ -276,6 +275,11 @@ async function boot(): Promise<void> {
       applySnapshot(snapshot);
     },
     onWelcome: (sessionId, nick, spawn): void => {
+      // No local join feed line here: the server broadcasts
+      // "<nick> joined the fight" to the whole room INCLUDING the joiner, so
+      // a local "Joined as ..." line would eat the 2-line feed with a
+      // near-duplicate (reviewer cycle 2). Spawn/overlay logic below stays.
+      void nick;
       isPlaying = true;
       // Our session id is known from join time (ownSessionId set on room
       // join, before welcome): lock in our deterministic Nintendo-style face
@@ -316,7 +320,6 @@ async function boot(): Promise<void> {
       aimOverlay.setCharge01(0);
       aimOverlay.setReload01(1);
       aimOverlay.hide();
-      hud.addKillfeed(`Joined as ${nick}`);
       hideJoinOverlay();
     },
     onSpectator: (sessionId): void => {
@@ -1000,9 +1003,9 @@ async function boot(): Promise<void> {
   window.addEventListener("pointercancel", handleCamPointerCancel);
 
   // Async Rapier WASM boot. The scene stays playable on the legacy
-  // kinematic path when physics fails — never a fatal error.
-  const physicsReady = await sceneManager.initPhysics();
-  hud.addKillfeed(physicsReady ? "Physics ready — have fun!" : "Physics offline — fallback movement");
+  // kinematic path when physics fails — never a fatal error. No feed line:
+  // the event feed shows join/kill/pickup one-liners only (owner 4d.4).
+  await sceneManager.initPhysics();
 
   const handleKeyDown = (event: KeyboardEvent): void => {
     // F3 snap-gate debug overlay: handled BEFORE the typing guard so the
@@ -1019,12 +1022,12 @@ async function boot(): Promise<void> {
     const granted = POWERUP_KEYS[event.code];
     if (granted !== undefined) {
       // Spectators have no avatar: power-up grants are fighters-only, same
-      // gate as Space/fire below.
+      // gate as Space/fire below. Debug cheat key: no feed line (event feed
+      // shows join/kill/pickup one-liners only).
       if (!isPlaying) {
         return;
       }
       sceneManager.grantPowerUp(granted);
-      hud.addKillfeed(`Power-up granted: ${granted}`);
       return;
     }
     if (event.code === "Space") {
@@ -1039,18 +1042,13 @@ async function boot(): Promise<void> {
       return;
     }
     if (event.code === "KeyH") {
-      // Test-scene hit: a shield charge absorbs one hit, otherwise the HUD
-      // loses one heart (QD3: 1 hit = 1 heart). Fighters-only: spectators
-      // must not fake hearts while watching.
+      // Test-scene hit: a shield charge absorbs one hit, otherwise nothing
+      // visible happens here (the authoritative server HP drives the HUD).
+      // Debug key: no feed line (event feed shows join/kill/pickup only).
       if (!isPlaying) {
         return;
       }
-      const absorbed = sceneManager.applyTestHit();
-      if (absorbed) {
-        hud.addKillfeed("Shield absorbed the hit");
-      } else {
-        hud.simulateHit("test hit");
-      }
+      sceneManager.applyTestHit();
     }
     if (event.code === "KeyR") {
       // Scene reset is fighters-only: a spectator pressing R must not wipe
@@ -1383,13 +1381,11 @@ async function boot(): Promise<void> {
     if (playing && isCharging) {
       aimOverlay.setTrajectory(computeAimTrajectory());
     }
+    // Event feed (owner 4d.4): pickup one-liners only — trampoline rides and
+    // boost expiries stay silent so the feed shows join/kill/pickup alone.
     for (const arenaEvent of sceneManager.drainEvents()) {
       if (arenaEvent.type === "pickup") {
         hud.addKillfeed(`Picked up ${arenaEvent.kind}`);
-      } else if (arenaEvent.type === "trampoline") {
-        hud.addKillfeed("Boing! Trampoline launch");
-      } else {
-        hud.addKillfeed("Speed boost expired");
       }
     }
     // Remote replication: ease every snapshot through lerp/slerp.

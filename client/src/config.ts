@@ -92,6 +92,13 @@ export const ICE_SPEED_MULT = 0.33;
 export const MAX_HEARTS = 4;
 export const ROUND_SECONDS = 180;
 export const START_SCORE = 0;
+// Event feed (owner 4d.4: top-right, brief, semi-transparent, never in the
+// way): at most MAX lines visible (newest on top, older drop off — no
+// history pile-up), only join/kill/pickup one-liners. Entries paint at this
+// opacity (inline style in ui/hud.ts, same value mirrored in style.css) so
+// the feed stays readable without blocking the view on a phone screen.
+export const KILLFEED_MAX_LINES = 1;
+export const KILLFEED_OPACITY = 0.7;
 
 // Perf budget (AGENTS.md pitfalls): shadow map stays at or below 1024.
 export const SHADOW_MAP_SIZE = 1024;
@@ -314,9 +321,10 @@ export const CAMERA_SMOOTH_RATE = 13;
 // after a local kick instead of fighting it and double-tugging the avatar.
 export const RECOIL_RECONCILE_GRACE_S = 0.15;
 // Avatar colors: local fighter salmon-red, remotes cycle the shared identity
-// palette by sessionId hash. Balls reuse the same mapping (cap/glow/trail
-// tinted by the owner color, basalt body kept) so every core reads as its
-// thrower's. Values live in palette.ts (IDENTITY_*); these names are kept
+// palette by sessionId hash. Balls reuse the same mapping (bold cap/band
+// marking tinted by the owner color over the shared dark-neutral base,
+// chartreuse reserved for SUPER) so every core reads as its thrower's at a
+// glance. Values live in palette.ts (IDENTITY_*); these names are kept
 // so tests and config consumers don't break.
 export const LOCAL_AVATAR_COLOR = IDENTITY_LOCAL;
 export const REMOTE_PALETTE = IDENTITY_REMOTES;

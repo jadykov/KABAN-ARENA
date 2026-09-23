@@ -2,20 +2,27 @@ import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import { BALL_MUZZLE_OFFSET, BALL_TORSO_OFFSET, LOCAL_AVATAR_COLOR, MAX_LIVE_BALLS, SELF_SPAWN_Y } from "../config";
 import { directionFromYawPitch, muzzleForShot, type NetBallSnapshot } from "../net/protocol";
+import { BASE_BG, IDENTITY_LOCAL, IDENTITY_REMOTES, NEUTRAL_MOON } from "../palette";
 import {
-  BALL_BASALT_COLOR,
   BALL_CAP_COLOR,
+  BALL_CAP_FRACTION,
+  BALL_EQUATOR_BAND_PX,
+  BALL_NEUTRAL_BASE,
   BALL_RADIUS,
+  BALL_TEXTURE_SIZE,
   BallsPool,
   ENV_PUFF_COLOR,
+  MAX_CACHED_BALL_SKINS,
   MUZZLE_FLASH_LIFE_S,
   SUPER_BALL_COLOR,
+  SUPER_BALL_SCALE,
   SUPER_CORE_INNER_RADIUS,
   SUPER_CORE_OUTER_RADIUS,
   SUPER_INNER_COLOR,
   SuperCore,
   TRAIL_GOLD_COLOR,
   TRAIL_SUPER_COLOR,
+  markingColorFor,
 } from "./Balls";
 
 function makeBall(ballId: string, superShot: boolean, color: number = BALL_CAP_COLOR): NetBallSnapshot {
@@ -40,9 +47,72 @@ function puffSprites(scene: THREE.Scene): THREE.Sprite[] {
   return scene.children.filter((child): child is THREE.Sprite => child instanceof THREE.Sprite);
 }
 
-// Throw-polish balls: bigger radius, two-tone cores, no per-ball trails.
-describe("BallsPool throw-polish", () => {
-  it("uses BALL_RADIUS 0.38 for the shared body geometry", () => {
+function skinOf(mesh: THREE.Mesh): { base: number; marking: number } {
+  const material = mesh.material as THREE.MeshBasicMaterial;
+  return {
+    base: material.userData["base"] as number,
+    marking: material.userData["marking"] as number,
+  };
+}
+
+function keyOf(hex: number): string {
+  return `${(hex >> 16) & 0xff},${(hex >> 8) & 0xff},${hex & 0xff}`;
+}
+
+// Texel colors present in a headless DataTexture skin (node-env tests have no
+// DOM canvas, so skins fall back to 8x8 DataTextures carrying the same two
+// colors). Returns an empty set for non-data textures (browser CanvasTexture
+// path) — callers assert via userData there.
+function texelColors(texture: THREE.Texture | null): Set<string> {
+  const out = new Set<string>();
+  const image = (texture as unknown as { image?: { data?: unknown } } | null)?.image;
+  const data = image?.data;
+  if (!(data instanceof Uint8Array)) {
+    return out;
+  }
+  for (let i = 0; i + 4 <= data.length; i += 4) {
+    out.add(`${data[i] ?? 0},${data[i + 1] ?? 0},${data[i + 2] ?? 0}`);
+  }
+  return out;
+}
+
+// Row-major texel grid of a headless 8x8 DataTexture skin (null when the
+// texture is not a headless DataTexture, e.g. the browser CanvasTexture path).
+function texelGrid(texture: THREE.Texture | null): string[][] | null {
+  const image = (texture as unknown as { image?: { data?: unknown; width?: unknown; height?: unknown } } | null)?.image;
+  const data = image?.data;
+  if (!(data instanceof Uint8Array)) {
+    return null;
+  }
+  const size = Math.sqrt(data.length / 4);
+  if (!Number.isInteger(size) || size <= 0) {
+    return null;
+  }
+  const rows: string[][] = [];
+  for (let y = 0; y < size; y += 1) {
+    const row: string[] = [];
+    for (let x = 0; x < size; x += 1) {
+      const i = (y * size + x) * 4;
+      row.push(`${data[i] ?? 0},${data[i + 1] ?? 0},${data[i + 2] ?? 0}`);
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+// HSL lightness 0..1 (same derivation as palette.test.ts) for the ownership
+// contrast guard below.
+function lightnessOf(hex: number): number {
+  const r = ((hex >> 16) & 0xff) / 255;
+  const g = ((hex >> 8) & 0xff) / 255;
+  const b = (hex & 0xff) / 255;
+  return (Math.max(r, g, b) + Math.min(r, g, b)) / 2;
+}
+
+// Neutral-redesign balls: smooth 16x12 spheres, one mesh per core, dark
+// base + bold thrower marking (cap + band), no per-ball trails change.
+describe("BallsPool neutral redesign", () => {
+  it("uses BALL_RADIUS 0.38 for the shared smooth body geometry (16x12)", () => {
     expect(BALL_RADIUS).toBe(0.38);
     const scene = new THREE.Scene();
     const pool = new BallsPool(scene);
@@ -54,24 +124,27 @@ describe("BallsPool throw-polish", () => {
         expect(body).toBeInstanceOf(THREE.Mesh);
         const geometry = (body as THREE.Mesh).geometry as THREE.SphereGeometry;
         expect(geometry.parameters.radius).toBeCloseTo(0.38, 5);
+        // Round read (owner: faceted look): modestly higher segments than the
+        // old 10x8, still one shared geometry across all 12 pool slots.
+        expect(geometry.parameters.widthSegments).toBe(16);
+        expect(geometry.parameters.heightSegments).toBe(12);
       }
     } finally {
       pool.dispose();
     }
   });
 
-  it("builds two-tone cores with pooled trail sprites + 8 puffs", () => {
+  it("builds smooth single-mesh cores with pooled trail sprites + 8 puffs", () => {
     const scene = new THREE.Scene();
     const pool = new BallsPool(scene);
     try {
       const groups = ballGroups(scene);
       expect(groups).toHaveLength(MAX_LIVE_BALLS);
       for (const group of groups) {
-        expect(group.children).toHaveLength(2);
-        for (const child of group.children) {
-          expect(child).toBeInstanceOf(THREE.Mesh);
-          expect(child).not.toBeInstanceOf(THREE.Sprite);
-        }
+        // ONE mesh per ball — no cap dome, no second mesh, no bump.
+        expect(group.children).toHaveLength(1);
+        expect(group.children[0]).toBeInstanceOf(THREE.Mesh);
+        expect(group.children[0]).not.toBeInstanceOf(THREE.Sprite);
       }
       // 8 impact puffs + 2 trail sprites per ball slot (gold/purple).
       expect(puffSprites(scene)).toHaveLength(8 + MAX_LIVE_BALLS * 2);
@@ -80,27 +153,38 @@ describe("BallsPool throw-polish", () => {
     }
   });
 
-  it("paints basalt+orange normally and purple+white for SUPER, pulsing the inner", () => {
+  it("paints neutral base + thrower marking, SUPER chartreuse/white, x2 scale for SUPER", () => {
     const scene = new THREE.Scene();
     const pool = new BallsPool(scene);
     try {
-      pool.render([makeBall("b1", false)]);
+      // Dark-neutral redesign: the base is the dark BASE_BG tone (NOT the old
+      // NEUTRAL_MOON off-white) — the thrower reads from the BOLD marking.
+      expect(BALL_NEUTRAL_BASE).toBe(BASE_BG);
+      expect(BALL_NEUTRAL_BASE).not.toBe(NEUTRAL_MOON);
+      pool.render([makeBall("b1", false, LOCAL_AVATAR_COLOR)]);
       let groups = ballGroups(scene);
       const normalBody = groups[0]?.children[0] as THREE.Mesh | undefined;
-      const normalCap = groups[0]?.children[1] as THREE.Mesh | undefined;
-      expect((normalBody?.material as THREE.MeshBasicMaterial).color.getHex()).toBe(BALL_BASALT_COLOR);
-      expect((normalCap?.material as THREE.MeshBasicMaterial).color.getHex()).toBe(BALL_CAP_COLOR);
+      expect(normalBody).toBeDefined();
+      if (normalBody === undefined) {
+        throw new Error("expected one normal ball mesh");
+      }
+      expect(skinOf(normalBody).base).toBe(BALL_NEUTRAL_BASE);
+      expect(skinOf(normalBody).marking).toBe(LOCAL_AVATAR_COLOR);
+      expect(groups[0]?.scale.x).toBe(1);
 
-      pool.render([makeBall("b1", false), makeBall("b2", true)]);
+      pool.render([makeBall("b1", false, LOCAL_AVATAR_COLOR), makeBall("b2", true)]);
       groups = ballGroups(scene);
       const superBody = groups[1]?.children[0] as THREE.Mesh | undefined;
-      const superCap = groups[1]?.children[1] as THREE.Mesh | undefined;
-      expect((superBody?.material as THREE.MeshBasicMaterial).color.getHex()).toBe(SUPER_BALL_COLOR);
-      expect((superCap?.material as THREE.MeshBasicMaterial).color.getHex()).toBe(SUPER_INNER_COLOR);
-      const before = superCap?.scale.x ?? 1;
-      pool.update(1 / 60);
-      const after = superCap?.scale.x ?? 1;
-      expect(after).not.toBe(before);
+      expect(superBody).toBeDefined();
+      if (superBody === undefined) {
+        throw new Error("expected one super ball mesh");
+      }
+      // SUPER: smooth chartreuse sphere + white painted marking (no
+      // protruding white inner dome), x2 group scale for the power read.
+      expect(skinOf(superBody).base).toBe(SUPER_BALL_COLOR);
+      expect(skinOf(superBody).marking).toBe(SUPER_INNER_COLOR);
+      expect(groups[1]?.children).toHaveLength(1);
+      expect(groups[1]?.scale.x).toBe(SUPER_BALL_SCALE);
     } finally {
       pool.dispose();
     }
@@ -108,6 +192,8 @@ describe("BallsPool throw-polish", () => {
 });
 
 // Throw-polish SuperCore: bigger shells + inner pulse, no lights added.
+// The pickup orb (wireframe icosahedron + inner octahedron) is an intentional
+// ITEM design — centered, fully enclosed, not the "hand" bump — left as-is.
 describe("SuperCore throw-polish", () => {
   it("uses outer 1.0 / inner 0.5 shells and pulses the inner", () => {
     expect(SUPER_CORE_OUTER_RADIUS).toBe(1.0);
@@ -353,6 +439,352 @@ describe("BallsPool resting balls (ground y, no offset clamp)", () => {
       pool.render([{ ...resting, x: 1.05 }]);
       pool.update(1 / 60);
       expect(visible[0]?.position.y).toBeCloseTo(0.38, 2);
+    } finally {
+      pool.dispose();
+    }
+  });
+});
+
+// Neutral redesign skins (one shared dark-neutral base, per-thrower bold
+// marking): two different thrower colors give two skins with the SAME base
+// but DIFFERENT markings; the same color reuses one cached skin.
+describe("BallsPool neutral skins (per-color cached base + marking)", () => {
+  it("paints two different thrower markings over one shared neutral base", () => {
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      const colorA = LOCAL_AVATAR_COLOR;
+      const colorB = 0x123456;
+      expect(colorA).not.toBe(colorB);
+      pool.render([makeBall("a", false, colorA), makeBall("b", false, colorB)]);
+      const groups = ballGroups(scene);
+      const bodyA = groups[0]?.children[0] as THREE.Mesh | undefined;
+      const bodyB = groups[1]?.children[0] as THREE.Mesh | undefined;
+      expect(bodyA).toBeDefined();
+      expect(bodyB).toBeDefined();
+      if (bodyA === undefined || bodyB === undefined) {
+        throw new Error("expected two ball meshes");
+      }
+      // One shared dark-neutral tone for every ball ...
+      expect(skinOf(bodyA).base).toBe(BASE_BG);
+      expect(skinOf(bodyB).base).toBe(BASE_BG);
+      // ... with the thrower's identity only as the bold marking.
+      expect(skinOf(bodyA).marking).toBe(colorA);
+      expect(skinOf(bodyB).marking).toBe(colorB);
+      expect(bodyA.material).not.toBe(bodyB.material);
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  it("reuses one cached skin per color (zero per-frame allocs)", () => {
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      const color = LOCAL_AVATAR_COLOR;
+      pool.render([makeBall("a", false, color), makeBall("b", false, color)]);
+      const groups = ballGroups(scene);
+      const bodyA = groups[0]?.children[0] as THREE.Mesh | undefined;
+      const bodyB = groups[1]?.children[0] as THREE.Mesh | undefined;
+      // Same color on two slots: identical shared material instance.
+      expect(bodyA?.material).toBe(bodyB?.material);
+      // Re-render keeps the cache (no new materials per frame).
+      pool.render([makeBall("a", false, color), makeBall("b", false, color)]);
+      const groupsAgain = ballGroups(scene);
+      expect((groupsAgain[0]?.children[0] as THREE.Mesh | undefined)?.material).toBe(bodyA?.material);
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  it("falls back to the cap-violet marking over neutral for non-finite colors (compat path)", () => {
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      expect(markingColorFor(Number.NaN)).toBe(BALL_CAP_COLOR);
+      expect(markingColorFor(LOCAL_AVATAR_COLOR)).toBe(LOCAL_AVATAR_COLOR);
+      pool.render([{ ...makeBall("c", false), color: Number.NaN }]);
+      const groups = ballGroups(scene);
+      const body = groups[0]?.children[0] as THREE.Mesh | undefined;
+      expect(body).toBeDefined();
+      if (body === undefined) {
+        throw new Error("expected one ball mesh");
+      }
+      expect(skinOf(body).base).toBe(BALL_NEUTRAL_BASE);
+      expect(skinOf(body).marking).toBe(BALL_CAP_COLOR);
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  it("headless skin texture carries both the neutral base and the marking texels", () => {
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      pool.render([makeBall("a", false, LOCAL_AVATAR_COLOR)]);
+      const groups = ballGroups(scene);
+      const body = groups[0]?.children[0] as THREE.Mesh | undefined;
+      const texture = (body?.material as THREE.MeshBasicMaterial | undefined)?.map ?? null;
+      const texels = texelColors(texture);
+      // Browser CanvasTexture path exposes no texels — the userData assert
+      // above covers it; headless DataTexture path must carry both colors.
+      if (texels.size > 0) {
+        expect(texels.has(keyOf(BALL_NEUTRAL_BASE))).toBe(true);
+        expect(texels.has(keyOf(LOCAL_AVATAR_COLOR))).toBe(true);
+      } else {
+        expect(body).toBeDefined();
+      }
+    } finally {
+      pool.dispose();
+    }
+  });
+});
+
+// Bold ownership marking (owner: the old dot read as a sticker — the cap +
+// band must be big enough to identify the thrower at a glance while the base
+// stays dark). Layout pins: cap covers roughly the top third, the equator
+// band stays thin, and the headless texel mirror carries the same layout.
+describe("BallsPool bold marking layout (cap + band)", () => {
+  it("covers roughly the top third with the cap and keeps the band thin", () => {
+    expect(BALL_TEXTURE_SIZE).toBe(128);
+    // Cap is the top third (tolerance: a "roughly third" band, not a dot).
+    expect(BALL_CAP_FRACTION).toBeGreaterThanOrEqual(0.3);
+    expect(BALL_CAP_FRACTION).toBeLessThanOrEqual(0.36);
+    // Band is thin on the 64px-tall canvas: a stripe, not a second cap.
+    const canvasHeight = BALL_TEXTURE_SIZE / 2;
+    expect(BALL_EQUATOR_BAND_PX).toBeGreaterThan(0);
+    expect(BALL_EQUATOR_BAND_PX / canvasHeight).toBeLessThanOrEqual(0.125);
+    // Combined marking coverage is bold (~40%: third + thin stripe) — an
+    // order of magnitude above the old dot (~7%).
+    const coverage = BALL_CAP_FRACTION + BALL_EQUATOR_BAND_PX / canvasHeight;
+    expect(coverage).toBeGreaterThanOrEqual(0.33);
+  });
+
+  it("headless texels mirror the layout: cap rows + equator row marked, gap/base rows dark", () => {
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      pool.render([makeBall("a", false, LOCAL_AVATAR_COLOR)]);
+      const groups = ballGroups(scene);
+      const body = groups[0]?.children[0] as THREE.Mesh | undefined;
+      const texture = (body?.material as THREE.MeshBasicMaterial | undefined)?.map ?? null;
+      const grid = texelGrid(texture);
+      // Browser CanvasTexture path exposes no texels — userData + constant
+      // asserts above cover it; headless DataTexture path pins the layout.
+      if (grid === null) {
+        expect(body).toBeDefined();
+        return;
+      }
+      expect(grid).toHaveLength(8);
+      const baseKey = keyOf(BALL_NEUTRAL_BASE);
+      const markingKey = keyOf(LOCAL_AVATAR_COLOR);
+      // Cap rows (top third: rows 0-2) read fully in the thrower color.
+      for (const y of [0, 1, 2]) {
+        for (const texel of grid[y] ?? []) {
+          expect(texel).toBe(markingKey);
+        }
+      }
+      // Base gap row between cap and band stays dark (dominant read: dark).
+      for (const texel of grid[3] ?? []) {
+        expect(texel).toBe(baseKey);
+      }
+      // Equator band row reads in the thrower color.
+      for (const texel of grid[4] ?? []) {
+        expect(texel).toBe(markingKey);
+      }
+      // South rows stay dark.
+      for (const y of [5, 6, 7]) {
+        for (const texel of grid[y] ?? []) {
+          expect(texel).toBe(baseKey);
+        }
+      }
+      // Marking texel share is bold (>= 1/3), base texels still dominate-or-half.
+      let markingCount = 0;
+      let total = 0;
+      for (const row of grid) {
+        for (const texel of row) {
+          total += 1;
+          if (texel === markingKey) {
+            markingCount += 1;
+          }
+        }
+      }
+      expect(markingCount / total).toBeGreaterThanOrEqual(1 / 3);
+      expect(MAX_CACHED_BALL_SKINS).toBeGreaterThanOrEqual(8);
+    } finally {
+      pool.dispose();
+    }
+  });
+});
+
+// Contrast guard: EVERY fighter color (local + 6 remotes) must keep enough
+// lightness distance from the dark base so ownership reads for all fighters,
+// not just the bright ones. Threshold is ~0.25 per spec (0.24 to admit the
+// darkest fighter 0x7a2430 at exact delta 0.243 — pinned below); the base
+// choice (darkest BASE tone) is what makes even that pair pass.
+describe("BallsPool ownership contrast (all 7 fighters vs dark base)", () => {
+  it("every identity marking keeps >= ~0.25 lightness delta vs the dark base", () => {
+    const fighters = [IDENTITY_LOCAL, ...IDENTITY_REMOTES];
+    expect(fighters).toHaveLength(7);
+    const baseL = lightnessOf(BALL_NEUTRAL_BASE);
+    let minDelta = Number.POSITIVE_INFINITY;
+    for (const fighter of fighters) {
+      const delta = Math.abs(lightnessOf(fighter) - baseL);
+      minDelta = Math.min(minDelta, delta);
+      expect(delta).toBeGreaterThanOrEqual(0.24);
+    }
+    // Pin the worst pair so a future base/identity edit cannot silently erode
+    // it: the dark-red remote is the floor (~0.243 vs BASE_BG).
+    expect(minDelta).toBeCloseTo(0.243, 2);
+  });
+});
+
+// Neutral redesign silhouette (owner: balls must be round, no bumps): every
+// visible pool ball — normal AND super — is a single centered sphere mesh at
+// unit scale, so nothing protrudes past BALL_RADIUS. Recycled slots reset
+// rotation so a new ball starts axis-aligned.
+describe("BallsPool smooth silhouette (no protrusions)", () => {
+  it("normal + super cores are single centered spheres within R", () => {
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      pool.render([makeBall("n", false, LOCAL_AVATAR_COLOR), makeBall("s", true)]);
+      const visible = ballGroups(scene).filter((group) => group.visible);
+      expect(visible).toHaveLength(2);
+      for (const group of visible) {
+        expect(group.children).toHaveLength(1);
+        const mesh = group.children[0] as THREE.Mesh | undefined;
+        expect(mesh).toBeInstanceOf(THREE.Mesh);
+        if (mesh === undefined) {
+          throw new Error("expected one ball mesh");
+        }
+        const geometry = mesh.geometry as THREE.SphereGeometry;
+        geometry.computeBoundingSphere();
+        // Farthest surface point is exactly R, centered on the group origin;
+        // the mesh itself never scales (SUPER reads via group scale only,
+        // still a perfect sphere, just bigger).
+        expect(geometry.boundingSphere?.radius).toBeCloseTo(BALL_RADIUS, 5);
+        expect(geometry.boundingSphere?.center.length() ?? 1).toBeCloseTo(0, 5);
+        expect(mesh.position.length()).toBe(0);
+        expect(mesh.scale.x).toBe(1);
+        expect(mesh.scale.y).toBe(1);
+        expect(mesh.scale.z).toBe(1);
+      }
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  it("resets recycled slot rotation so a new ball starts axis-aligned", () => {
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      const rolling: NetBallSnapshot = {
+        ballId: "spin",
+        ownerId: "owner",
+        x: 1,
+        y: 0.58,
+        z: 2,
+        power01: 0.5,
+        super: false,
+        color: BALL_CAP_COLOR,
+        ricochet: true,
+        resting: false,
+        rolling: true,
+        vx: 2,
+        vz: 0,
+      };
+      pool.render([rolling]);
+      pool.update(1 / 60);
+      const groups = ballGroups(scene);
+      const spun = groups.filter((group) => group.visible);
+      expect(spun).toHaveLength(1);
+      const identity = new THREE.Quaternion();
+      expect(spun[0]?.quaternion.angleTo(identity)).toBeGreaterThan(0);
+      // Recycle the slot (vanish, then a NEW ball id reuses it): the fresh
+      // core must not inherit the previous roll orientation.
+      pool.render([]);
+      pool.render([makeBall("fresh", false, LOCAL_AVATAR_COLOR)]);
+      const fresh = ballGroups(scene).filter((group) => group.visible);
+      expect(fresh).toHaveLength(1);
+      expect(fresh[0]?.quaternion.angleTo(identity)).toBe(0);
+    } finally {
+      pool.dispose();
+    }
+  });
+});
+
+// Stage 4d.4 roll spin: while ball.rolling the mesh rotates around the
+// horizontal axis perpendicular to (vx, vz) at hypot(vx, vz) / BALL_RADIUS;
+// resting (or zero-speed) balls never rotate. Scalar scratch only. The bold
+// cap/band marking orbits with the mesh, so the spin reads on the smooth
+// sphere without any geometric bump.
+describe("BallsPool roll spin (rolling rotates, resting holds)", () => {
+  function makeRollingBall(ballId: string, vx: number, vz: number, rolling: boolean): NetBallSnapshot {
+    return {
+      ballId,
+      ownerId: "owner",
+      x: 1,
+      y: 0.58,
+      z: 2,
+      power01: 0.5,
+      super: false,
+      color: BALL_CAP_COLOR,
+      ricochet: true,
+      resting: !rolling,
+      rolling,
+      vx,
+      vz,
+    };
+  }
+
+  function visibleGroup(scene: THREE.Scene): THREE.Group {
+    const visible = ballGroups(scene).filter((group) => group.visible);
+    expect(visible).toHaveLength(1);
+    const group = visible[0];
+    if (group === undefined) {
+      throw new Error("expected one visible ball");
+    }
+    return group;
+  }
+
+  it("rotates a rolling ball at speed/BALL_RADIUS around the velocity-perpendicular axis", () => {
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      // vx=2, vz=0: axis is up×v normalized = (0, 0, -1), rate 2/0.38 rad/s.
+      pool.render([makeRollingBall("roll", 2, 0, true)]);
+      const group = visibleGroup(scene);
+      const before = group.quaternion.clone();
+      const dt = 1 / 60;
+      pool.update(dt);
+      const after = group.quaternion.clone();
+      expect(after.angleTo(before)).toBeGreaterThan(0);
+      const expected = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 0, -1),
+        (Math.hypot(2, 0) / BALL_RADIUS) * dt,
+      );
+      expect(after.angleTo(expected)).toBeLessThan(1e-6);
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  it("holds still when resting and when rolling with zero velocity", () => {
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      pool.render([makeRollingBall("rest", 0, 0, false)]);
+      const group = visibleGroup(scene);
+      const pinned = group.quaternion.clone();
+      pool.update(1 / 60);
+      pool.update(1 / 60);
+      expect(group.quaternion.angleTo(pinned)).toBe(0);
+      // Rolling flag with zero planar speed: no rotation either.
+      pool.render([makeRollingBall("rest", 0, 0, true)]);
+      const still = group.quaternion.clone();
+      pool.update(1 / 60);
+      expect(group.quaternion.angleTo(still)).toBe(0);
     } finally {
       pool.dispose();
     }
