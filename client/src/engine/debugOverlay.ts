@@ -15,10 +15,13 @@ export interface SnapDebugState {
   serverY: number;
   clientY: number;
   divergence: number;
-  // Stall-snap gates (bug round 7): divOk (div >= STALL_MIN_DIV), input
-  // magnitude + inputOk (>= STALL_INPUT_MIN), stall-window progress +
-  // stallOk (< MIN_PROGRESS_M over STALL_WINDOW_S).
+  // Stall-snap gates (bug round 7 + tower-top snap-loop fix): divOk (div
+  // inside [stallMinDiv, stallMaxDiv]), input magnitude + inputOk (>=
+  // inputMin), stall-window NET displacement + stallOk (< stallWindowM over
+  // the window), observed frames + framesOk (>= minFrames before the window
+  // may report a stall).
   stallMinDiv: number;
+  stallMaxDiv: number;
   divOk: boolean;
   inputMag: number;
   inputMin: number;
@@ -26,6 +29,9 @@ export interface SnapDebugState {
   stallProgressM: number;
   stallWindowM: number;
   stallOk: boolean;
+  stallFrames: number;
+  stallMinFrames: number;
+  framesOk: boolean;
   // Big-div heal state: sustained-hold timer + threshold + gap requirement.
   bigDivHoldS: number;
   bigDivHoldNeedS: number;
@@ -39,9 +45,16 @@ export interface SnapDebugState {
   levelTopY: number;
   evalTopIndex: number;
   xzOk: boolean;
+  // Whether the server XZ sits on the evaluated top's strict footprint
+  // (false = ring-only snapshot → up-snap refused as "server-off-top").
+  srvXzOnTop: boolean;
   blockCenterX: number;
   blockCenterZ: number;
   blockDist: number;
+  // Per-top suppress state (bug round 9): index of the top the last up-snap
+  // landed on while the avatar still stands in its expanded footprint
+  // (-1 = no top held, snaps re-armed). Rendered as heldTop=#i / none.
+  heldTopIndex: number;
   xzDist: number;
   xzBand: string;
   result: string;
@@ -81,21 +94,23 @@ export function formatSnapDebug(state: SnapDebugState): string {
     state.evalTopIndex >= 0
       ? `#${state.evalTopIndex} c=(${fmt(state.blockCenterX, 2)},${fmt(state.blockCenterZ, 2)}) d=${fmt(state.blockDist, 2)}`
       : "none";
+  const srvTopLabel = state.evalTopIndex >= 0 ? (state.srvXzOnTop ? "YES" : "NO") : "n/a";
   const lastSnap = state.lastUpSnapAgoS >= 0 ? `${fmt(state.lastUpSnapAgoS, 1)}s ago` : "never";
   const lastBig = state.lastBigHealAgoS >= 0 ? `${fmt(state.lastBigHealAgoS, 1)}s ago` : "never";
+  const heldTop = state.heldTopIndex >= 0 ? `#${state.heldTopIndex}` : "none";
   const lines = [
     "SNAP-DEBUG (F3)",
     `Y: srv=${fmt(state.serverY, 3)} cli=${fmt(state.clientY, 3)} div=${signed(state.divergence, 3)}`,
-    `G div>=${fmt(state.stallMinDiv, 2)}: ${state.divOk ? "YES" : "NO"} ${mark(state.divOk)}`,
+    `G div in [${fmt(state.stallMinDiv, 2)},${fmt(state.stallMaxDiv, 2)}]: ${state.divOk ? "YES" : "NO"} ${mark(state.divOk)}`,
     `G top srvY~=top: ${topLabel} ${mark(state.levelTopIndex >= 0)}`,
     `G input>=${fmt(state.inputMin, 1)}: ${fmt(state.inputMag, 2)} ${mark(state.inputOk)}`,
-    `G stall prog<${fmt(state.stallWindowM, 2)}: ${fmt(state.stallProgressM, 3)} ${mark(state.stallOk)}`,
+    `G stall prog<${fmt(state.stallWindowM, 2)}: ${fmt(state.stallProgressM, 3)} ${mark(state.stallOk)} n=${state.stallFrames}/${state.stallMinFrames} ${mark(state.framesOk)}`,
     `G air !airborne: ${state.airborne ? "YES" : "NO"} ${mark(!state.airborne)}`,
     `G cool ==0: ${fmt(state.cooldownLeftS, 2)}s ${mark(!(state.cooldownLeftS > 0))}`,
-    `G xin blk+0.5: ${state.evalTopIndex >= 0 ? (state.xzOk ? "YES" : "NO") : "n/a"} ${blockLabel} ${mark(state.xzOk)}`,
+    `G xin blk+0.5: ${state.evalTopIndex >= 0 ? (state.xzOk ? "YES" : "NO") : "n/a"} ${blockLabel} ${mark(state.xzOk)} srvTop=${srvTopLabel}`,
     `BIG |div|>=${fmt(state.bigDivNeed, 2)}: ${fmt(state.bigDivAbs, 3)} hold=${fmt(state.bigDivHoldS, 2)}/${fmt(state.bigDivHoldNeedS, 2)}s`,
     `XZ srv: ${fmt(state.xzDist, 2)}m [${state.xzBand}] res=${state.result}(${state.snapKind})`,
-    `SNAPS: ${state.upSnapCount} last=${lastSnap} BIGHEAL: ${state.bigHealCount} last=${lastBig} note=${state.note}`,
+    `SNAPS: ${state.upSnapCount} last=${lastSnap} BIGHEAL: ${state.bigHealCount} last=${lastBig} heldTop=${heldTop} note=${state.note}`,
   ];
   return lines.join("\n");
 }

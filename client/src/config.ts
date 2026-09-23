@@ -218,24 +218,65 @@ export const SELF_RECONCILE_RATE = 8;
 // run-in-place stall, so descents (XZ progresses) never match it.
 // Gates (ALL must hold): playing && alive (call-site) && NOT airborne &&
 // cooldown == 0 && serverY within TOP_TOL of a support top && client XZ in
-// that top's expanded footprint (hx + AVATAR_BODY_RADIUS per axis) &&
-// serverY - localY >= STALL_MIN_DIV && |move| >= STALL_INPUT_MIN && XZ
-// displacement over the last STALL_WINDOW_S < STALL_MIN_PROGRESS_M.
-// Action: teleportSelf(serverX, serverZ, serverY - REST_OFFSET) (true Rapier
-// rest — no post-snap drop), cooldown 0.3s, SNAPS counter, [up-snap] log.
+// that top's expanded footprint (hx + AVATAR_BODY_RADIUS per axis) && server
+// XZ on that top's STRICT footprint (see SNAP_XZ_INSET refusal below) &&
+// serverY - localY inside [STALL_MIN_DIV, UP_SNAP_MAX_DIV] && |move| >=
+// STALL_INPUT_MIN && window observed for >= STALL_MIN_FRAMES frames && XZ
+// net displacement over the last STALL_WINDOW_S < STALL_MIN_PROGRESS_M.
+// Action: teleportSelf(clampedServerX, clampedServerZ, serverY - REST_OFFSET)
+// (true Rapier rest — no post-snap drop), cooldown 0.3s, SNAPS counter,
+// [up-snap] log.
 // STALL_MIN_DIV 0.03 sits above solver noise (~0.01) and below the 0.100 rest
 // offset, so the resting wedge qualifies while exact agreement never does.
+// The full band is [STALL_MIN_DIV, UP_SNAP_MAX_DIV] = [0.03, 0.45].
 export const SELF_RECONCILE_STALL_MIN_DIV = 0.03;
+// Up-snap divergence UPPER bound (bug round 9 — was 0.2 since the tower-top
+// snap-loop fix): ramp-crest wedges add slope-height difference (tan14° ≈
+// 0.25 m per meter of ramp run) on top of the 0.10 Rapier rest offset, so an
+// avatar wedged at a ramp-crest lip while the server stands on the crest top
+// diverges ~0.204 — the 0.2 bound locked that real wedge in a (0.2, 0.5) dead
+// zone (up-snap refused as "no-stall-div", big-div refused below 0.5) until
+// the server itself crossed the crest. 0.45 admits the crest wedge with
+// margin while staying under BIG_DIV 0.5 and far under the grounded post-fall
+// desync (~2.0) it exists to exclude; the stall + progress + level +
+// footprint + input gates keep false-positive control (descents and walk-offs
+// progress in XZ, ground walls match no level). The remaining (0.45, 0.5) dead
+// zone is by design — unreachable by legitimate 14°-crest geometry (max legit
+// wedge ≈ 0.10 + 0.5·tan14° ≈ 0.22).
+export const SELF_RECONCILE_UP_SNAP_MAX_DIV = 0.45;
 export const SELF_RECONCILE_STALL_INPUT_MIN = 0.5;
 export const SELF_RECONCILE_STALL_WINDOW_S = 0.25;
 export const SELF_RECONCILE_STALL_MIN_PROGRESS_M = 0.12;
 // Stall-window ring buffer: STALL_SLOTS slots of WINDOW_S/SLOTS each
-// (8 x ~31ms ≈ 0.25s). At 60fps each frame adds ~17ms to the current slot,
-// so ~2 frames share a slot. Normal walk covers 4.5 m/s x 0.25 s ≈ 1.1 m
-// per window (>> 0.12, never stalls); a lip wedge runs in place (net ~0,
-// physics push canceled by the reconcile drag-back each frame) and the
-// window sum stays under 0.12. Preallocated, zero per-frame allocs.
+// (8 x ~31ms ≈ 0.25s). The window is scored by NET DISPLACEMENT (distance
+// from the oldest slot's anchor position to the current XZ), not summed path
+// length: back-and-forth jitter (reconcile drag fighting velocity, Rapier
+// contact buzz at a lip) must not read as travel, and wall-time slot rotation
+// during a hitch must not flush real travel into a fake stall. Normal walk
+// covers 4.5 m/s x 0.25 s ≈ 1.1 m net per window (>> 0.12, never stalls); a
+// lip wedge grinds in place (net ~0) and the window drains. Preallocated
+// anchor pairs, zero per-frame allocs.
 export const SELF_RECONCILE_STALL_SLOTS = 8;
+// Minimum observed frames before the stall window may report a stall
+// (tower-top snap-loop fix): a freshly seeded window (teleport/respawn, or
+// the first frames after boot) carries zero travel evidence and would
+// otherwise manufacture a stall on the very next reconcile. The counter is
+// monotone between teleports, so a MID-SESSION hitch never lowers it — this
+// gate protects FRESH windows only; single hitches are covered by the net-
+// displacement scoring above. 5 frames (~83 ms at 60 fps) is well inside
+// the 0.25 s window, so real wedges still heal within ~0.3 s while fresh
+// windows can never fire.
+export const SELF_RECONCILE_STALL_MIN_FRAMES = 5;
+// Up-snap landing inset (tower-top snap-loop fix): the snap XZ target is
+// clamped axis-wise into [top.x - hx + INSET, top.x + hx - INSET] (same for
+// z), a hair inside the STRICT physical top. The server keeps fighters at top
+// level out to hx + PLAYER_BODY_RADIUS (its hysteresis ring), where the local
+// collider top DOES NOT EXIST — snapping to raw server XZ there lands the
+// body over the void (falls, grinds, resnaps: the ~0.3-0.6 s teleport loop).
+// A server XZ outside the strict top but inside the expanded footprint is
+// therefore REFUSED outright (telemetry note "server-off-top" — the server is
+// about to drop anyway; the big-div heal owns that case), never clamped in.
+export const SELF_RECONCILE_SNAP_XZ_INSET = 0.01;
 // Downward-desync heal (bug round 7 — fixes the video's t=6.9-14.4s frozen
 // state: server XZ drifted off the footprint, server Y fell 3.30 -> 1.10
 // while the client stayed at 3.20, div -2.100 forever, no down-pull

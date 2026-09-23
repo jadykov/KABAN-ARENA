@@ -45,10 +45,13 @@ import {
   SELF_RECONCILE_TOP_TOL,
   SELF_RECONCILE_UP_SNAP_COOLDOWN_S,
   SELF_RECONCILE_STALL_MIN_DIV,
+  SELF_RECONCILE_UP_SNAP_MAX_DIV,
   SELF_RECONCILE_STALL_INPUT_MIN,
+  SELF_RECONCILE_STALL_MIN_FRAMES,
   SELF_RECONCILE_STALL_WINDOW_S,
   SELF_RECONCILE_STALL_MIN_PROGRESS_M,
   SELF_RECONCILE_STALL_SLOTS,
+  SELF_RECONCILE_SNAP_XZ_INSET,
   SELF_RECONCILE_BIG_DIV,
   SELF_RECONCILE_BIG_DIV_HOLD_S,
   SELF_RECONCILE_REST_OFFSET,
@@ -177,30 +180,53 @@ export interface ReconcileTelemetry {
   // Avatar Y at decision time + divergence (serverY - localY).
   localY: number;
   divergence: number;
-  // Stall-snap gates: divOk (divergence >= STALL_MIN_DIV), input magnitude
-  // fed by the caller + inputOk (>= STALL_INPUT_MIN), stall-window progress
-  // (XZ travel over the last STALL_WINDOW_S) + stallOk (< MIN_PROGRESS_M).
+  // Stall-snap gates: divOk (divergence inside [STALL_MIN_DIV,
+  // UP_SNAP_MAX_DIV] — the lower bound clears solver noise, the upper bound
+  // keeps grounded post-fall desyncs out of the UP path), input magnitude
+  // fed by the caller + inputOk (>= STALL_INPUT_MIN), stall-window net
+  // displacement (current XZ vs the oldest slot anchor over STALL_WINDOW_S)
+  // + stallOk (< MIN_PROGRESS_M), and the window's observed-frame count +
+  // stallFramesOk (>= STALL_MIN_FRAMES, so a fresh/hitched window can never
+  // report a stall).
   divOk: boolean;
   moveMag: number;
   inputOk: boolean;
   stallProgressM: number;
   stallOk: boolean;
+  stallFrames: number;
+  stallFramesOk: boolean;
   // Big-div heal state: sustained-hold timer + its own event counter.
   bigDivHoldS: number;
   bigHealCount: number;
   lastBigHealAtMs: number;
   airborne: boolean;
   cooldownLeftS: number;
-  // First support top whose level matches serverY within TOP_TOL (index into
-  // the cached list, -1 when none) — observation pre-scan, mirrors the loop.
+  // Support-top candidate for DISPLAY (index into the cached list, -1 when
+  // none): among the tops whose level matches serverY within TOP_TOL the
+  // pre-scan prefers the one whose STRICT footprint contains the server XZ,
+  // then one whose EXPANDED footprint (hx + AVATAR_BODY_RADIUS) contains it,
+  // and only then the first level match in list order — so the F3 "G top"
+  // line names the top the server actually stands on (a server climbing a
+  // ramp slope at 3.117 reads P2, not the first-match P3 at the same nominal
+  // 3.1). Observation only; the snap loop below applies the same preference.
   levelTopIndex: number;
   levelTopY: number;
   // Last top the snap loop actually evaluated XZ on (-1 when the loop
   // never reached a level-matching top).
   evalTopIndex: number;
   xzOk: boolean;
+  // Whether the SERVER XZ sits on the evaluated top's STRICT physical
+  // footprint (|sx - top.x| <= hx && |sz - top.z| <= hz, no radius expansion):
+  // false means the snapshot lives in the server's hysteresis ring, where the
+  // local collider top does not exist (up-snap refused as "server-off-top").
+  srvXzOnTop: boolean;
   blockCenterX: number;
   blockCenterZ: number;
+  // Per-top up-snap rate limit (bug round 9): index of the top the last
+  // up-snap landed on while the avatar still stands in its expanded
+  // footprint (-1 = no top held, snaps re-armed). Gameplay owns the field;
+  // telemetry mirrors it so F3 can show the live suppress state.
+  heldTopIndex: number;
   // Distance avatar -> evaluated block center (-1 when no top evaluated).
   blockDist: number;
   // XZ distance avatar -> server snapshot + which XZ band owns it.
@@ -212,8 +238,8 @@ export interface ReconcileTelemetry {
   upSnapCount: number;
   lastUpSnapAtMs: number;
   // Short machine-readable reason for the outcome (e.g. "no-input",
-  // "no-progress", "off-block", "airborne", "cooldown", "recoil-grace",
-  // "far-snap", "big-heal").
+  // "no-progress", "off-block", "server-off-top", "snap-rate", "airborne",
+  // "cooldown", "recoil-grace", "far-snap", "big-heal").
   note: string;
 }
 
@@ -323,16 +349,21 @@ export class SceneManager {
   // reconcileSelf; set on every snap path. 0.3 s exceeds the 0.25 s stall
   // window, so a post-teleport empty window can never fire early.
   private upSnapCooldownLeftS = 0;
-  // Stall-window ring buffer (bug round 7): preallocated per-slot XZ-travel
-  // accumulators covering the last STALL_WINDOW_S (SLOTS slots x
-  // WINDOW_S/SLOTS each ≈ 0.25 s). The window sum is the avatar's XZ
-  // displacement over that span — under MIN_PROGRESS_M with input held it
-  // proves a run-in-place stall. Scalar only, zero per-frame allocs.
-  private readonly stallSlots: number[] = new Array<number>(SELF_RECONCILE_STALL_SLOTS).fill(0);
+  // Stall-window anchor ring (tower-top snap-loop fix): preallocated XZ
+  // anchors covering the last STALL_WINDOW_S (SLOTS slots x WINDOW_S/SLOTS
+  // each ≈ 0.25 s). The window scores NET DISPLACEMENT — distance from the
+  // oldest slot's anchor to the current XZ — so in-place jitter never reads
+  // as travel. Scalar pairs only, zero per-frame allocs.
+  private readonly stallAnchorX: number[] = new Array<number>(SELF_RECONCILE_STALL_SLOTS).fill(0);
+  private readonly stallAnchorZ: number[] = new Array<number>(SELF_RECONCILE_STALL_SLOTS).fill(0);
   private stallSlotIndex = 0;
   private stallSlotTimeS = 0;
-  private stallLastX = Number.NaN;
-  private stallLastZ = Number.NaN;
+  // Frames observed since the last reseed (authoritative placement): the
+  // window may only report a stall once >= STALL_MIN_FRAMES frames fed it, so
+  // a fresh (zero-evidence) window or a render hitch can never fire a snap.
+  private stallWindowFrames = 0;
+  // False until the first tracked frame seeds every anchor on the avatar.
+  private stallSeeded = false;
   // Big-div sustained-hold timer (bug round 7): accumulates while
   // |serverY - localY| >= BIG_DIV and NOT airborne; reset on agreement,
   // airborne, or any teleport. Fires the downward-desync heal at HOLD_S.
@@ -341,6 +372,19 @@ export class SceneManager {
   // iterates this, never getPlatforms()/getObstacleLayout(), so the per-frame
   // path allocates nothing).
   private readonly supportTops: SupportTop[] = buildSupportTopList();
+  // Per-top up-snap rate limit (bug round 9 — the lip-grind loop): after an
+  // up-snap onto top T the first heal per visit is done, but the healed body
+  // lands supported while the player still pushes into the far lip, so the
+  // stall window re-drains and the snap refires on the 0.3 s cooldown cadence
+  // (~15 snaps in 8.5 s live). This scalar holds T's list index until the
+  // avatar LEAVES T's expanded footprint (checked every reconcile against the
+  // live client XZ — outside for >= 1 frame re-arms) or the client goes
+  // airborne. A teleport never touches this scalar directly — it lands outside
+  // the footprint, so the hold clears on the next live reconcile (deferred).
+  // Further up-snaps onto T while held note "snap-rate"; snaps onto any OTHER
+  // top stay live, and leaving + re-entering re-arms (the round-6 loop shape
+  // still heals). One scalar, zero per-frame allocs.
+  private heldTopIndex = -1;
   // Reused reconcile telemetry object (F3 overlay reads it; gameplay ignores
   // it). Mutated in place every reconcileSelf call — never replaced.
   private readonly reconcileTelemetry: ReconcileTelemetry = {
@@ -356,6 +400,8 @@ export class SceneManager {
     inputOk: false,
     stallProgressM: 0,
     stallOk: false,
+    stallFrames: 0,
+    stallFramesOk: false,
     bigDivHoldS: 0,
     bigHealCount: 0,
     lastBigHealAtMs: 0,
@@ -365,8 +411,10 @@ export class SceneManager {
     levelTopY: Number.NaN,
     evalTopIndex: -1,
     xzOk: false,
+    srvXzOnTop: false,
     blockCenterX: Number.NaN,
     blockCenterZ: Number.NaN,
+    heldTopIndex: -1,
     blockDist: -1,
     xzDist: -1,
     xzBand: "none",
@@ -1102,7 +1150,8 @@ export class SceneManager {
     this.airborneGate.reset();
     // Authoritative placement invalidates the stall window (the jump is not
     // travel) and clears the big-div hold (fresh agreement by construction):
-    // reseed the window on the landing spot with empty slots.
+    // reseed the window anchors on the landing spot (slots hold anchor
+    // positions, not empty zeroes) with zero observed frames.
     this.resetStallWindow(x, z);
     this.bigDivHoldS = 0;
     // A teleport is authoritative placement (spawn/respawn/snap) — any
@@ -1114,52 +1163,55 @@ export class SceneManager {
   }
 
   // Stall-window reset (authoritative placement): the teleport jump is not
-  // travel, so the ring is emptied and reseeded on the landing spot. Called
-  // from teleportSelf, which every snap/spawn/respawn path funnels through.
+  // travel, so every anchor reseeds on the landing spot with zero observed
+  // frames — a fresh window carries no stall evidence until STALL_MIN_FRAMES
+  // frames feed it. Called from teleportSelf, which every snap/spawn/respawn
+  // path funnels through.
   private resetStallWindow(x: number, z: number): void {
-    for (let i = 0; i < this.stallSlots.length; i += 1) {
-      this.stallSlots[i] = 0;
+    for (let i = 0; i < this.stallAnchorX.length; i += 1) {
+      this.stallAnchorX[i] = x;
+    }
+    for (let i = 0; i < this.stallAnchorZ.length; i += 1) {
+      this.stallAnchorZ[i] = z;
     }
     this.stallSlotIndex = 0;
     this.stallSlotTimeS = 0;
-    this.stallLastX = x;
-    this.stallLastZ = z;
+    this.stallWindowFrames = 0;
+    this.stallSeeded = true;
   }
 
-  // Stall-window tracking (bug round 7): feeds this frame's avatar XZ travel
-  // into the current ring slot and returns the window sum — the avatar's XZ
-  // displacement over the last STALL_WINDOW_S. Math: SLOTS slots x
-  // WINDOW_S/SLOTS s each; per call the slot timer advances by dt and the
-  // slot rotates (zeroed) once its share elapses, so the sum always covers
-  // ~one window of recent motion. First call only seeds the reference (no
-  // travel yet). Scalar writes into the preallocated ring — zero allocs.
+  // Stall-window tracking (tower-top snap-loop fix): feeds this frame's avatar
+  // XZ into the anchor ring and returns the NET DISPLACEMENT from the oldest
+  // slot's anchor to the current XZ — the avatar's start-to-current travel
+  // over the last STALL_WINDOW_S. Math: SLOTS slots x WINDOW_S/SLOTS s each;
+  // per call the slot timer advances by dt and the slot rotates once its share
+  // elapses, anchoring the new slot on the current position, so the oldest
+  // anchor always trails by ~one window. First call only seeds every anchor
+  // on the avatar (zero displacement, zero frames — no stall evidence yet).
+  // Scalar writes into the preallocated rings — zero allocs.
   private trackStallWindow(x: number, z: number, deltaSeconds: number): number {
-    if (!Number.isFinite(this.stallLastX) || !Number.isFinite(this.stallLastZ)) {
-      this.stallLastX = x;
-      this.stallLastZ = z;
+    const slotCount = this.stallAnchorX.length;
+    if (slotCount <= 0) {
       return 0;
     }
-    const frameTravel = Math.hypot(x - this.stallLastX, z - this.stallLastZ);
-    this.stallLastX = x;
-    this.stallLastZ = z;
-    const slotCount = this.stallSlots.length;
-    if (slotCount <= 0) {
-      return frameTravel;
+    if (!this.stallSeeded) {
+      this.resetStallWindow(x, z);
     }
-    const current = this.stallSlots[this.stallSlotIndex];
-    this.stallSlots[this.stallSlotIndex] = (current ?? 0) + frameTravel;
+    // The seeding call observes this frame too (it saw the landing spot), so
+    // the count starts at 1 — the 5th tracked frame already carries evidence.
+    this.stallWindowFrames += 1;
     this.stallSlotTimeS += deltaSeconds;
     const slotShareS = SELF_RECONCILE_STALL_WINDOW_S / slotCount;
     while (this.stallSlotTimeS >= slotShareS && slotShareS > 0) {
       this.stallSlotTimeS -= slotShareS;
       this.stallSlotIndex = (this.stallSlotIndex + 1) % slotCount;
-      this.stallSlots[this.stallSlotIndex] = 0;
+      this.stallAnchorX[this.stallSlotIndex] = x;
+      this.stallAnchorZ[this.stallSlotIndex] = z;
     }
-    let progressM = 0;
-    for (let i = 0; i < slotCount; i += 1) {
-      progressM += this.stallSlots[i] ?? 0;
-    }
-    return progressM;
+    const oldest = (this.stallSlotIndex + 1) % slotCount;
+    const anchorX = this.stallAnchorX[oldest] ?? x;
+    const anchorZ = this.stallAnchorZ[oldest] ?? z;
+    return Math.hypot(x - anchorX, z - anchorZ);
   }
 
   // Gentle self reconciliation toward the server snapshot (XZ only, no
@@ -1170,26 +1222,42 @@ export class SceneManager {
   // Recoil grace: for RECOIL_RECONCILE_GRACE_S after a local kick the
   // correction is skipped (prediction-only kick, server re-applies it) so
   // reconcile never fights the kick and double-tugs the avatar.
-  // Stall-snap (bug round 7 — replaces the round 6/6b/6c Y-threshold +
-  // speed-gate UP-snap, which live F3 telemetry proved dead: healthy Rapier
-  // rest sits EXACTLY 0.100 below the server nominal and the resting
-  // lip-wedge sits there too, so Y-divergence alone can never tell them
-  // apart; the 0.11 hang gate was structurally blind and the 1.5 speed gate
-  // blocked the only live heal window). The local Rapier body has no
-  // auto-step, so a few cm of Y-divergence wedge it against the side lip
-  // forever (XZ-only reconcile can never heal it: the edge walk-back
-  // invisible wall). The discriminator is STALL EVIDENCE — ALL must hold:
-  // not airborne, cooldown == 0, serverY within TOP_TOL of a support top,
-  // client XZ in that top's expanded footprint, serverY - localY >=
-  // STALL_MIN_DIV, input |move| >= STALL_INPUT_MIN (fed by the caller via
-  // moveMag — reconcile runs before physics, so the live stick magnitude
-  // comes in as a parameter), and XZ travel over the last STALL_WINDOW_S <
-  // STALL_MIN_PROGRESS_M (zero-alloc ring buffer, see trackStallWindow).
-  // Action: teleport to (serverX, serverZ, serverY - REST_OFFSET) — true
-  // Rapier rest, no post-snap drop — arm the cooldown, count the snap.
-  // Healthy rest never fires (no input), normal walking never fires (XZ
-  // progresses), descents/step-offs never fire (XZ progresses — no speed
-  // gate needed), ground walls never fire (serverY matches no top).
+  // Stall-snap (bug round 7 stall detector + tower-top snap-loop fix — the
+  // round 6/6b/6c Y-threshold + speed-gate UP-snap it replaces was proven dead
+  // by live F3 telemetry: healthy Rapier rest sits EXACTLY 0.100 below the
+  // server nominal and the resting lip-wedge sits there too, so Y-divergence
+  // alone can never tell them apart). The local Rapier body has no auto-step,
+  // so a few cm of Y-divergence wedge it against the side lip forever
+  // (XZ-only reconcile can never heal it: the edge walk-back invisible wall).
+  // The discriminator is STALL EVIDENCE — ALL must hold: not airborne,
+  // cooldown == 0, serverY within TOP_TOL of a support top, client XZ in that
+  // top's expanded footprint, server XZ on that top's STRICT footprint (a
+  // ring-only server XZ is REFUSED as "server-off-top": the server's
+  // hysteresis keeps top level where the local collider top does not exist,
+  // and it is about to drop anyway), divergence inside [STALL_MIN_DIV,
+  // UP_SNAP_MAX_DIV] (the upper bound keeps grounded post-fall desyncs out of
+  // the UP path — big-div owns those), input |move| >= STALL_INPUT_MIN (fed
+  // by the caller via moveMag — reconcile runs before physics, so the live
+  // stick magnitude comes in as a parameter), the window observed for >=
+  // STALL_MIN_FRAMES frames (fresh/hitched windows carry no evidence), and XZ
+  // net displacement over the last STALL_WINDOW_S < STALL_MIN_PROGRESS_M
+  // (zero-alloc anchor ring, see trackStallWindow).
+  // Action: teleport to (serverX clamped axis-wise just inside the strict
+  // lip, serverZ likewise, serverY - REST_OFFSET) — true Rapier rest on the
+  // physical top, no post-snap drop — arm the cooldown, count the snap, and
+  // HOLD the top (bug round 9: exactly one up-snap per visit — further snaps
+  // onto the same top note "snap-rate" until the avatar leaves its expanded
+  // footprint or goes airborne; a teleport lands outside the footprint, so the
+  // hold clears on the next live reconcile — teleportSelf never touches it).
+  // Healthy rest never fires (no input), normal walking never fires (net
+  // displacement progresses — hitch-proof: jitter is not travel), descents /
+  // step-offs never fire (XZ progresses — no speed gate needed), ground walls
+  // never fire (serverY matches no top).
+  // Bug round 9 follow-ups: the div band widened to [0.03, 0.45] (ramp-crest
+  // wedges add slope height on top of the rest offset and diverge ~0.204 —
+  // the old 0.2 bound dead-zoned them), and both the display pre-scan and the
+  // snap loop prefer the level-matching top the SERVER strictly stands on
+  // (a same-nominal first match like P3 no longer shadows the true top).
   // Big-div heal (bug round 7): a sustained |serverY - localY| >= BIG_DIV
   // while NOT airborne (hold timer BIG_DIV_HOLD_S, reset on agreement /
   // airborne / teleport) teleports to the FULL server pose — the down-pull
@@ -1218,13 +1286,17 @@ export class SceneManager {
     t.inputOk = moveMag >= SELF_RECONCILE_STALL_INPUT_MIN;
     t.stallProgressM = 0;
     t.stallOk = false;
+    t.stallFrames = 0;
+    t.stallFramesOk = false;
     t.bigDivHoldS = this.bigDivHoldS;
     t.airborne = this.airborneGate.isAirborne;
     t.cooldownLeftS = this.upSnapCooldownLeftS;
     t.levelTopIndex = -1;
     t.levelTopY = Number.NaN;
+    t.heldTopIndex = this.heldTopIndex;
     t.evalTopIndex = -1;
     t.xzOk = false;
+    t.srvXzOnTop = false;
     t.blockCenterX = Number.NaN;
     t.blockCenterZ = Number.NaN;
     t.blockDist = -1;
@@ -1252,29 +1324,84 @@ export class SceneManager {
       this.upSnapCooldownLeftS = Math.max(0, this.upSnapCooldownLeftS - deltaSeconds);
     }
     t.cooldownLeftS = this.upSnapCooldownLeftS;
+    // Per-top hold re-arm (bug round 9): while a top is held, every live frame
+    // compares the CURRENT client XZ against that top's expanded footprint —
+    // outside for >= 1 frame re-arms (leave-and-re-enter heals again), as does
+    // an airborne frame (a trampoline launch or a fall starts a fresh visit).
+    // Runs before the cooldown gate so leaving mid-cooldown still re-arms for
+    // the frames after it. Scalar reads, zero allocs.
+    if (this.heldTopIndex >= 0) {
+      const held = this.supportTops[this.heldTopIndex];
+      const outside =
+        held === undefined ||
+        this.airborneGate.isAirborne ||
+        Math.abs(this.avatar.position.x - held.x) > held.hx + AVATAR_BODY_RADIUS ||
+        Math.abs(this.avatar.position.z - held.z) > held.hz + AVATAR_BODY_RADIUS;
+      if (outside) {
+        this.heldTopIndex = -1;
+      }
+    }
+    t.heldTopIndex = this.heldTopIndex;
     t.localY = this.avatar.position.y;
     // Stall-window tracking runs on every live frame (before any gate): the
-    // avatar's XZ travel since the last call feeds the current ring slot, so
-    // the window sum always reflects the last STALL_WINDOW_S of motion.
+    // anchor ring always reflects the last STALL_WINDOW_S of motion, scored
+    // as net displacement (start-to-current, hitch-proof).
     t.stallProgressM = this.trackStallWindow(
       this.avatar.position.x,
       this.avatar.position.z,
       deltaSeconds,
     );
     t.stallOk = t.stallProgressM < SELF_RECONCILE_STALL_MIN_PROGRESS_M;
+    t.stallFrames = this.stallWindowFrames;
+    t.stallFramesOk = this.stallWindowFrames >= SELF_RECONCILE_STALL_MIN_FRAMES;
     const serverYFinite = Number.isFinite(serverY);
-    // Observation pre-scan (diagnostic only): first support top whose level
-    // matches serverY within TOP_TOL — mirrors the loop's level check so the
-    // overlay can show the top match even when a later gate fails.
+    // Observation pre-scan (diagnostic only): the support-top candidate for
+    // the F3 "G top" line — the strict-server top first, then an
+    // expanded-footprint top (a server climbing a ramp slope sits inside no
+    // strict box but still belongs to THAT figure), then the first level
+    // match. Scalar indices over the cached list, zero allocs.
     if (serverYFinite) {
       t.divergence = serverY - t.localY;
-      t.divOk = t.divergence >= SELF_RECONCILE_STALL_MIN_DIV;
+      t.divOk =
+        t.divergence >= SELF_RECONCILE_STALL_MIN_DIV &&
+        t.divergence <= SELF_RECONCILE_UP_SNAP_MAX_DIV;
+      let firstMatch = -1;
+      let expandedMatch = -1;
+      let strictMatch = -1;
       for (let i = 0; i < this.supportTops.length; i += 1) {
         const scanned = this.supportTops[i];
         if (scanned !== undefined && Math.abs(serverY - scanned.levelY) <= SELF_RECONCILE_TOP_TOL) {
-          t.levelTopIndex = i;
-          t.levelTopY = scanned.levelY;
-          break;
+          if (firstMatch < 0) {
+            firstMatch = i;
+          }
+          const strictIn =
+            Math.abs(serverX - scanned.x) <= scanned.hx &&
+            Math.abs(serverZ - scanned.z) <= scanned.hz;
+          if (strictIn) {
+            if (strictMatch < 0) {
+              strictMatch = i;
+            }
+          } else if (expandedMatch < 0) {
+            const expandedIn =
+              Math.abs(serverX - scanned.x) <= scanned.hx + AVATAR_BODY_RADIUS &&
+              Math.abs(serverZ - scanned.z) <= scanned.hz + AVATAR_BODY_RADIUS;
+            if (expandedIn) {
+              expandedMatch = i;
+            }
+          }
+        }
+      }
+      let chosen = firstMatch;
+      if (strictMatch >= 0) {
+        chosen = strictMatch;
+      } else if (expandedMatch >= 0) {
+        chosen = expandedMatch;
+      }
+      if (chosen >= 0) {
+        const picked = this.supportTops[chosen];
+        if (picked !== undefined) {
+          t.levelTopIndex = chosen;
+          t.levelTopY = picked.levelY;
         }
       }
       // Big-div hold timer: accumulate only while NOT airborne and the gap
@@ -1292,15 +1419,32 @@ export class SceneManager {
       !this.airborneGate.isAirborne &&
       !(this.upSnapCooldownLeftS > 0)
     ) {
-      // t.divOk / t.inputOk / t.stallOk were computed above (divergence,
-      // caller-fed input, live stall window); the loop only adds the
-      // top-level + footprint match.
-      if (t.divOk && t.inputOk && t.stallOk) {
+      // t.divOk / t.inputOk / t.stallOk / t.stallFramesOk were computed above
+      // (divergence band, caller-fed input, live stall window, observed
+      // frames); the loop only adds the top-level + footprint match.
+      if (t.divOk && t.inputOk && t.stallOk && t.stallFramesOk) {
+        let serverOffTop = false;
+        // Per-top suppression record: a fully qualifying top skipped because
+        // this visit already healed it (bug round 9). -1 when none.
+        let heldMatch = -1;
+        // Last strict-server top seen (for off-block telemetry below).
+        let strictSeen = -1;
+        // Pass 1 — strict-server preference (bug round 9): level-matching tops
+        // whose STRICT footprint contains the server XZ, in list order. Only a
+        // strict-server top can ever snap (a ring-only snapshot is refused —
+        // the local collider top does not exist there), so this pass owns
+        // every snap; pass 2 only fills ring/off-block telemetry. The snap
+        // predicate is unchanged from the single-loop shape, so outcomes match
+        // — the preference governs which candidate fires and what F3 names.
         for (let i = 0; i < this.supportTops.length; i += 1) {
           const top = this.supportTops[i];
           if (top === undefined || Math.abs(serverY - top.levelY) > SELF_RECONCILE_TOP_TOL) {
             continue;
           }
+          if (Math.abs(serverX - top.x) > top.hx || Math.abs(serverZ - top.z) > top.hz) {
+            continue;
+          }
+          strictSeen = i;
           t.evalTopIndex = i;
           t.blockCenterX = top.x;
           t.blockCenterZ = top.z;
@@ -1308,10 +1452,33 @@ export class SceneManager {
           const inX = Math.abs(this.avatar.position.x - top.x) <= top.hx + AVATAR_BODY_RADIUS;
           const inZ = Math.abs(this.avatar.position.z - top.z) <= top.hz + AVATAR_BODY_RADIUS;
           t.xzOk = inX && inZ;
+          // Server XZ is strict by pass construction (see the gate above).
+          t.srvXzOnTop = true;
           if (inX && inZ) {
+            if (i === this.heldTopIndex) {
+              // Lip-grind loop: this visit already healed onto T — suppress
+              // (note "snap-rate" below), keep scanning in case a different
+              // strict top qualifies.
+              heldMatch = i;
+              continue;
+            }
             const firedProgressM = t.stallProgressM;
-            this.teleportSelf(serverX, serverZ, serverY - SELF_RECONCILE_REST_OFFSET);
+            // Clamp axis-wise a hair inside the strict lip: even an on-top
+            // snapshot at the exact collider edge lands supported, and this
+            // IS the walk-back target (BUG2 preserved). Scalar math, no alloc.
+            const snapX = Math.min(
+              Math.max(serverX, top.x - top.hx + SELF_RECONCILE_SNAP_XZ_INSET),
+              top.x + top.hx - SELF_RECONCILE_SNAP_XZ_INSET,
+            );
+            const snapZ = Math.min(
+              Math.max(serverZ, top.z - top.hz + SELF_RECONCILE_SNAP_XZ_INSET),
+              top.z + top.hz - SELF_RECONCILE_SNAP_XZ_INSET,
+            );
+            this.teleportSelf(snapX, snapZ, serverY - SELF_RECONCILE_REST_OFFSET);
             this.upSnapCooldownLeftS = SELF_RECONCILE_UP_SNAP_COOLDOWN_S;
+            // The visit is healed — hold T until the avatar leaves it.
+            this.heldTopIndex = i;
+            t.heldTopIndex = i;
             t.cooldownLeftS = this.upSnapCooldownLeftS;
             t.stallProgressM = 0;
             t.bigDivHoldS = this.bigDivHoldS;
@@ -1328,15 +1495,74 @@ export class SceneManager {
             return "snap";
           }
         }
-        if (t.evalTopIndex < 0) {
+        // Pass 2 — fallback in list order: level-matching tops the server does
+        // NOT strictly stand on. Ring snapshots with the client in the
+        // expanded footprint refuse as "server-off-top" (the server is about
+        // to drop anyway; the big-div heal owns that case) — refusing beats
+        // landing over the void, falling, grinding, and resnapping.
+        for (let i = 0; i < this.supportTops.length; i += 1) {
+          const top = this.supportTops[i];
+          if (top === undefined || Math.abs(serverY - top.levelY) > SELF_RECONCILE_TOP_TOL) {
+            continue;
+          }
+          if (
+            Math.abs(serverX - top.x) <= top.hx &&
+            Math.abs(serverZ - top.z) <= top.hz
+          ) {
+            continue; // Evaluated in pass 1.
+          }
+          t.evalTopIndex = i;
+          t.blockCenterX = top.x;
+          t.blockCenterZ = top.z;
+          t.blockDist = Math.hypot(this.avatar.position.x - top.x, this.avatar.position.z - top.z);
+          const inX = Math.abs(this.avatar.position.x - top.x) <= top.hx + AVATAR_BODY_RADIUS;
+          const inZ = Math.abs(this.avatar.position.z - top.z) <= top.hz + AVATAR_BODY_RADIUS;
+          t.xzOk = inX && inZ;
+          t.srvXzOnTop = false;
+          if (inX && inZ) {
+            serverOffTop = true;
+          }
+        }
+        if (heldMatch >= 0) {
+          // Re-point the telemetry at the suppressed top so F3 names what was
+          // held (pass 2 may have evaluated other tops after it).
+          const held = this.supportTops[heldMatch];
+          if (held !== undefined) {
+            t.evalTopIndex = heldMatch;
+            t.blockCenterX = held.x;
+            t.blockCenterZ = held.z;
+            t.blockDist = Math.hypot(this.avatar.position.x - held.x, this.avatar.position.z - held.z);
+            t.xzOk = true;
+            t.srvXzOnTop = true;
+          }
+          t.note = "snap-rate";
+        } else if (t.evalTopIndex < 0) {
           t.note = "no-level-match";
+        } else if (serverOffTop) {
+          t.note = "server-off-top";
         } else if (!t.xzOk) {
+          // Name the server's top when it strictly stands on one (the client
+          // is simply elsewhere) — more informative than the last fallback
+          // top pass 2 happened to evaluate.
+          if (strictSeen >= 0) {
+            const seen = this.supportTops[strictSeen];
+            if (seen !== undefined) {
+              t.evalTopIndex = strictSeen;
+              t.blockCenterX = seen.x;
+              t.blockCenterZ = seen.z;
+              t.blockDist = Math.hypot(this.avatar.position.x - seen.x, this.avatar.position.z - seen.z);
+              t.xzOk = false;
+              t.srvXzOnTop = true;
+            }
+          }
           t.note = "off-block";
         }
       } else if (!t.divOk) {
         t.note = "no-stall-div";
       } else if (!t.inputOk) {
         t.note = "no-input";
+      } else if (!t.stallFramesOk) {
+        t.note = "stall-warming";
       } else {
         t.note = "no-progress";
       }
@@ -1344,8 +1570,40 @@ export class SceneManager {
       // grounded — e.g. the server walked off the footprint and fell while
       // the client stayed on top. Full server pose, own counter, own log.
       // Checked independently of the stall gates above (different trigger).
+      // When the server still reports a top level AND its XZ sits in that
+      // top's expanded footprint, the XZ target clamps just inside the
+      // strict lip (same inset as the up-snap — a ring XZ would land over
+      // the void and re-desync); otherwise the full pose stands (ground
+      // levels match no top, and the heal is the only way home, so refusing
+      // is worse than landing where the server stands). The footprint test
+      // picks the top the server actually stands on — clamping to the first
+      // level-matching top in list order would yank the body across the map
+      // (e.g. a far platform sharing the same nominal level).
       if (this.bigDivHoldS >= SELF_RECONCILE_BIG_DIV_HOLD_S) {
-        this.teleportSelf(serverX, serverZ, serverY);
+        let healX = serverX;
+        let healZ = serverZ;
+        for (let i = 0; i < this.supportTops.length; i += 1) {
+          const top = this.supportTops[i];
+          if (top === undefined || Math.abs(serverY - top.levelY) > SELF_RECONCILE_TOP_TOL) {
+            continue;
+          }
+          if (
+            Math.abs(serverX - top.x) > top.hx + AVATAR_BODY_RADIUS ||
+            Math.abs(serverZ - top.z) > top.hz + AVATAR_BODY_RADIUS
+          ) {
+            continue;
+          }
+          healX = Math.min(
+            Math.max(serverX, top.x - top.hx + SELF_RECONCILE_SNAP_XZ_INSET),
+            top.x + top.hx - SELF_RECONCILE_SNAP_XZ_INSET,
+          );
+          healZ = Math.min(
+            Math.max(serverZ, top.z - top.hz + SELF_RECONCILE_SNAP_XZ_INSET),
+            top.z + top.hz - SELF_RECONCILE_SNAP_XZ_INSET,
+          );
+          break;
+        }
+        this.teleportSelf(healX, healZ, serverY);
         this.upSnapCooldownLeftS = SELF_RECONCILE_UP_SNAP_COOLDOWN_S;
         t.cooldownLeftS = this.upSnapCooldownLeftS;
         t.stallProgressM = 0;
@@ -1521,6 +1779,11 @@ export class SceneManager {
     }
     this.resetHop();
     this.hopPrev.set(0, 1.1, 0);
+    // The reset jumps the avatar home — the stall window's anchors belong to
+    // the old spot, so reseed them (fresh window, no stall evidence). The
+    // per-top hold belongs to the old visit too — clear it (fresh arm).
+    this.resetStallWindow(0, 0);
+    this.heldTopIndex = -1;
     if (this.built) {
       if (this.spectating) {
         this.updateSpectatorCamera(0);

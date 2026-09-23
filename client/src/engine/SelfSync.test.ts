@@ -5,10 +5,13 @@ import {
   SELF_RECONCILE_BIG_DIV_HOLD_S,
   SELF_RECONCILE_MIN_M,
   SELF_RECONCILE_SNAP_M,
+  SELF_RECONCILE_SNAP_XZ_INSET,
   SELF_RECONCILE_STALL_INPUT_MIN,
   SELF_RECONCILE_STALL_MIN_DIV,
+  SELF_RECONCILE_STALL_MIN_FRAMES,
   SELF_RECONCILE_STALL_MIN_PROGRESS_M,
   SELF_RECONCILE_STALL_WINDOW_S,
+  SELF_RECONCILE_UP_SNAP_MAX_DIV,
 } from "../config";
 import { SceneManager } from "./SceneManager";
 
@@ -65,7 +68,11 @@ describe("reconcile telemetry (F3 snap-gate overlay source)", () => {
     // pre-snap it carries the server/local Y, divergence, stall-gate
     // outcomes and the matched top; the snap itself bumps the counter and
     // timestamps it. moveMag 1 feeds the input gate (reconcile runs before
-    // physics, so live input arrives as a parameter from main.ts).
+    // physics, so live input arrives as a parameter from main.ts). The body
+    // sits dipped 0.15 on the strict tower top (a genuine-wedge div inside
+    // the [0.03, 0.45] band) with the server snapshot on the strict top, so
+    // every gate passes; the snap fires once the window holds >= 5 frames of
+    // stall evidence (fresh windows report "stall-warming", never snap).
     const manager = await createFighter();
     const before = manager.getLastReconcileTelemetry();
     expect(before.result).toBe("unrun");
@@ -73,24 +80,39 @@ describe("reconcile telemetry (F3 snap-gate overlay source)", () => {
     expect(before.lastUpSnapAtMs).toBe(0);
     expect(before.bigHealCount).toBe(0);
     expect(before.lastBigHealAtMs).toBe(0);
-    manager.debugSetPlayerState({ x: 6.25, y: 2.9, z: 4.8 }, { x: 0, y: 0, z: 0 });
-    expect(manager.reconcileSelf(6.25, 3.1, 4.8, FRAME, 1)).toBe("snap");
+    manager.debugSetPlayerState({ x: 5.5, y: 2.95, z: 4.8 }, { x: 0, y: 0, z: 0 });
+    let snapped = false;
+    for (let i = 0; i < 10 && !snapped; i += 1) {
+      snapped = manager.reconcileSelf(5.5, 3.1, 4.8, FRAME, 1) === "snap";
+    }
+    expect(snapped).toBe(true);
     const after = manager.getLastReconcileTelemetry();
     expect(after.result).toBe("snap");
     expect(after.snapKind).toBe("up");
     expect(after.serverY).toBeCloseTo(3.1, 5);
-    expect(after.localY).toBeCloseTo(2.9, 5);
-    expect(after.divergence).toBeCloseTo(0.2, 5);
+    expect(after.localY).toBeCloseTo(2.95, 5);
+    expect(after.divergence).toBeCloseTo(0.15, 5);
     expect(after.divOk).toBe(true);
     expect(after.moveMag).toBeCloseTo(1, 5);
     expect(after.inputOk).toBe(true);
     expect(after.stallOk).toBe(true);
+    expect(after.stallFrames).toBeGreaterThanOrEqual(5);
+    expect(after.stallFramesOk).toBe(true);
     expect(after.levelTopIndex).toBeGreaterThanOrEqual(0);
     expect(after.levelTopY).toBeCloseTo(3.1, 5);
     expect(after.xzOk).toBe(true);
+    expect(after.srvXzOnTop).toBe(true);
     expect(after.upSnapCount).toBe(1);
     expect(after.lastUpSnapAtMs).toBeGreaterThan(0);
     expect(after.note).toBe("up-snap");
+    // Per-top hold (bug round 9): the snap arms the hold on the top it
+    // landed on, so F3 can show the suppress state live.
+    expect(after.heldTopIndex).toBe(after.evalTopIndex);
+    expect(after.heldTopIndex).toBeGreaterThanOrEqual(0);
+    const landed = manager.getAvatarPosition();
+    expect(landed.x).toBeCloseTo(5.5, 5);
+    expect(landed.z).toBeCloseTo(4.8, 5);
+    expect(landed.y).toBeCloseTo(3.0, 5);
   });
 });
 
@@ -183,6 +205,15 @@ describe("self reconciliation (bounded drift, no jitter)", () => {
 // over a 0.25 s window), and the frozen -2.1 desync gets a sustained big-div
 // down-pull. reconcileSelf takes the live stick magnitude as moveMag (it
 // runs before physics in main.ts, so input arrives as a parameter).
+// Bug round 8 (tower-top snap loop): on the two-story central towers healthy
+// rest (div 0.100) always clears the stall div floor and the whole top + ring
+// sits in the footprint gate, so walking could drain the travel window and
+// resnap every cooldown — teleporting to RAW server XZ that the server's
+// hysteresis holds over the void (fall, grind, resnap). Three hardening
+// layers: the div gate is now a BAND (0.03-0.45, grounded post-fall div ~2.0
+// never up-snaps), up-snap targets clamp just inside the strict lip and a
+// ring-only server XZ refuses outright ("server-off-top"), and the window
+// scores NET DISPLACEMENT with >= 5 observed frames before it may stall.
 describe("self reconciliation stall-snap onto block tops (bug round 7)", () => {
   it("pins the stall/big-div tuning (speed gate deleted per live telemetry)", () => {
     // The round-6c speed gate (1.5) blocked the only live heal window
@@ -191,47 +222,59 @@ describe("self reconciliation stall-snap onto block tops (bug round 7)", () => {
     // threshold. The stall window (0.25 s / 0.12 m) separates walking
     // (4.5 m/s x 0.25 s ~= 1.1 m >> 0.12) from a lip wedge (net ~0):
     // descents and step-offs progress in XZ, so no speed read is needed.
+    // Round 8 (tower-top snap loop): the div gate is now a BAND (a grounded
+    // post-fall desync at div ~= 2.0 must never up-snap — big-div owns it),
+    // the window needs >= 5 observed frames before it may report a stall
+    // (fresh/hitched windows carry no evidence), and snap landings clamp a
+    // hair inside the strict lip.
     expect(SELF_RECONCILE_STALL_MIN_DIV).toBe(0.03);
+    expect(SELF_RECONCILE_UP_SNAP_MAX_DIV).toBe(0.45);
     expect(SELF_RECONCILE_STALL_INPUT_MIN).toBe(0.5);
     expect(SELF_RECONCILE_STALL_WINDOW_S).toBe(0.25);
     expect(SELF_RECONCILE_STALL_MIN_PROGRESS_M).toBe(0.12);
+    expect(SELF_RECONCILE_STALL_MIN_FRAMES).toBe(5);
+    expect(SELF_RECONCILE_SNAP_XZ_INSET).toBe(0.01);
     expect(SELF_RECONCILE_BIG_DIV).toBe(0.5);
     expect(SELF_RECONCILE_BIG_DIV_HOLD_S).toBe(0.4);
   });
 
   it("snaps a stalled live wedge with input (the video's t=5.5-6.8s state)", async () => {
-    // Round 7 core discriminator: a Rapier-settled lip wedge (10 cm dip =
-    // fully wedged per the round-6 probes) with the server on top and the
-    // stick held (moveMag 1) snaps on the first eligible frame — the stall
-    // window is empty (no travel history = no evidence of motion) — and
-    // lands at Rapier rest height (serverY - REST_OFFSET = 3.0) at the
-    // server XZ. Asserts within ~0.3 s by firing immediately.
+    // Round 7 core discriminator: a Rapier-settled lip wedge (15 cm dip, a
+    // genuine wedge inside the [0.03, 0.45] div band) with the server snapshot
+    // on the STRICT tower top and the stick held (moveMag 1) snaps once the
+    // window holds >= 5 frames of stall evidence — and lands at Rapier rest
+    // height (serverY - REST_OFFSET = 3.0) at the server XZ. Asserts within
+    // 10 frames (the snap fires on the 5th tracked frame).
     const manager = await createFighter();
-    manager.debugSetPlayerState({ x: 6.25, y: 2.9, z: 4.8 }, { x: 0, y: 0, z: 0 });
-    const result = manager.reconcileSelf(6.25, 3.1, 4.8, FRAME, 1);
-    expect(result).toBe("snap");
+    manager.debugSetPlayerState({ x: 5.5, y: 2.95, z: 4.8 }, { x: 0, y: 0, z: 0 });
+    let snapped = false;
+    for (let i = 0; i < 10 && !snapped; i += 1) {
+      snapped = manager.reconcileSelf(5.5, 3.1, 4.8, FRAME, 1) === "snap";
+    }
+    expect(snapped).toBe(true);
     const after = manager.getAvatarPosition();
-    expect(after.x).toBeCloseTo(6.25, 5);
+    expect(after.x).toBeCloseTo(5.5, 5);
     expect(after.z).toBeCloseTo(4.8, 5);
     expect(after.y).toBeCloseTo(3.0, 5);
     expect(manager.getLastReconcileTelemetry().snapKind).toBe("up");
   });
 
   it("never snaps the same wedge without input (revert-proof: stall starved)", async () => {
-    // The disabled-stall path: identical dip, top match and footprint, but
-    // moveMag 0 (no input). No snap may ever fire over 60 frames — this is
-    // what "the stall logic disabled" looks like, and it must hold "ok"
-    // (deadband XZ) with Y untouched. If a future hang-gate reappears, this
-    // test fails first.
+    // The disabled-stall path: a would-otherwise-snap wedge (strict-top dip,
+    // div 0.15 inside the band, server on the strict top) but moveMag 0 (no
+    // input). No snap may ever fire over 60 frames — this is what "the stall
+    // logic disabled" looks like, and it must hold "ok" (deadband XZ) while
+    // the body settles onto the top via Rapier. If a future hang-gate
+    // reappears, this test fails first.
     const manager = await createFighter();
-    manager.debugSetPlayerState({ x: 6.25, y: 2.9, z: 4.8 }, { x: 0, y: 0, z: 0 });
+    manager.debugSetPlayerState({ x: 5.5, y: 2.95, z: 4.8 }, { x: 0, y: 0, z: 0 });
     for (let i = 0; i < 60; i += 1) {
-      const result = manager.reconcileSelf(6.25, 3.1, 4.8, FRAME, 0);
+      const result = manager.reconcileSelf(5.5, 3.1, 4.8, FRAME, 0);
       expect(result).not.toBe("snap");
       manager.update(FRAME, { x: 0, y: 0 }, { dx: 0, dy: 0 });
     }
     const after = manager.getAvatarPosition();
-    expect(after.y).toBeLessThan(3.0);
+    expect(after.y).toBeCloseTo(3.0, 1);
     expect(manager.getLastReconcileTelemetry().upSnapCount).toBe(0);
     expect(manager.getLastReconcileTelemetry().note).toBe("no-input");
   });
@@ -297,21 +340,49 @@ describe("self reconciliation stall-snap onto block tops (bug round 7)", () => {
     expect(after.y).toBeCloseTo(3.0, 2);
   });
 
-  it("snaps a Y-diverged body at a tower ring onto the authoritative top", async () => {
-    // Server stands on the (4.8, 4.8) tower top (y 3.1); the local body is
-    // at the ground in the east ring — the live diverged state. XZ alone is
-    // inside the deadband (0.25), so without the stall-snap this holds "ok"
-    // and the wall persists forever. With the stick held (moveMag 1) and an
-    // empty window (fresh teleport = no travel history) the snap fires and
-    // lands at Rapier rest height (serverY - REST_OFFSET = 3.0).
+  it("lands a lip-edge snapshot just inside the strict top (clamp pin)", async () => {
+    // Server snapshot at the physical lip (5.795, 0.005 inside the 1.0
+    // half-extent of the (4.8, 4.8) tower): strict-on-top, so the snap fires
+    // — but the landing clamps a hair inside the lip (SNAP_XZ_INSET 0.01 ->
+    // 5.79), never balanced on the collider edge. The client body sits
+    // dipped 0.15 nearby with the stick held; the window warms over ~5
+    // frames, then the snap lands supported at Rapier rest height.
     const manager = await createFighter();
-    manager.teleportSelf(6.25, 4.8);
-    const result = manager.reconcileSelf(6.0, 3.1, 4.8, FRAME, 1);
-    expect(result).toBe("snap");
+    manager.debugSetPlayerState({ x: 5.7, y: 2.95, z: 4.8 }, { x: 0, y: 0, z: 0 });
+    let snapped = false;
+    for (let i = 0; i < 10 && !snapped; i += 1) {
+      snapped = manager.reconcileSelf(5.795, 3.1, 4.8, FRAME, 1) === "snap";
+    }
+    expect(snapped).toBe(true);
     const after = manager.getAvatarPosition();
-    expect(after.x).toBeCloseTo(6.0, 5);
+    expect(after.x).toBeCloseTo(5.79, 2);
+    expect(after.x).toBeLessThan(5.795);
     expect(after.z).toBeCloseTo(4.8, 5);
     expect(after.y).toBeCloseTo(3.0, 5);
+    expect(manager.getLastReconcileTelemetry().snapKind).toBe("up");
+  });
+
+  it("refuses an up-snap when the server XZ lives only in the hysteresis ring", async () => {
+    // Inverse pin (tower-top snap loop): the client grinds in the east ring
+    // (footprint gate passes — 1.45 <= hx + radius) with a genuine-wedge div
+    // (0.15) and the stick held, but the server XZ (1.2 from the tower
+    // center) sits where the local collider top does not exist. Snapping
+    // there would land over the void (fall, grind, resnap: the loop), so no
+    // up-snap may fire — note "server-off-top". The server is about to drop
+    // anyway; the big-div heal owns that case.
+    const manager = await createFighter();
+    manager.debugSetPlayerState({ x: 6.25, y: 2.95, z: 4.8 }, { x: 0, y: 0, z: 0 });
+    let snaps = 0;
+    for (let i = 0; i < 15; i += 1) {
+      if (manager.reconcileSelf(6.0, 3.1, 4.8, FRAME, 1) === "snap") {
+        snaps += 1;
+      }
+    }
+    expect(snaps).toBe(0);
+    const telemetry = manager.getLastReconcileTelemetry();
+    expect(telemetry.upSnapCount).toBe(0);
+    expect(telemetry.snapKind).toBe("none");
+    expect(telemetry.note).toBe("server-off-top");
   });
 
   it("does not snap when the server Y is mid-flight, not a top", async () => {
@@ -352,15 +423,19 @@ describe("self reconciliation stall-snap onto block tops (bug round 7)", () => {
   });
 
   it("heals the live loop: snap then walk-back advances (Rapier)", async () => {
-    // The live loop end to end with real Rapier: dipped body in the tower
-    // ring (10cm low = fully wedged) + authoritative on-top snapshot + stick
-    // held. The snap lifts the body onto the top, then inward input walks it
-    // home instead of grinding at the lip. Without the snap the same drive
+    // The live loop end to end with real Rapier: dipped body on the strict
+    // tower top (15 cm low = wedged) + authoritative on-top snapshot + stick
+    // held. The window warms over ~5 frames, the snap lifts the body onto
+    // the top at a supported (clamped) spot, then inward input walks it home
+    // instead of grinding at the lip. Without the snap the same drive
     // gains ~0.1m in 90 frames (see the pre-fix revert proof).
     const manager = await createFighter();
-    manager.debugSetPlayerState({ x: 6.25, y: 2.9, z: 4.8 }, { x: 0, y: 0, z: 0 });
-    const snapped = manager.reconcileSelf(6.25, 3.1, 4.8, FRAME, 1);
-    expect(snapped).toBe("snap");
+    manager.debugSetPlayerState({ x: 5.5, y: 2.95, z: 4.8 }, { x: 0, y: 0, z: 0 });
+    let snapped = false;
+    for (let i = 0; i < 10 && !snapped; i += 1) {
+      snapped = manager.reconcileSelf(5.5, 3.1, 4.8, FRAME, 1) === "snap";
+    }
+    expect(snapped).toBe(true);
     for (let i = 0; i < 90; i += 1) {
       manager.update(FRAME, { x: -1, y: 0 }, { dx: 0, dy: 0 });
     }
@@ -408,6 +483,43 @@ describe("self reconciliation stall-snap onto block tops (bug round 7)", () => {
     expect(end.y).toBeGreaterThan(2.5);
   });
 
+  it("never snaps walking across a top through render hitches (net-displacement window)", async () => {
+    // Hitch shape (tower-top snap loop): every 6th frame delivers 0.1 s of
+    // wall time with zero travel (a dropped physics frame during a render
+    // hitch — the wall-time slot rotation still turns) while the fighter
+    // keeps walking east on the P1 long block at full stick. Net displacement
+    // from the window's oldest surviving anchor still spans real travel
+    // (~0.5 m+), so no frame reports a stall — SNAPS stays 0 and the walk
+    // stays on top. A single 0.1 s hitch rotates only ~3 of 8 slots, so this
+    // pins current net-displacement behavior rather than a pre-fix failure.
+    // Shorter walk than the gate above (10 + 18 frames) so the
+    // surviving-anchor span never nears the east lip.
+    const manager = await createFighter();
+    manager.teleportSelf(-13.5, 10.0, 2.8);
+    for (let i = 0; i < 10; i += 1) {
+      manager.update(FRAME, { x: 1, y: 0 }, { dx: 0, dy: 0 });
+    }
+    let snaps = 0;
+    for (let i = 0; i < 18; i += 1) {
+      const before = manager.getAvatarPosition();
+      const hitch = i % 6 === 5;
+      const result = hitch
+        ? manager.reconcileSelf(before.x, 2.9, before.z, 0.1, 1)
+        : manager.reconcileSelf(before.x, 2.9, before.z, FRAME, 1);
+      if (result === "snap") {
+        snaps += 1;
+      }
+      if (!hitch) {
+        manager.update(FRAME, { x: 1, y: 0 }, { dx: 0, dy: 0 });
+      }
+    }
+    expect(snaps).toBe(0);
+    expect(manager.getLastReconcileTelemetry().upSnapCount).toBe(0);
+    const hitchEnd = manager.getAvatarPosition();
+    expect(hitchEnd.x).toBeGreaterThan(-12.5);
+    expect(hitchEnd.y).toBeGreaterThan(2.5);
+  });
+
   it("never snaps pushing into a ground-level wall (serverY matches no top)", async () => {
     // Ground wall with the stick held into the tower face: the body stalls
     // (window drains, input active, div ~0) but serverY 1.1 sits within
@@ -439,16 +551,24 @@ describe("self reconciliation stall-snap onto block tops (bug round 7)", () => {
   it("never stall-snaps on a fast ramp descent (progress gate, lagged server)", async () => {
     // Round 7 replacement for the deleted speed-gate descent pin (live
     // telemetry at t=5.2s killed the speed gate: it blocked the only viable
-    // heal window). Climb the P0 edge to the top with a live-shaped server
-    // (body XZ + nominal +0.1 healthy offset, moveMag 1 every frame so the
-    // stall window is live, as in production), then descend: the first 20
-    // frames hold a stuck-at-top serverY (3.7, exact level — worst realistic
-    // tick+latency lag, under the 0.4 s big-div hold), then the server
-    // follows the 3-frame-lagged body down. The divergence crosses the stall
-    // band mid-descent but the body covers meters in XZ, so the window never
-    // drains: 0 snaps of any kind, no pops on the way down.
+    // heal window). Climb the P0 ramp on its CENTER lane to the top with a
+    // live-shaped server (body XZ + nominal +0.1 healthy offset, moveMag 1
+    // every frame so the stall window is live, as in production), then
+    // descend: the first 20 frames hold a stuck-at-top serverY (3.7, exact
+    // level — worst realistic tick+latency lag, under the 0.4 s big-div
+    // hold), then the server follows the 3-frame-lagged body down. The
+    // divergence crosses the stall band mid-descent but the body covers
+    // meters in XZ, so the window never drains. Center lane matters: an
+    // edge-offset line (x=14.65) scrapes the top's east face at ~0.01 m/frame
+    // — a TRUE edge-scrape stall the net window correctly reports (the old
+    // path sum was merely jitter-masked there); the scrape class is pinned
+    // by the wedge tests, this one pins the fast descent. One honest
+    // allowance: while the snapshot is frozen (i<20) the body wedges on the
+    // crest lip pushing back toward the ramp — a TRUE stall (net ~0 with
+    // input held) that heals at most once IN PLACE (same XZ, rest Y: no
+    // pop); once the server tracks down (i>=20) the descent is snap-free.
     const manager = await createFighter();
-    manager.debugSetPlayerState({ x: 14.65, y: 1.1, z: 2.5 }, { x: 0, y: 0, z: 0 });
+    manager.debugSetPlayerState({ x: 13.8, y: 1.1, z: 2.5 }, { x: 0, y: 0, z: 0 });
     for (let i = 0; i < 300; i += 1) {
       const before = manager.getAvatarPosition();
       manager.reconcileSelf(before.x, before.y + 0.1, before.z, FRAME, 1);
@@ -465,7 +585,8 @@ describe("self reconciliation stall-snap onto block tops (bug round 7)", () => {
       }
       return history[0]!;
     };
-    let snaps = 0;
+    let stuckSnaps = 0;
+    let trackedSnaps = 0;
     for (let i = 0; i < 120; i += 1) {
       const before = manager.getAvatarPosition();
       history.push({ x: before.x, y: before.y, z: before.z });
@@ -476,13 +597,23 @@ describe("self reconciliation stall-snap onto block tops (bug round 7)", () => {
       const serverY = i < 20 ? 3.7 : server.y;
       const result = manager.reconcileSelf(server.x, serverY, server.z, FRAME, 1);
       if (result === "snap") {
-        snaps += 1;
+        if (i < 20) {
+          stuckSnaps += 1;
+        } else {
+          trackedSnaps += 1;
+        }
       }
       manager.update(FRAME, { x: 0, y: -1 }, { dx: 0, dy: 0 });
     }
-    expect(snaps).toBe(0);
-    expect(manager.getLastReconcileTelemetry().upSnapCount).toBe(0);
+    expect(trackedSnaps).toBe(0);
+    expect(stuckSnaps).toBeLessThanOrEqual(1);
+    expect(manager.getLastReconcileTelemetry().upSnapCount).toBe(stuckSnaps);
     expect(manager.getLastReconcileTelemetry().bigHealCount).toBe(0);
+    // …and the descent genuinely completed down the ramp (off the top,
+    // heading south), not yanked back or left frozen on the crest.
+    const descentEnd = manager.getAvatarPosition();
+    expect(descentEnd.y).toBeLessThan(3.0);
+    expect(descentEnd.z).toBeGreaterThan(-7.0);
   });
 
   it("never snaps walking off a tower edge (lagged server follows the fall)", async () => {
@@ -514,43 +645,254 @@ describe("self reconciliation stall-snap onto block tops (bug round 7)", () => {
     expect(end.y).toBeLessThan(1.5);
   });
 
-  it("snaps are cooldown-spaced and converge home (no bounce loop)", async () => {
-    // Cooldown backstop (kept from 6c): heal from a deep dip, then
-    // reconcile+push 60 frames with a live-shaped server (XZ tracks the
-    // body, stick held). A genuine second heal may still occur while grinding
-    // the extreme edge, so this pins BOUNDED converging healing instead of an
-    // absolute single snap: at most 2 snaps, spaced by at least the cooldown
-    // (18 frames = 0.3 s), and the walk still reaches home.
+  it("snaps are cooldown-spaced across leave-and-re-enter visits (no tight loop)", async () => {
+    // Round-9 rewrite of the persistent-wedge rhythm pin: after a snap onto
+    // top T, re-dipping on T heals NEVER again (note "snap-rate" once the
+    // 0.3 s cooldown expires) — the old cooldown-cadence resnap loop is
+    // structurally gone, so the rhythm assertion moves to honest visits:
+    // leave T's expanded footprint for >= 1 frame (re-arms) and re-enter,
+    // and consecutive heals stay >= the 0.3 s cooldown (18 frames) apart.
     const manager = await createFighter();
-    manager.debugSetPlayerState({ x: 6.25, y: 2.9, z: 4.8 }, { x: 0, y: 0, z: 0 });
     const snapFrames: number[] = [];
-    for (let i = 0; i < 60; i += 1) {
-      const current = manager.getAvatarPosition();
-      const result = manager.reconcileSelf(current.x, 3.1, current.z, FRAME, 1);
-      if (result === "snap") {
-        snapFrames.push(i);
+    let frame = 0;
+    const grindDip = (): boolean => {
+      manager.debugSetPlayerState({ x: 5.5, y: 2.95, z: 4.8 }, { x: 0, y: 0, z: 0 });
+      frame += 1;
+      return manager.reconcileSelf(5.5, 3.1, 4.8, FRAME, 1) === "snap";
+    };
+    // Visit 1: the first heal per visit fires once the window warms.
+    let first = -1;
+    for (let i = 0; i < 10 && first < 0; i += 1) {
+      if (grindDip()) {
+        first = frame;
       }
-      manager.update(FRAME, { x: -1, y: 0 }, { dx: 0, dy: 0 });
     }
-    expect(snapFrames.length).toBeLessThanOrEqual(2);
+    expect(first).toBeGreaterThanOrEqual(0);
+    snapFrames.push(first);
+    // Persistent grind WITHOUT leaving: no second heal ever (cooldown first,
+    // then the per-top hold) — 40 grind frames, longer than the old loop's
+    // multi-snap span, and the tail notes "snap-rate", not "cooldown".
+    let extraSnaps = 0;
+    for (let i = 0; i < 40; i += 1) {
+      if (grindDip()) {
+        extraSnaps += 1;
+      }
+    }
+    expect(extraSnaps).toBe(0);
+    expect(manager.getLastReconcileTelemetry().note).toBe("snap-rate");
+    expect(manager.getLastReconcileTelemetry().upSnapCount).toBe(1);
+    // Visits 2-3: neutral ground re-arms in one frame, then a teleport
+    // re-entry reseeds the stall window (5 frames to warm), so each heal
+    // lands on cooldown rhythm again.
+    for (let visit = 0; visit < 2; visit += 1) {
+      manager.teleportSelf(0, 0);
+      for (let i = 0; i < 22; i += 1) {
+        frame += 1;
+        manager.reconcileSelf(0, 1.1, 0, FRAME, 1);
+      }
+      expect(manager.getLastReconcileTelemetry().heldTopIndex).toBe(-1);
+      manager.teleportSelf(5.5, 4.8, 2.95);
+      for (let i = 0; i < 10; i += 1) {
+        if (grindDip()) {
+          snapFrames.push(frame);
+          break;
+        }
+      }
+    }
+    expect(snapFrames.length).toBe(3);
     for (let i = 1; i < snapFrames.length; i += 1) {
       expect(snapFrames[i]! - snapFrames[i - 1]!).toBeGreaterThanOrEqual(18);
     }
     const end = manager.getAvatarPosition();
-    expect(end.x).toBeLessThan(5.9);
-    expect(end.y).toBeGreaterThan(2.5);
+    expect(end.y).toBeGreaterThan(2.9);
+    expect(end.y).toBeLessThan(3.1);
   });
 
   it("cooldown suppresses an immediate second snap", async () => {
-    // Unit-level pin for the cooldown mechanism itself: force two back to
-    // back snap-eligible states (re-seeding the dip bypasses physics
-    // settling). The first reconcile snaps and arms the 0.3s cooldown; the
-    // second, one frame later, must hold instead of re-snapping.
+    // Unit-level pin for the cooldown mechanism itself: warm the window into
+    // a snap (fires on the 5th tracked frame), which arms the 0.3 s cooldown;
+    // the next frames must hold instead of re-snapping even though the wedge
+    // persists and the window stays warmed (frames gate passes, cooldown
+    // blocks — note "cooldown", not "stall-warming").
     const manager = await createFighter();
-    manager.debugSetPlayerState({ x: 6.25, y: 2.9, z: 4.8 }, { x: 0, y: 0, z: 0 });
-    expect(manager.reconcileSelf(6.25, 3.1, 4.8, FRAME, 1)).toBe("snap");
-    manager.debugSetPlayerState({ x: 6.25, y: 2.9, z: 4.8 }, { x: 0, y: 0, z: 0 });
-    expect(manager.reconcileSelf(6.25, 3.1, 4.8, FRAME, 1)).not.toBe("snap");
+    manager.debugSetPlayerState({ x: 5.5, y: 2.95, z: 4.8 }, { x: 0, y: 0, z: 0 });
+    let firstSnapAt = -1;
+    for (let i = 0; i < 10; i += 1) {
+      if (manager.reconcileSelf(5.5, 3.1, 4.8, FRAME, 1) === "snap") {
+        firstSnapAt = i;
+        break;
+      }
+    }
+    expect(firstSnapAt).toBeGreaterThanOrEqual(0);
+    manager.debugSetPlayerState({ x: 5.5, y: 2.95, z: 4.8 }, { x: 0, y: 0, z: 0 });
+    let snaps = 0;
+    for (let i = 0; i < 6; i += 1) {
+      if (manager.reconcileSelf(5.5, 3.1, 4.8, FRAME, 1) === "snap") {
+        snaps += 1;
+      }
+    }
+    expect(snaps).toBe(0);
+    expect(manager.getLastReconcileTelemetry().note).toBe("cooldown");
+  });
+
+  it("never up-snaps a grounded post-fall desync (div band refuses, big-div heals)", async () => {
+    // Tower-top loop shape: the client fell to the ground (div ~= +2.0) while
+    // the server still reports top level — the hysteresis-ring aftermath. An
+    // UP-snap here would yank the grounded fighter back onto the tower (the
+    // visible teleport jerk); the div band refuses it ("no-stall-div") while
+    // the sustained hold heals the SAME desync via the big-div path to the
+    // full server pose. Static body (no update): the hold trips at ~0.4 s,
+    // and the landing keeps full-pose Y (no rest offset — the big-div heal
+    // climbs the server XZ clamp only when a top level matches).
+    const manager = await createFighter();
+    manager.teleportSelf(5.5, 4.8);
+    let midNote = "";
+    let healKind = "none";
+    let healedAt = -1;
+    for (let i = 0; i < 40; i += 1) {
+      const result = manager.reconcileSelf(5.5, 3.1, 4.8, FRAME, 1);
+      if (i === 10) {
+        midNote = manager.getLastReconcileTelemetry().note;
+      }
+      if (result === "snap") {
+        healKind = manager.getLastReconcileTelemetry().snapKind;
+        healedAt = i;
+        break;
+      }
+    }
+    expect(healedAt).toBeGreaterThanOrEqual(20);
+    expect(healKind).toBe("big");
+    expect(midNote).toBe("no-stall-div");
+    const telemetry = manager.getLastReconcileTelemetry();
+    expect(telemetry.upSnapCount).toBe(0);
+    expect(telemetry.bigHealCount).toBe(1);
+    const after = manager.getAvatarPosition();
+    expect(after.x).toBeCloseTo(5.5, 5);
+    expect(after.z).toBeCloseTo(4.8, 5);
+    expect(after.y).toBeCloseTo(3.1, 5);
+  });
+});
+
+// Bug round 9: per-top snap rate limit + widened div band + top preference.
+// (a) Lip-grind on one top heals exactly once per visit (the live
+// 15-snaps-in-8.5s cooldown-cadence loop is structurally impossible); (b) a
+// ramp-crest wedge at div ~= 0.204 heals (was dead-zoned "no-stall-div" under
+// the 0.2 bound); (c) a grounded post-fall div ~= 2.0 still never up-snaps;
+// (d) with two same-level tops the loop and the F3 display prefer the one the
+// server strictly stands on, not the first list entry.
+describe("self reconciliation round-9 pins (rate limit, crest band, preference)", () => {
+  it("heals a lip-grind exactly once per visit (per-top rate limit)", async () => {
+    // A genuine wedge ground on the SAME tower top with every gate passing
+    // heals once; 60 more grind frames (~1 s, > 3 expired cooldowns) never
+    // resnap (note "snap-rate"). One frame outside the expanded footprint
+    // (tower hx 1.0 + 0.5 radius = 1.5; x = 3.0 sits 1.8 out) re-arms, and a
+    // re-entered grind heals exactly once more.
+    const manager = await createFighter();
+    manager.debugSetPlayerState({ x: 5.5, y: 2.95, z: 4.8 }, { x: 0, y: 0, z: 0 });
+    let snaps = 0;
+    let snapHeld = -2;
+    let snapEval = -2;
+    for (let i = 0; i < 6; i += 1) {
+      if (manager.reconcileSelf(5.5, 3.1, 4.8, FRAME, 1) === "snap") {
+        snaps += 1;
+        // Capture on the firing frame: later cooldown frames reset the
+        // per-call eval fields (no top evaluated while cooling down).
+        snapHeld = manager.getLastReconcileTelemetry().heldTopIndex;
+        snapEval = manager.getLastReconcileTelemetry().evalTopIndex;
+      }
+    }
+    expect(snaps).toBe(1);
+    expect(snapHeld).toBeGreaterThanOrEqual(0);
+    expect(snapHeld).toBe(snapEval);
+    let resnaps = 0;
+    for (let i = 0; i < 60; i += 1) {
+      manager.debugSetPlayerState({ x: 5.5, y: 2.95, z: 4.8 }, { x: 0, y: 0, z: 0 });
+      if (manager.reconcileSelf(5.5, 3.1, 4.8, FRAME, 1) === "snap") {
+        resnaps += 1;
+      }
+    }
+    expect(resnaps).toBe(0);
+    expect(manager.getLastReconcileTelemetry().note).toBe("snap-rate");
+    expect(manager.getLastReconcileTelemetry().upSnapCount).toBe(1);
+    // Leave for a single frame: the hold clears even though no other gate
+    // changed (serverY 1.1 here matches no top, but the re-arm is purely the
+    // client-XZ-vs-footprint comparison).
+    manager.debugSetPlayerState({ x: 3.0, y: 1.1, z: 4.8 }, { x: 0, y: 0, z: 0 });
+    manager.reconcileSelf(3.0, 1.1, 4.8, FRAME, 1);
+    expect(manager.getLastReconcileTelemetry().heldTopIndex).toBe(-1);
+    // Re-enter and grind: exactly one more heal, then held again.
+    manager.teleportSelf(5.5, 4.8, 2.95);
+    let returnSnaps = 0;
+    for (let i = 0; i < 10; i += 1) {
+      if (manager.reconcileSelf(5.5, 3.1, 4.8, FRAME, 1) === "snap") {
+        returnSnaps += 1;
+      }
+    }
+    expect(returnSnaps).toBe(1);
+    expect(manager.getLastReconcileTelemetry().upSnapCount).toBe(2);
+  });
+
+  it("heals a ramp-crest wedge at div ~= 0.204 (crest band)", async () => {
+    // Owner round-8 telemetry: wedged at a ramp-crest lip with div +0.204
+    // (slope height on top of the 0.10 rest offset) while grounded, input
+    // held, server on the strict top — refused as "no-stall-div" under the
+    // 0.2 bound. P2 (x -11.5, z -9.5, topY 2.2 -> level 3.3, the only 3.3
+    // top): client dipped 0.204 with both XZ in the footprints.
+    const manager = await createFighter();
+    manager.debugSetPlayerState({ x: -10.5, y: 3.096, z: -9.5 }, { x: 0, y: 0, z: 0 });
+    let snapped = false;
+    for (let i = 0; i < 10 && !snapped; i += 1) {
+      snapped = manager.reconcileSelf(-10.5, 3.3, -9.5, FRAME, 1) === "snap";
+    }
+    expect(snapped).toBe(true);
+    const telemetry = manager.getLastReconcileTelemetry();
+    expect(telemetry.snapKind).toBe("up");
+    expect(telemetry.divergence).toBeCloseTo(0.204, 2);
+    expect(telemetry.note).toBe("up-snap");
+    const after = manager.getAvatarPosition();
+    expect(after.x).toBeCloseTo(-10.5, 5);
+    expect(after.z).toBeCloseTo(-9.5, 5);
+    expect(after.y).toBeCloseTo(3.2, 5);
+  });
+
+  it("never up-snaps a grounded post-fall div ~= 2.0 (band upper bound)", async () => {
+    // Quick band pin: div 2.0 sits an order of magnitude above the 0.45 upper
+    // bound — 10 input-held frames, zero up-snaps, note "no-stall-div" (the
+    // sustained big-div heal for the same desync over its 0.4 s hold is
+    // pinned separately below).
+    const manager = await createFighter();
+    manager.teleportSelf(5.5, 4.8);
+    for (let i = 0; i < 10; i += 1) {
+      const result = manager.reconcileSelf(5.5, 3.1, 4.8, FRAME, 1);
+      expect(result).not.toBe("snap");
+    }
+    const telemetry = manager.getLastReconcileTelemetry();
+    expect(telemetry.upSnapCount).toBe(0);
+    expect(telemetry.snapKind).toBe("none");
+    expect(telemetry.note).toBe("no-stall-div");
+  });
+
+  it("prefers the server-strict top over a first-match same-level top", async () => {
+    // serverY 3.1 level-matches P3 (5.0, 13.5 — FIRST in list order) and the
+    // central tower (4.8, 4.8) alike, but the server XZ stands strictly on
+    // the tower. The pre-scan display must name the tower (first-match showed
+    // P3 while the server stood elsewhere) and the snap must land on the
+    // tower — never yanked across the map to P3.
+    const manager = await createFighter();
+    manager.debugSetPlayerState({ x: 5.5, y: 2.95, z: 4.8 }, { x: 0, y: 0, z: 0 });
+    let snapped = false;
+    for (let i = 0; i < 10 && !snapped; i += 1) {
+      snapped = manager.reconcileSelf(5.5, 3.1, 4.8, FRAME, 1) === "snap";
+    }
+    expect(snapped).toBe(true);
+    const telemetry = manager.getLastReconcileTelemetry();
+    expect(telemetry.blockCenterX).toBeCloseTo(4.8, 5);
+    expect(telemetry.blockCenterZ).toBeCloseTo(4.8, 5);
+    expect(telemetry.levelTopIndex).toBe(telemetry.evalTopIndex);
+    const after = manager.getAvatarPosition();
+    expect(after.x).toBeCloseTo(5.5, 5);
+    expect(after.z).toBeCloseTo(4.8, 5);
+    expect(after.y).toBeCloseTo(3.0, 5);
   });
 });
 
