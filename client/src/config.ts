@@ -102,6 +102,12 @@ export const KILLFEED_OPACITY = 0.7;
 
 // Perf budget (AGENTS.md pitfalls): shadow map stays at or below 1024.
 export const SHADOW_MAP_SIZE = 1024;
+// Scene light budget (visual round, option A subtle lift): exactly 1 ambient
+// + 1 directional + the pre-existing banner spot — no new lights. Ambient was
+// raised 0.6 -> 0.78 (~+30%) to lift the brightened violet surfaces; the
+// directional key stays at 1.0 so highlights never blow out on phones.
+export const SCENE_AMBIENT_INTENSITY = 0.78;
+export const SCENE_DIRECTIONAL_INTENSITY = 1.0;
 
 // Stage 3 physics (QT3-A confirmed 2026-09-11: fixed tick 60Hz decoupled,
 // ice friction 0.05-0.1, trampoline impulse 8-12, tuned here).

@@ -15,24 +15,29 @@
 // white (free tones).
 
 // BASE 70% — dark violet family (hue ~250-265°), near-black values.
-export const BASE_BG = 0x0d0a18;
-export const BASE_BG_CSS = "#0d0a18";
-export const BASE_FLOOR = 0x14101f;
-export const BASE_WALL = 0x1d1530;
-export const BASE_OBSTACLE = 0x251c3d;
+// Visual-round brightening (subtle +20-30% lightness lift, same hues): every
+// surface was re-derived in HSL from the previous value (L x1.25, walls x1.15
+// to preserve glass see-through contrast, BG/AD-frame x1.2). Floor stays the
+// darkest gameplay surface, tops stay lighter. All hues remain in 230-290°
+// with lightness under 0.45 (pinned by palette.test.ts).
+export const BASE_BG = 0x100c1d;
+export const BASE_BG_CSS = "#100c1d";
+export const BASE_FLOOR = 0x191427;
+export const BASE_WALL = 0x211837;
+export const BASE_OBSTACLE = 0x2e234c;
 export const BASE_OBSTACLE_TOP = 0xcfc2ee;
-export const BASE_PLATFORM = 0x2a2044;
+export const BASE_PLATFORM = 0x352855;
 export const BASE_PLATFORM_TOP = 0xd9cdf5;
 // Per-figure tints: white, muted red, dark violet, pale violet.
 export const BASE_FIGURE_TINTS = [0xffffff, 0xb0575a, 0x4a3670, 0xc9b8ee] as const;
-export const BASE_CAP = 0x3d2f5c;
-export const BASE_RAMP = 0x302549;
-export const BASE_ICE = 0x1e1838;
-export const BASE_TRAMPOLINE = 0x2c2140;
-export const BASE_PAD = 0x372a4e;
-export const BASE_PICKUP = 0x171226;
-export const BASE_BASALT = 0x241c38;
-export const BASE_AD_FRAME = 0x120e1e;
+export const BASE_CAP = 0x4c3b73;
+export const BASE_RAMP = 0x3c2e5b;
+export const BASE_ICE = 0x261e46;
+export const BASE_TRAMPOLINE = 0x372950;
+export const BASE_PAD = 0x453562;
+export const BASE_PICKUP = 0x1d1730;
+export const BASE_BASALT = 0x2d2346;
+export const BASE_AD_FRAME = 0x161124;
 export const BASE_AD_CANVAS = "#141021";
 
 // ACCENT 25% — muted/desaturated red family (+ dim violet for ice glow).
@@ -95,6 +100,19 @@ export const IDENTITY_REMOTES = [
 // PANTS — 6 dark violet/grey-family tints (two-tone clothing bottoms).
 export const PANTS_PALETTE = [0x241c38, 0x2e2545, 0x1c1628, 0x38304e, 0x2a2136, 0x443a5c] as const;
 export const PANTS_FALLBACK = 0x241c38;
+
+// BALL — polished dark-amethyst stone for normal cores (visual round: the old
+// BASE_BG base + 1/3 thrower-color cap read garish). All three sit in the
+// violet 230-290° band with lightness under 0.45 (pinned by palette.test.ts
+// alongside the BASE darks). BALL_BASE is the shared skin base for EVERY
+// thrower (HSL lightness ~0.10: slightly lighter than the arena background so
+// the core reads on the floor, still dark enough that even the darkest
+// fighter keeps >= 0.2 lightness delta for the subtle accent). DARK shades
+// the poles and LIGHT gives the equatorial sheen in the painted gradient;
+// the thrower color appears ONLY as a thin ring + polar dot (~12.5%).
+export const BALL_BASE = 0x141024;
+export const BALL_BASE_DARK = 0x0e0a1c;
+export const BALL_BASE_LIGHT = 0x2a2148;
 
 // NEUTRAL — free tones (lights, moon/stars, label text, vertex-color base).
 export const NEUTRAL_WHITE = 0xffffff;

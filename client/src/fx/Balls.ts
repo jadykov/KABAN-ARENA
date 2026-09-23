@@ -1,7 +1,16 @@
 import * as THREE from "three";
 import { MAX_LIVE_BALLS, SUPER_BLINK_S } from "../config";
 import type { NetBallSnapshot, NetSuperSnapshot } from "../net/protocol";
-import { ACCENT_BALL_CAP, ACCENT_SPARK, ACCENT_TRAIL, BASE_BG, HL_CHARTREUSE, NEUTRAL_WHITE } from "../palette";
+import {
+  ACCENT_BALL_CAP,
+  ACCENT_SPARK,
+  ACCENT_TRAIL,
+  BALL_BASE,
+  BALL_BASE_DARK,
+  BALL_BASE_LIGHT,
+  HL_CHARTREUSE,
+  NEUTRAL_WHITE,
+} from "../palette";
 
 export const BALL_RADIUS = 0.38;
 // Owner fallback marking tint (compat path for snapshots predating the color
@@ -10,16 +19,16 @@ export const BALL_RADIUS = 0.38;
 export const BALL_CAP_COLOR = ACCENT_BALL_CAP;
 export const SUPER_BALL_COLOR = HL_CHARTREUSE;
 export const SUPER_INNER_COLOR = NEUTRAL_WHITE;
-// Shared dark-neutral ball base (owner feedback round: the old NEUTRAL_MOON
-// warm off-white 0xf4f1de read "VERY white" and popped against the dark
-// arena). Chosen BASE_BG 0x0d0a18 — the darkest numeric BASE-family tone in
-// the palette (HSL lightness ~0.067: darker than BASE_FLOOR 0x14101f ~0.092
-// and BASE_BASALT 0x241c38 ~0.165, same violet-graphite hue family as the
-// floor/walls so it sits quiet, never glows). The dominant read is dark;
-// visibility at gameplay distance comes from the LARGE thrower-color marking
-// below (polar cap + equator band), not from the base. Every normal core
-// shares this base; the thrower's identity appears ONLY as that bold marking.
-export const BALL_NEUTRAL_BASE = BASE_BG;
+// Shared polished-stone ball base (visual round: the old BASE_BG base + big
+// 1/3 thrower-color cap read garish). Chosen BALL_BASE 0x141024 — a dark
+// amethyst stone in the violet family (HSL lightness ~0.10: slightly lighter
+// than the arena background so the core reads on the brightened floor, still
+// dark enough that even the darkest fighter keeps >= 0.2 lightness delta for
+// the subtle accent below). The polished read comes from the painted vertical
+// gradient (DARK poles -> BASE -> LIGHT equatorial sheen) plus a soft
+// highlight, not from geometry. Every normal core shares this base; the
+// thrower's identity appears ONLY as the subtle ring + polar dot.
+export const BALL_NEUTRAL_BASE = BALL_BASE;
 // SUPER pickup orb (center spawn): slightly bigger shells so the x2 buff
 // reads at a glance on a phone screen. No lights, still one draw group.
 export const SUPER_CORE_OUTER_RADIUS = 1.0;
@@ -37,22 +46,38 @@ export const MUZZLE_FLASH_GROW = 1.2;
 // Double flash: two sprites pop at the tip (core + halo) for a punchier
 // release read without lights or extra draw-call spikes (pooled).
 export const MUZZLE_FLASH_COUNT = 2;
-// Ball skin texture: equirect canvas size (128x64) + BOLD ownership marking
-// (owner feedback: the old small dot read as a sticker, not as ownership).
-// Layout, painted FLAT so the sphere stays geometrically smooth:
-//   - polar cap: full-width thrower-color band over the top CAP fraction of
-//     the texture (v = north pole down to ~+30° latitude) — reads as "player
-//     X's ball" from any yaw at gameplay distance;
-//   - equator band: one thin full-width thrower-color stripe centered on the
-//     equator (v = 0.5) — a second ownership read that orbits visibly as the
-//     ball rolls (the marking doubles as the roll-spin carrier; no geometric
-//     bump needed).
-// Marking coverage is ~40% of the texels (cap third + thin band) vs ~7% for
-// the old dot — unmistakable, while the dark base between cap and band keeps
-// the dominant read dark and quiet.
+// Ball skin texture: equirect canvas size (128x64) + SUBTLE ownership accent
+// (visual round option B: the old 1/3 polar cap + band at ~40% coverage read
+// garish and distracting). Layout, painted FLAT so the sphere stays
+// geometrically smooth:
+//   - stone gradient: vertical DARK -> BASE -> LIGHT -> BASE -> DARK bands
+//     (see BALL_GRADIENT_STOPS) giving a polished dark-amethyst orb read,
+//     plus a soft translucent sheen highlight near the upper third;
+//   - polar dot: full-width thrower-color band over the top CAP fraction of
+//     the texture (1/16 = 4px on the 64px canvas, ~6.25%) — a small dot
+//     around the north pole, readable from above without dominating;
+//   - equator ring: one thin full-width thrower-color stripe centered on the
+//     equator (4px, ~6.25%) — the main ownership read, orbiting visibly as
+//     the ball rolls (the accent doubles as the roll-spin carrier; no
+//     geometric bump needed).
+// Combined accent coverage is 12.5% of the texels (4px + 4px of 64px) —
+// clearly smaller than the old ~40%, still enough to tell whose ball is
+// flying at gameplay distance, while the dark stone between dot and ring
+// keeps the dominant read quiet and stylish.
 export const BALL_TEXTURE_SIZE = 128;
-export const BALL_CAP_FRACTION = 1 / 3;
-export const BALL_EQUATOR_BAND_PX = 5;
+export const BALL_CAP_FRACTION = 1 / 16;
+export const BALL_EQUATOR_BAND_PX = 4;
+// Painted stone gradient stops (offsets in v, canvas top = north pole):
+// dark poles, amethyst base, lighter equatorial sheen. Exported so tests pin
+// the polished-stone design without sampling canvas pixels; the canvas path
+// below builds its linear gradient verbatim from this table.
+export const BALL_GRADIENT_STOPS: readonly { readonly offset: number; readonly color: number }[] = [
+  { offset: 0, color: BALL_BASE_DARK },
+  { offset: 0.25, color: BALL_BASE },
+  { offset: 0.5, color: BALL_BASE_LIGHT },
+  { offset: 0.75, color: BALL_BASE },
+  { offset: 1, color: BALL_BASE_DARK },
+];
 // Per-thrower skin cache bound: 7 fighter colors + non-finite fallback is the
 // legitimate set; the bound only guards against pathological color spam
 // (oldest entry evicted, Map insertion order). Never grows per-frame —
@@ -79,11 +104,11 @@ export const ENV_PUFF_LIFE_S = 0.3;
 export const ENV_PUFF_GROW = 1.5;
 export const ENV_PUFF_SUPER_GROW = 3;
 
-// Thrower marking color (dark-neutral redesign): the identity appears ONLY
-// as the bold painted marking (cap + band) — the raw fighter color, no
-// derivation. Non-finite colors fall back to BALL_CAP_COLOR (compat path for
-// snapshots predating the color field). Pure function, called only when a new
-// distinct color enters the skin cache (never per-frame).
+// Thrower marking color (polished-stone redesign): the identity appears ONLY
+// as the subtle painted accent (polar dot + equator ring) — the raw fighter
+// color, no derivation. Non-finite colors fall back to BALL_CAP_COLOR (compat
+// path for snapshots predating the color field). Pure function, called only
+// when a new distinct color enters the skin cache (never per-frame).
 export function markingColorFor(color: number): number {
   return Number.isFinite(color) ? color : BALL_CAP_COLOR;
 }
@@ -95,18 +120,22 @@ function cssFor(hex: number): string {
   return `rgb(${r},${g},${b})`;
 }
 
-// Painted ball skin texture: dark-neutral base + BOLD thrower-color marking
-// (polar cap over the top third + thin equator band), drawn FLAT so the
-// sphere silhouette stays perfectly round. Headless unit tests (vitest node
-// env, no DOM canvas) fall back to an 8x8 DataTexture mirroring the same
-// layout (cap rows 0-2 + equator row 4 in the marking color, gap/base rows
-// 3,5,7 and row 6 in the base) — selection and layout stay testable via
-// texture texels and material userData in both environments.
+// Painted ball skin texture: polished dark-amethyst stone + SUBTLE
+// thrower-color accent (thin polar dot + thin equator ring), drawn FLAT so
+// the sphere silhouette stays perfectly round. Headless unit tests (vitest
+// node env, no DOM canvas) fall back to a 16x16 DataTexture mirroring the
+// accent layout only (polar row 0 + equator row 8 in the marking color, all
+// other rows in the base — the stone gradient and sheen are canvas-only
+// polish, pinned separately via BALL_GRADIENT_STOPS) — selection and layout
+// stay testable via texture texels and material userData in both
+// environments. SUPER skins (chartreuse base) skip the violet gradient and
+// paint flat + sheen so the chartreuse stays pure and distinguishable.
 function makeBallTexture(baseHex: number, markingHex: number): THREE.Texture {
   const base = Number.isFinite(baseHex) ? baseHex : BALL_NEUTRAL_BASE;
   const marking = markingColorFor(markingHex);
+  const isSuper = base === SUPER_BALL_COLOR;
   if (typeof document === "undefined") {
-    const size = 8;
+    const size = 16;
     const data = new Uint8Array(size * size * 4);
     const br = (base >> 16) & 0xff;
     const bg = (base >> 8) & 0xff;
@@ -114,9 +143,10 @@ function makeBallTexture(baseHex: number, markingHex: number): THREE.Texture {
     const mr = (marking >> 16) & 0xff;
     const mg = (marking >> 8) & 0xff;
     const mb = marking & 0xff;
-    // Honest mirror of the canvas layout below: cap rows are the top third
-    // (ceil(8/3) = rows 0-2), the equator band is the middle row 4 (canvas
-    // band 29.5-34.5px of 64 maps to row ~4), row 3 is the base gap.
+    // Honest mirror of the canvas accent layout below: the polar dot is the
+    // top CAP fraction (ceil(16/16) = row 0 only), the equator ring is the
+    // middle row 8 (canvas ring 30-34px of 64 maps to row ~8). All other rows
+    // carry the flat base (gradient/sheen are canvas-only polish).
     const capRows = Math.ceil(size * BALL_CAP_FRACTION);
     for (let y = 0; y < size; y += 1) {
       for (let x = 0; x < size; x += 1) {
@@ -138,14 +168,45 @@ function makeBallTexture(baseHex: number, markingHex: number): THREE.Texture {
   canvas.height = BALL_TEXTURE_SIZE / 2;
   const context = canvas.getContext("2d");
   if (context !== null) {
-    context.fillStyle = cssFor(base);
-    context.fillRect(0, 0, canvas.width, canvas.height);
+    if (isSuper) {
+      // SUPER stays flat chartreuse (no violet gradient) so the power read
+      // never muddies; a soft white sheen gives the same polished finish.
+      context.fillStyle = cssFor(base);
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    } else {
+      // Polished stone: vertical gradient from BALL_GRADIENT_STOPS (dark
+      // poles, lighter equatorial sheen), seamless around all longitudes.
+      const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
+      for (const stop of BALL_GRADIENT_STOPS) {
+        gradient.addColorStop(stop.offset, cssFor(stop.color));
+      }
+      context.fillStyle = gradient;
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    // Soft sheen highlight near the upper third (translucent white ellipse,
+    // alpha ~0.10): a polished glint with no lights, painted under the
+    // accent so the thrower color stays pure.
+    context.save();
+    context.globalAlpha = 0.1;
+    context.fillStyle = cssFor(NEUTRAL_WHITE);
+    context.beginPath();
+    context.ellipse(
+      canvas.width * 0.35,
+      canvas.height * 0.3,
+      canvas.width * 0.16,
+      canvas.height * 0.12,
+      -0.5,
+      0,
+      Math.PI * 2,
+    );
+    context.fill();
+    context.restore();
     context.fillStyle = cssFor(marking);
-    // Polar cap: full-width band over the top third (north pole down to
-    // ~+30° latitude), seamless around all longitudes (no UV-seam stretch).
+    // Polar dot: thin full-width band over the top fraction (north-pole dot,
+    // 4px on the 64px canvas), seamless around all longitudes.
     const capHeight = canvas.height * BALL_CAP_FRACTION;
     context.fillRect(0, 0, canvas.width, capHeight);
-    // Equator band: thin full-width stripe centered on the equator.
+    // Equator ring: thin full-width stripe centered on the equator.
     const bandTop = canvas.height / 2 - BALL_EQUATOR_BAND_PX / 2;
     context.fillRect(0, bandTop, canvas.width, BALL_EQUATOR_BAND_PX);
   }
@@ -160,11 +221,11 @@ interface BallSkin {
   material: THREE.MeshBasicMaterial;
 }
 
-// One painted skin per distinct thrower color: shared dark-neutral base,
-// bold per-color marking (cap + band). userData carries { base, marking }
-// hexes so tests (and future readers) can assert the design without sampling
-// texels. Disposed in dispose(); SUPER shots use a dedicated chartreuse/white
-// skin below.
+// One painted skin per distinct thrower color: shared polished-stone base,
+// subtle per-color accent (polar dot + equator ring). userData carries
+// { base, marking } hexes so tests (and future readers) can assert the design
+// without sampling texels. Disposed in dispose(); SUPER shots use a dedicated
+// chartreuse/white skin below.
 function makeBallSkin(baseHex: number, markingHex: number): BallSkin {
   const texture = makeBallTexture(baseHex, markingHex);
   const material = new THREE.MeshBasicMaterial({ map: texture });
@@ -222,13 +283,13 @@ const spinAxis = new THREE.Vector3(0, 0, 1);
 
 // Pooled cannonballs (MAX_LIVE_BALLS smooth spheres): every normal core is
 // ONE mesh — a shared 16x12 smooth SphereGeometry with a per-thrower painted
-// skin (dark-neutral BALL_NEUTRAL_BASE base + BOLD thrower-color marking:
-// polar cap over the top third + thin equator band, flat in the texture,
-// per-color cached skins bounded by MAX_CACHED_BALL_SKINS, no per-frame
-// alloc). All balls share the single dark tone; the thrower's identity reads
-// at a glance from the large cap/band marking, which orbits as the ball
-// rolls so the roll spin stays perceptible with a perfectly spherical
-// silhouette (no bumps, no protrusions — owner feedback).
+// skin (polished-stone BALL_NEUTRAL_BASE base with a vertical gradient +
+// sheen, plus a SUBTLE thrower-color accent: thin polar dot + thin equator
+// ring at ~12.5% coverage, flat in the texture, per-color cached skins
+// bounded by MAX_CACHED_BALL_SKINS, no per-frame alloc). All balls share the
+// single stone tone; the thrower's identity reads from the small ring/dot
+// accent, which orbits as the ball rolls so the roll spin stays perceptible
+// with a perfectly spherical silhouette (no bumps, no protrusions).
 // SUPER shots use a dedicated chartreuse skin with a white painted marking
 // (same smooth sphere, group scaled x2 via SUPER_BALL_SCALE so the buff reads
 // on a phone screen). MeshBasicMaterial only (no new lights, no
@@ -236,8 +297,10 @@ const spinAxis = new THREE.Vector3(0, 0, 1);
 // Rolling cores spin while ball.rolling (axis perpendicular to the snapshot
 // planar velocity, rate speed/BALL_RADIUS — scalar scratch only, no new
 // meshes/lights); resting/standing cores never rotate.
-// Fire trail: 2 pooled glow sprites per live ball slot tinted by the owner's
-// ball.color (chartreuse for SUPER). Impact feedback is the pooled puff burst
+// Fire trail: 2 pooled glow sprites per live ball slot in neutral pale violet
+// (chartreuse for SUPER — normal trails no longer copy the owner color so the
+// subtle ball accent stays the only ownership read). Impact feedback is the
+// pooled puff burst
 // (8 sprites): environmental vanishes pop a small NEUTRAL mini-puff (never
 // red); player hits skip it via markPlayerHit (the red blood burst covers
 // those through the server event). Vanished ids pop a puff.
@@ -335,12 +398,12 @@ export class BallsPool {
   }
 
   // Per-thrower-color painted skin (cached by color, created once per
-  // distinct fighter color: shared dark-neutral base, bold marking
-  // (cap + band) in the thrower's color). Falls back to BALL_CAP_COLOR for
-  // non-finite colors (compat path for snapshots predating the color field).
-  // Bounded by MAX_CACHED_BALL_SKINS (oldest evicted) so pathological color
-  // spam can never grow the cache; the legitimate set is 7 fighters + the
-  // fallback, so eviction never fires in practice.
+  // distinct fighter color: shared polished-stone base, subtle accent
+  // (polar dot + equator ring) in the thrower's color). Falls back to
+  // BALL_CAP_COLOR for non-finite colors (compat path for snapshots predating
+  // the color field). Bounded by MAX_CACHED_BALL_SKINS (oldest evicted) so
+  // pathological color spam can never grow the cache; the legitimate set is
+  // 7 fighters + the fallback, so eviction never fires in practice.
   private skinFor(color: number): BallSkin {
     const key = Number.isFinite(color) ? color : BALL_CAP_COLOR;
     const cached = this.skins.get(key);
@@ -485,11 +548,11 @@ export class BallsPool {
       const skin = this.skinFor(ball.color);
       const body = group.children[0] as THREE.Mesh | undefined;
       if (body !== undefined) {
-        // Thrower identity (dark-neutral redesign): every normal core shares
-        // the dark base — the thrower reads at a glance from the BOLD
-        // painted marking (polar cap + equator band in the skin texture, same
-        // fighter color, flat paint, silhouette stays spherical). SUPER keeps
-        // the dedicated chartreuse/white skin.
+        // Thrower identity (polished-stone redesign): every normal core shares
+        // the stone base — the thrower reads from the SUBTLE painted accent
+        // (thin polar dot + equator ring in the skin texture, same fighter
+        // color, flat paint, silhouette stays spherical). SUPER keeps the
+        // dedicated chartreuse/white skin.
         body.material = isSuper ? this.superSkin.material : skin.material;
       }
       this.tracked.set(ball.ballId, { x: ball.x, y: ball.y, z: ball.z, super: isSuper, color: ball.color });
@@ -657,8 +720,13 @@ export class BallsPool {
     }
   }
 
-  private showTrailsForSlot(slot: number, position: THREE.Vector3, isSuper: boolean, ownerColor: number): void {
-    const tint = isSuper ? TRAIL_SUPER_COLOR : Number.isFinite(ownerColor) ? ownerColor : TRAIL_GOLD_COLOR;
+  // Normal trails stay neutral pale violet regardless of owner (visual round:
+  // the subtle ring/dot accent is the only ownership read; owner-tinted
+  // trails would reintroduce the garishness the redesign removes). SUPER
+  // trails stay chartreuse. The ownerColor parameter is kept for call-site
+  // back-compat and is intentionally ignored for normal balls.
+  private showTrailsForSlot(slot: number, position: THREE.Vector3, isSuper: boolean, _ownerColor: number): void {
+    const tint = isSuper ? TRAIL_SUPER_COLOR : TRAIL_GOLD_COLOR;
     for (let k = 0; k < TRAILS_PER_BALL; k += 1) {
       const sprite = this.trails[slot * TRAILS_PER_BALL + k];
       if (sprite === undefined) {

@@ -2,11 +2,12 @@ import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import { BALL_MUZZLE_OFFSET, BALL_TORSO_OFFSET, LOCAL_AVATAR_COLOR, MAX_LIVE_BALLS, SELF_SPAWN_Y } from "../config";
 import { directionFromYawPitch, muzzleForShot, type NetBallSnapshot } from "../net/protocol";
-import { BASE_BG, IDENTITY_LOCAL, IDENTITY_REMOTES, NEUTRAL_MOON } from "../palette";
+import { BALL_BASE, IDENTITY_LOCAL, IDENTITY_REMOTES, NEUTRAL_MOON } from "../palette";
 import {
   BALL_CAP_COLOR,
   BALL_CAP_FRACTION,
   BALL_EQUATOR_BAND_PX,
+  BALL_GRADIENT_STOPS,
   BALL_NEUTRAL_BASE,
   BALL_RADIUS,
   BALL_TEXTURE_SIZE,
@@ -60,7 +61,7 @@ function keyOf(hex: number): string {
 }
 
 // Texel colors present in a headless DataTexture skin (node-env tests have no
-// DOM canvas, so skins fall back to 8x8 DataTextures carrying the same two
+// DOM canvas, so skins fall back to 16x16 DataTextures carrying the same two
 // colors). Returns an empty set for non-data textures (browser CanvasTexture
 // path) — callers assert via userData there.
 function texelColors(texture: THREE.Texture | null): Set<string> {
@@ -76,7 +77,7 @@ function texelColors(texture: THREE.Texture | null): Set<string> {
   return out;
 }
 
-// Row-major texel grid of a headless 8x8 DataTexture skin (null when the
+// Row-major texel grid of a headless 16x16 DataTexture skin (null when the
 // texture is not a headless DataTexture, e.g. the browser CanvasTexture path).
 function texelGrid(texture: THREE.Texture | null): string[][] | null {
   const image = (texture as unknown as { image?: { data?: unknown; width?: unknown; height?: unknown } } | null)?.image;
@@ -109,9 +110,9 @@ function lightnessOf(hex: number): number {
   return (Math.max(r, g, b) + Math.min(r, g, b)) / 2;
 }
 
-// Neutral-redesign balls: smooth 16x12 spheres, one mesh per core, dark
-// base + bold thrower marking (cap + band), no per-ball trails change.
-describe("BallsPool neutral redesign", () => {
+// Polished-stone balls: smooth 16x12 spheres, one mesh per core, stone base
+// + subtle thrower accent (polar dot + thin ring), neutral trails.
+describe("BallsPool polished-stone redesign", () => {
   it("uses BALL_RADIUS 0.38 for the shared smooth body geometry (16x12)", () => {
     expect(BALL_RADIUS).toBe(0.38);
     const scene = new THREE.Scene();
@@ -146,20 +147,21 @@ describe("BallsPool neutral redesign", () => {
         expect(group.children[0]).toBeInstanceOf(THREE.Mesh);
         expect(group.children[0]).not.toBeInstanceOf(THREE.Sprite);
       }
-      // 8 impact puffs + 2 trail sprites per ball slot (gold/purple).
+      // 8 impact puffs + 2 trail sprites per ball slot (neutral/SUPER).
       expect(puffSprites(scene)).toHaveLength(8 + MAX_LIVE_BALLS * 2);
     } finally {
       pool.dispose();
     }
   });
 
-  it("paints neutral base + thrower marking, SUPER chartreuse/white, x2 scale for SUPER", () => {
+  it("paints stone base + thrower accent, SUPER chartreuse/white, x2 scale for SUPER", () => {
     const scene = new THREE.Scene();
     const pool = new BallsPool(scene);
     try {
-      // Dark-neutral redesign: the base is the dark BASE_BG tone (NOT the old
-      // NEUTRAL_MOON off-white) — the thrower reads from the BOLD marking.
-      expect(BALL_NEUTRAL_BASE).toBe(BASE_BG);
+      // Polished-stone redesign: the base is the dark-amethyst BALL_BASE tone
+      // (NOT the old NEUTRAL_MOON off-white, NOT the old BASE_BG) — the
+      // thrower reads from the SUBTLE accent only.
+      expect(BALL_NEUTRAL_BASE).toBe(BALL_BASE);
       expect(BALL_NEUTRAL_BASE).not.toBe(NEUTRAL_MOON);
       pool.render([makeBall("b1", false, LOCAL_AVATAR_COLOR)]);
       let groups = ballGroups(scene);
@@ -336,18 +338,21 @@ describe("BallsPool muzzle flash", () => {
     }
   });
 
-  it("shows gold trails for normal balls and purple for SUPER", () => {
+  it("shows neutral pale-violet trails for normal balls and chartreuse for SUPER", () => {
     const scene = new THREE.Scene();
     const pool = new BallsPool(scene);
     try {
-      // Normal core carries its thrower color: a gold-tinted owner keeps the
-      // gold-trail read, SUPER stays purple regardless of owner color.
-      pool.render([makeBall("b1", false, TRAIL_GOLD_COLOR), makeBall("b2", true)]);
+      // Visual round: normal trails stay neutral pale violet even for a
+      // reddish owner (the subtle ring/dot accent is the only ownership
+      // read); SUPER stays chartreuse regardless of owner color.
+      expect(LOCAL_AVATAR_COLOR).not.toBe(TRAIL_GOLD_COLOR);
+      pool.render([makeBall("b1", false, LOCAL_AVATAR_COLOR), makeBall("b2", true)]);
       pool.update(1 / 60);
       const visible = puffSprites(scene).filter((sprite) => sprite.visible);
       const colors = visible.map((sprite) => (sprite.material as THREE.SpriteMaterial).color.getHex());
       expect(colors).toContain(TRAIL_GOLD_COLOR);
       expect(colors).toContain(TRAIL_SUPER_COLOR);
+      expect(colors).not.toContain(LOCAL_AVATAR_COLOR);
     } finally {
       pool.dispose();
     }
@@ -445,11 +450,11 @@ describe("BallsPool resting balls (ground y, no offset clamp)", () => {
   });
 });
 
-// Neutral redesign skins (one shared dark-neutral base, per-thrower bold
-// marking): two different thrower colors give two skins with the SAME base
-// but DIFFERENT markings; the same color reuses one cached skin.
-describe("BallsPool neutral skins (per-color cached base + marking)", () => {
-  it("paints two different thrower markings over one shared neutral base", () => {
+// Polished-stone skins (one shared stone base, per-thrower subtle accent):
+// two different thrower colors give two skins with the SAME base but
+// DIFFERENT accents; the same color reuses one cached skin.
+describe("BallsPool stone skins (per-color cached base + accent)", () => {
+  it("paints two different thrower accents over one shared stone base", () => {
     const scene = new THREE.Scene();
     const pool = new BallsPool(scene);
     try {
@@ -465,10 +470,10 @@ describe("BallsPool neutral skins (per-color cached base + marking)", () => {
       if (bodyA === undefined || bodyB === undefined) {
         throw new Error("expected two ball meshes");
       }
-      // One shared dark-neutral tone for every ball ...
-      expect(skinOf(bodyA).base).toBe(BASE_BG);
-      expect(skinOf(bodyB).base).toBe(BASE_BG);
-      // ... with the thrower's identity only as the bold marking.
+      // One shared polished-stone tone for every ball ...
+      expect(skinOf(bodyA).base).toBe(BALL_BASE);
+      expect(skinOf(bodyB).base).toBe(BALL_BASE);
+      // ... with the thrower's identity only as the subtle accent.
       expect(skinOf(bodyA).marking).toBe(colorA);
       expect(skinOf(bodyB).marking).toBe(colorB);
       expect(bodyA.material).not.toBe(bodyB.material);
@@ -497,7 +502,7 @@ describe("BallsPool neutral skins (per-color cached base + marking)", () => {
     }
   });
 
-  it("falls back to the cap-violet marking over neutral for non-finite colors (compat path)", () => {
+  it("falls back to the cap-violet accent over stone for non-finite colors (compat path)", () => {
     const scene = new THREE.Scene();
     const pool = new BallsPool(scene);
     try {
@@ -517,7 +522,7 @@ describe("BallsPool neutral skins (per-color cached base + marking)", () => {
     }
   });
 
-  it("headless skin texture carries both the neutral base and the marking texels", () => {
+  it("headless skin texture carries both the stone base and the accent texels", () => {
     const scene = new THREE.Scene();
     const pool = new BallsPool(scene);
     try {
@@ -540,27 +545,42 @@ describe("BallsPool neutral skins (per-color cached base + marking)", () => {
   });
 });
 
-// Bold ownership marking (owner: the old dot read as a sticker — the cap +
-// band must be big enough to identify the thrower at a glance while the base
-// stays dark). Layout pins: cap covers roughly the top third, the equator
-// band stays thin, and the headless texel mirror carries the same layout.
-describe("BallsPool bold marking layout (cap + band)", () => {
-  it("covers roughly the top third with the cap and keeps the band thin", () => {
+// Subtle ownership accent (visual round option B: the old 1/3 cap + band at
+// ~40% read garish — the polar dot + thin ring must stay small enough to be
+// stylish while still identifying the thrower at a glance). Layout pins: the
+// polar dot is a thin top slice, the equator ring stays thin, and the
+// headless texel mirror carries the same layout.
+describe("BallsPool subtle accent layout (polar dot + thin ring)", () => {
+  it("keeps the polar dot small and the ring thin (combined ~12.5%)", () => {
     expect(BALL_TEXTURE_SIZE).toBe(128);
-    // Cap is the top third (tolerance: a "roughly third" band, not a dot).
-    expect(BALL_CAP_FRACTION).toBeGreaterThanOrEqual(0.3);
-    expect(BALL_CAP_FRACTION).toBeLessThanOrEqual(0.36);
-    // Band is thin on the 64px-tall canvas: a stripe, not a second cap.
+    // Polar dot is a thin top slice (1/16 = 4px on the 64px canvas).
+    expect(BALL_CAP_FRACTION).toBeCloseTo(1 / 16, 10);
+    // Ring is thin on the 64px-tall canvas: a stripe, not a second cap.
     const canvasHeight = BALL_TEXTURE_SIZE / 2;
-    expect(BALL_EQUATOR_BAND_PX).toBeGreaterThan(0);
+    expect(BALL_EQUATOR_BAND_PX).toBe(4);
     expect(BALL_EQUATOR_BAND_PX / canvasHeight).toBeLessThanOrEqual(0.125);
-    // Combined marking coverage is bold (~40%: third + thin stripe) — an
-    // order of magnitude above the old dot (~7%).
+    // Combined accent coverage is subtle (~12.5%: dot + thin ring) — clearly
+    // below the old ~40%, within the 10-15% target band.
     const coverage = BALL_CAP_FRACTION + BALL_EQUATOR_BAND_PX / canvasHeight;
-    expect(coverage).toBeGreaterThanOrEqual(0.33);
+    expect(coverage).toBeCloseTo(0.125, 10);
+    expect(coverage).toBeLessThanOrEqual(0.15);
+    expect(coverage).toBeGreaterThanOrEqual(0.08);
   });
 
-  it("headless texels mirror the layout: cap rows + equator row marked, gap/base rows dark", () => {
+  it("paints the stone gradient from the exported stops (dark poles, light equator)", () => {
+    // The polished-stone read is pinned here (canvas-only polish): 5 stops,
+    // dark at both poles, base at the quarters, light sheen at the equator.
+    expect(BALL_GRADIENT_STOPS).toHaveLength(5);
+    const offsets = BALL_GRADIENT_STOPS.map((stop) => stop.offset);
+    expect(offsets).toEqual([0, 0.25, 0.5, 0.75, 1]);
+    const colors = BALL_GRADIENT_STOPS.map((stop) => stop.color);
+    expect(colors[0]).toBe(colors[4]);
+    expect(colors[1]).toBe(colors[3]);
+    expect(colors[1]).toBe(BALL_NEUTRAL_BASE);
+    expect(new Set(colors).size).toBe(3);
+  });
+
+  it("headless texels mirror the layout: polar row + equator row marked, all other rows stone", () => {
     const scene = new THREE.Scene();
     const pool = new BallsPool(scene);
     try {
@@ -575,30 +595,30 @@ describe("BallsPool bold marking layout (cap + band)", () => {
         expect(body).toBeDefined();
         return;
       }
-      expect(grid).toHaveLength(8);
+      expect(grid).toHaveLength(16);
       const baseKey = keyOf(BALL_NEUTRAL_BASE);
       const markingKey = keyOf(LOCAL_AVATAR_COLOR);
-      // Cap rows (top third: rows 0-2) read fully in the thrower color.
-      for (const y of [0, 1, 2]) {
-        for (const texel of grid[y] ?? []) {
-          expect(texel).toBe(markingKey);
-        }
-      }
-      // Base gap row between cap and band stays dark (dominant read: dark).
-      for (const texel of grid[3] ?? []) {
-        expect(texel).toBe(baseKey);
-      }
-      // Equator band row reads in the thrower color.
-      for (const texel of grid[4] ?? []) {
+      // Polar dot row (row 0) reads fully in the thrower color.
+      for (const texel of grid[0] ?? []) {
         expect(texel).toBe(markingKey);
       }
-      // South rows stay dark.
-      for (const y of [5, 6, 7]) {
+      // Gap rows between dot and ring stay stone (dominant read: dark).
+      for (let y = 1; y < 8; y += 1) {
         for (const texel of grid[y] ?? []) {
           expect(texel).toBe(baseKey);
         }
       }
-      // Marking texel share is bold (>= 1/3), base texels still dominate-or-half.
+      // Equator ring row reads in the thrower color.
+      for (const texel of grid[8] ?? []) {
+        expect(texel).toBe(markingKey);
+      }
+      // South rows stay stone.
+      for (let y = 9; y < 16; y += 1) {
+        for (const texel of grid[y] ?? []) {
+          expect(texel).toBe(baseKey);
+        }
+      }
+      // Accent texel share is subtle (2/16 = 12.5%), stone dominates.
       let markingCount = 0;
       let total = 0;
       for (const row of grid) {
@@ -609,7 +629,8 @@ describe("BallsPool bold marking layout (cap + band)", () => {
           }
         }
       }
-      expect(markingCount / total).toBeGreaterThanOrEqual(1 / 3);
+      expect(markingCount / total).toBeCloseTo(0.125, 10);
+      expect(markingCount / total).toBeLessThanOrEqual(0.15);
       expect(MAX_CACHED_BALL_SKINS).toBeGreaterThanOrEqual(8);
     } finally {
       pool.dispose();
@@ -618,12 +639,12 @@ describe("BallsPool bold marking layout (cap + band)", () => {
 });
 
 // Contrast guard: EVERY fighter color (local + 6 remotes) must keep enough
-// lightness distance from the dark base so ownership reads for all fighters,
-// not just the bright ones. Threshold is ~0.25 per spec (0.24 to admit the
-// darkest fighter 0x7a2430 at exact delta 0.243 — pinned below); the base
-// choice (darkest BASE tone) is what makes even that pair pass.
-describe("BallsPool ownership contrast (all 7 fighters vs dark base)", () => {
-  it("every identity marking keeps >= ~0.25 lightness delta vs the dark base", () => {
+// lightness distance from the stone base so the subtle accent reads for all
+// fighters, not just the bright ones. Threshold is 0.2 per spec (the darkest
+// fighter 0x7a2430 sits at exact delta ~0.208 — pinned below); the base
+// choice (dark amethyst BALL_BASE) is what makes even that pair pass.
+describe("BallsPool ownership contrast (all 7 fighters vs stone base)", () => {
+  it("every identity accent keeps >= 0.2 lightness delta vs the stone base", () => {
     const fighters = [IDENTITY_LOCAL, ...IDENTITY_REMOTES];
     expect(fighters).toHaveLength(7);
     const baseL = lightnessOf(BALL_NEUTRAL_BASE);
@@ -631,15 +652,15 @@ describe("BallsPool ownership contrast (all 7 fighters vs dark base)", () => {
     for (const fighter of fighters) {
       const delta = Math.abs(lightnessOf(fighter) - baseL);
       minDelta = Math.min(minDelta, delta);
-      expect(delta).toBeGreaterThanOrEqual(0.24);
+      expect(delta).toBeGreaterThanOrEqual(0.2);
     }
     // Pin the worst pair so a future base/identity edit cannot silently erode
-    // it: the dark-red remote is the floor (~0.243 vs BASE_BG).
-    expect(minDelta).toBeCloseTo(0.243, 2);
+    // it: the dark-red remote is the floor (~0.208 vs BALL_BASE).
+    expect(minDelta).toBeCloseTo(0.208, 2);
   });
 });
 
-// Neutral redesign silhouette (owner: balls must be round, no bumps): every
+// Stone redesign silhouette (owner: balls must be round, no bumps): every
 // visible pool ball — normal AND super — is a single centered sphere mesh at
 // unit scale, so nothing protrudes past BALL_RADIUS. Recycled slots reset
 // rotation so a new ball starts axis-aligned.
@@ -716,8 +737,8 @@ describe("BallsPool smooth silhouette (no protrusions)", () => {
 
 // Stage 4d.4 roll spin: while ball.rolling the mesh rotates around the
 // horizontal axis perpendicular to (vx, vz) at hypot(vx, vz) / BALL_RADIUS;
-// resting (or zero-speed) balls never rotate. Scalar scratch only. The bold
-// cap/band marking orbits with the mesh, so the spin reads on the smooth
+// resting (or zero-speed) balls never rotate. Scalar scratch only. The subtle
+// ring/dot accent orbits with the mesh, so the spin reads on the smooth
 // sphere without any geometric bump.
 describe("BallsPool roll spin (rolling rotates, resting holds)", () => {
   function makeRollingBall(ballId: string, vx: number, vz: number, rolling: boolean): NetBallSnapshot {

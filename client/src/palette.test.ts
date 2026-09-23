@@ -16,6 +16,9 @@ import {
   ACCENT_STRIP,
   ACCENT_STRIP_BASE,
   ACCENT_TRAIL,
+  BALL_BASE,
+  BALL_BASE_DARK,
+  BALL_BASE_LIGHT,
   BASE_AD_FRAME,
   BASE_BASALT,
   BASE_BG,
@@ -102,9 +105,35 @@ describe("palette buckets (violet base / muted-red accents / chartreuse highligh
       BASE_PICKUP,
       BASE_BASALT,
       BASE_AD_FRAME,
+      BALL_BASE,
+      BALL_BASE_DARK,
+      BALL_BASE_LIGHT,
     ]) {
       expectHueIn(hex, 230, 290);
       expect(toHsl(hex).l).toBeLessThan(0.45);
+    }
+  });
+
+  it("floor stays the darkest gameplay surface after the brightening lift", () => {
+    // Visual round pin: every surface lifted ~+25% in lightness (walls +15%
+    // for glass readability), so the ordering must survive — floor darkest,
+    // caps/pads lightest. BG/AD-frame are allowed darker (backdrop, not
+    // surfaces); tops are pale by design (asserted elsewhere).
+    const floorL = toHsl(BASE_FLOOR).l;
+    expect(toHsl(BASE_BG).l).toBeLessThan(floorL);
+    for (const hex of [
+      BASE_WALL,
+      BASE_OBSTACLE,
+      BASE_PLATFORM,
+      BASE_CAP,
+      BASE_RAMP,
+      BASE_ICE,
+      BASE_TRAMPOLINE,
+      BASE_PAD,
+      BASE_PICKUP,
+      BASE_BASALT,
+    ]) {
+      expect(toHsl(hex).l).toBeGreaterThan(floorL);
     }
   });
 
@@ -150,7 +179,8 @@ describe("palette buckets (violet base / muted-red accents / chartreuse highligh
       BASE_PLATFORM, BASE_PLATFORM_TOP, BASE_FIGURE_TINTS[1] ?? 0,
       BASE_FIGURE_TINTS[2] ?? 0, BASE_FIGURE_TINTS[3] ?? 0, BASE_CAP,
       BASE_RAMP, BASE_ICE, BASE_TRAMPOLINE, BASE_PAD, BASE_PICKUP,
-      BASE_BASALT, BASE_AD_FRAME, ACCENT_STRIP, ACCENT_STRIP_BASE,
+      BASE_BASALT, BASE_AD_FRAME, BALL_BASE, BALL_BASE_DARK, BALL_BASE_LIGHT,
+      ACCENT_STRIP, ACCENT_STRIP_BASE,
       ACCENT_ICE_GLOW, ACCENT_HIT_FLASH, ACCENT_HIT_BURST, ACCENT_FIRE_BURST,
       ACCENT_OBSTACLE_TINT, ACCENT_BALL_CAP, ACCENT_TRAIL, ACCENT_SPARK,
       ACCENT_SPOT, ACCENT_DEATH_WHITE, ACCENT_DEATH_PALE, ACCENT_DEATH_RED,
@@ -193,23 +223,24 @@ describe("palette buckets (violet base / muted-red accents / chartreuse highligh
     expect(minDist).toBeGreaterThan(40);
   });
 
-  it("every identity marking keeps >= ~0.25 lightness delta vs the dark ball base (BASE_BG)", () => {
-    // Palette-level ownership-contrast guard (ball base round): the ball skin
-    // base is BASE_BG (the darkest BASE tone), and the thrower's identity
-    // reads as a large marking in the raw fighter color — so ALL 7 fighter
-    // colors must stand off the base in lightness, not just the bright ones.
-    // Threshold ~0.25 per spec (0.24 admits the darkest fighter 0x7a2430 at
-    // exact delta ~0.243 — pinned here so a future palette edit cannot
-    // silently erode it).
+  it("every identity accent keeps >= 0.2 lightness delta vs the stone ball base (BALL_BASE)", () => {
+    // Palette-level ownership-contrast guard (visual round): the ball skin
+    // base is BALL_BASE (polished dark amethyst, lightness ~0.10), and the
+    // thrower's identity reads as a subtle ring/dot accent in the raw fighter
+    // color — so ALL 7 fighter colors must stand off the base in lightness,
+    // not just the bright ones. Threshold 0.2 per spec — pinned here so a
+    // future palette edit cannot silently erode it.
     const fighters = [IDENTITY_LOCAL, ...IDENTITY_REMOTES];
     expect(fighters).toHaveLength(7);
-    const baseL = toHsl(BASE_BG).l;
+    const baseL = toHsl(BALL_BASE).l;
     let minDelta = Number.POSITIVE_INFINITY;
     for (const fighter of fighters) {
       const delta = Math.abs(toHsl(fighter).l - baseL);
       minDelta = Math.min(minDelta, delta);
-      expect(delta).toBeGreaterThanOrEqual(0.24);
+      expect(delta).toBeGreaterThanOrEqual(0.2);
     }
-    expect(minDelta).toBeCloseTo(0.243, 2);
+    // Pin the worst pair: the dark-red remote is the floor (~0.208 vs
+    // BALL_BASE 0x141024).
+    expect(minDelta).toBeCloseTo(0.208, 2);
   });
 });

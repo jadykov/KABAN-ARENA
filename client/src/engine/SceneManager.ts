@@ -42,6 +42,8 @@ import {
   SELF_RECONCILE_MIN_M,
   SELF_RECONCILE_RATE,
   SELF_RECONCILE_SNAP_M,
+  SCENE_AMBIENT_INTENSITY,
+  SCENE_DIRECTIONAL_INTENSITY,
   SELF_RECONCILE_TOP_TOL,
   SELF_RECONCILE_UP_SNAP_COOLDOWN_S,
   SELF_RECONCILE_STALL_MIN_DIV,
@@ -452,10 +454,12 @@ export class SceneManager {
     this.scene.background = new THREE.Color(BASE_BG);
     this.scene.fog = new THREE.Fog(BASE_BG, 22, 72);
 
-    const ambient = new THREE.AmbientLight(NEUTRAL_WHITE, 0.6);
+    // Visual-round lift (option A): ambient 0.78 with the same white tone and
+    // the same 1.0 directional key — no new lights, budget intact.
+    const ambient = new THREE.AmbientLight(NEUTRAL_WHITE, SCENE_AMBIENT_INTENSITY);
     this.scene.add(ambient);
 
-    const directional = new THREE.DirectionalLight(NEUTRAL_WHITE, 1.0);
+    const directional = new THREE.DirectionalLight(NEUTRAL_WHITE, SCENE_DIRECTIONAL_INTENSITY);
     directional.position.set(5, 10, 5);
     directional.castShadow = true;
     directional.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);

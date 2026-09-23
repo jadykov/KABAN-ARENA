@@ -7,7 +7,7 @@
    cannot import TS). Scheme: violet base / muted-red accents / chartreuse
    highlights. Neutral UI chrome (white borders, dark plates) stays as-is. */
 :root {
-  --palette-bg: #0d0a18; /* BASE_BG_CSS */
+  --palette-bg: #100c1d; /* BASE_BG_CSS */
   --palette-heart-full: #c14e56; /* ACCENT_HEART_FULL */
   --palette-heart-half: #c9b8ee; /* ACCENT_HEART_HALF */
   --palette-power: #b8e04a; /* HL_CHARTREUSE_CSS */
@@ -18,7 +18,7 @@
   --palette-super-bg: rgba(74, 54, 112, 0.35); /* dark-violet base family */
   --palette-super-border: rgba(201, 184, 238, 0.8); /* pale violet */
   --palette-super-text: #e9d5ff; /* ACCENT_SUPER_TEXT_CSS */
-  --palette-plate: rgba(13, 10, 24, 0.85); /* BASE_BG at 0.85 */
+  --palette-plate: rgba(16, 12, 29, 0.85); /* BASE_BG at 0.85 */
 }
 
 html,
