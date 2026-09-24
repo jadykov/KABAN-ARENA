@@ -208,6 +208,9 @@ canvas {
   border: 2px solid rgba(255, 255, 255, 0.5);
   background: rgba(255, 255, 255, 0.08);
   touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
   opacity: 0.4;
 }
 
@@ -280,6 +283,9 @@ canvas {
   font-size: 14px;
   font-weight: 700;
   cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
 #fire-button {
@@ -297,4 +303,7 @@ canvas {
   font-weight: 700;
   opacity: 0.6;
   touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }

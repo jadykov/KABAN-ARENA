@@ -6,11 +6,15 @@
 // (pointerId/clientX/clientY/pointerType/target), forwards plain data here,
 // and runs the charge FSM. Desktop mouse/keyboard paths are untouched.
 //
-// Feel parity: drag px maps to [-1, 1] over FLOAT_DRAG_RADIUS_PX with
-// AIM_EXPO shaping and the joystick screen-up convention (+y = pitch up) —
-// the exact formula of the legacy float path, so FIRE aim feels identical to
-// the old float aim (damped while charging via yawRateScale/pitchRateScale)
-// and the free camera runs the same math at full rate while idle.
+// Feel: drag px maps to [-1, 1] over FLOAT_DRAG_RADIUS_PX with
+// AIM_EXPO shaping and the desktop mouse-away-lowers convention (touch-up =
+// -y = pitch down) — screen Y passes through unnegated so dragging up LOWERS
+// the camera, matching the desktop RMB free-look (InputController passes raw
+// movementY unnegated, SceneManager applies pitch += dy). NOTE: this
+// intentionally diverges from the desktop LMB float path in main.ts
+// (handleFloatPointerMove keeps -dy, screen-up +y). FIRE aim runs damped
+// while charging via yawRateScale/pitchRateScale and the free camera runs
+// the same math at full rate while idle.
 // Scalar only; the two vector objects are mutated in place and exposed by
 // reference so the per-frame loop reads them with zero allocations.
 import { AIM_EXPO, FLOAT_DEADZONE, FLOAT_DRAG_RADIUS_PX } from "../config";
@@ -41,7 +45,9 @@ export function isRightHalf(clientX: number, innerWidth: number): boolean {
 
 // Drag offset in px -> expo-shaped aim vector in [-1, 1]. Normalizes by the
 // drag radius, clamps over-long drags to unit length, applies the shared
-// expo, and negates screen Y so dragging up aims up. Non-finite input yields
+// expo to screen-space deltas unnegated, so dragging up (negative dy) yields
+// negative y and lowers the camera — the desktop mouse-away-lowers
+// convention. Non-finite input yields
 // a zero vector (call sites treat it as "no aim"). One small object per call
 // on the pointer-event path only — never per frame.
 export function computeTouchAimVector(deltaXPx: number, deltaYPx: number): TouchAimVector {
@@ -57,7 +63,7 @@ export function computeTouchAimVector(deltaXPx: number, deltaYPx: number): Touch
     dy /= length;
   }
   const vx = applyExpo(dx, AIM_EXPO);
-  const vy = applyExpo(-dy, AIM_EXPO);
+  const vy = applyExpo(dy, AIM_EXPO);
   // Normalize negative zero so consumers and equality checks see plain 0.
   return { x: vx === 0 ? 0 : vx, y: vy === 0 ? 0 : vy };
 }

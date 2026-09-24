@@ -84,16 +84,16 @@ describe("isRightHalf (camera zone predicate)", () => {
   });
 });
 
-describe("computeTouchAimVector (drag math parity with the legacy float path)", () => {
+describe("computeTouchAimVector (touch drag math, touch-up lowers the camera)", () => {
   it("returns exact zero at the origin (no negative zero)", () => {
     expect(computeTouchAimVector(0, 0)).toEqual({ x: 0, y: 0 });
   });
 
-  it("maps full-radius drags to unit vectors, screen-up means +y", () => {
+  it("maps full-radius drags to unit vectors, screen-up means -y (lowers camera)", () => {
     expect(FLOAT_DRAG_RADIUS_PX).toBe(80);
     expect(computeTouchAimVector(80, 0)).toEqual({ x: 1, y: 0 });
-    expect(computeTouchAimVector(0, -80)).toEqual({ x: 0, y: 1 });
-    expect(computeTouchAimVector(0, 80)).toEqual({ x: 0, y: -1 });
+    expect(computeTouchAimVector(0, -80)).toEqual({ x: 0, y: -1 });
+    expect(computeTouchAimVector(0, 80)).toEqual({ x: 0, y: 1 });
   });
 
   it("shapes partial drags with the shared expo", () => {
@@ -111,13 +111,16 @@ describe("computeTouchAimVector (drag math parity with the legacy float path)", 
     const diagonal = computeTouchAimVector(800, 800);
     expect(Math.hypot(diagonal.x, diagonal.y)).toBeLessThanOrEqual(1.0001);
     expect(diagonal.x).toBeCloseTo(applyExpo(Math.SQRT1_2, AIM_EXPO), 10);
-    expect(diagonal.y).toBeCloseTo(applyExpo(-Math.SQRT1_2, AIM_EXPO), 10);
+    expect(diagonal.y).toBeCloseTo(applyExpo(Math.SQRT1_2, AIM_EXPO), 10);
   });
 
-  it("matches the legacy float formula sample-for-sample (identical feel)", () => {
-    // Inline replication of the pre-4e main.ts float move math (radius
-    // normalize, length clamp, expo, screen-up +y): the router must produce
-    // bit-identical vectors so FIRE aim feels exactly like the old float aim.
+  it("matches the touch formula sample-for-sample (touch-up lowers the camera)", () => {
+    // Inline replication of the touch drag math (radius normalize, length
+    // clamp, expo, screen Y unnegated so screen-up yields -y): the router
+    // must produce bit-identical vectors to this formula. NOTE: this
+    // intentionally diverges from the desktop LMB float path in main.ts
+    // (handleFloatPointerMove keeps -dy, screen-up +y); touch follows the
+    // desktop RMB look convention per owner playtest.
     const legacy = (deltaX: number, deltaY: number): { x: number; y: number } => {
       const radius = FLOAT_DRAG_RADIUS_PX > 0 ? FLOAT_DRAG_RADIUS_PX : 80;
       let dx = deltaX / radius;
@@ -127,7 +130,7 @@ describe("computeTouchAimVector (drag math parity with the legacy float path)", 
         dx /= length;
         dy /= length;
       }
-      return { x: applyExpo(dx, AIM_EXPO), y: applyExpo(-dy, AIM_EXPO) };
+      return { x: applyExpo(dx, AIM_EXPO), y: applyExpo(dy, AIM_EXPO) };
     };
     const samples: Array<[number, number]> = [
       [0, 0],
