@@ -157,7 +157,11 @@ export const KNOCKBACK_IMPULSE = 9;
 
 // Stage 3 arena (QD2-A neon-warehouse, QD5-A 6-8 low symmetric blocks).
 export const OBSTACLE_COUNT = 8;
-export const WALL_HEIGHT = 3;
+// Playtest round (owner: sense of open space): perimeter walls halved 3 -> 1.5
+// so the wall top ends up roughly at the banner edge. All wall readers
+// (Arena buildWalls/buildColliders/neon strips, SceneManager lowBehindWall,
+// bannerSpot) derive from this constant, so they follow automatically.
+export const WALL_HEIGHT = 1.5;
 export const WALL_THICKNESS = 0.5;
 export const TRAMPOLINE_RADIUS = 1.2;
 export const SLIPPERY_RADIUS = 2.64;
@@ -497,6 +501,9 @@ export const MOVE_STICK_DIAMETER = 140;
 export const AIM_EXPO = 1.4;
 export const AIM_YAW_RATE = 2.4;
 export const AIM_PITCH_RATE = 1.6;
+// Phone/touch aim +10% (touch-only FIRE/free-camera paths in main.ts);
+// desktop mouse paths (float legacy, SceneManager CAMERA_SENSITIVITY) stay raw.
+export const TOUCH_SENSITIVITY_MULT = 1.1;
 // Floating right-thumb aim zone (Brawl-Stars-like one-thumb flow): pointerdown
 // anywhere on the right half starts charge at the touch point (floating
 // origin, not a fixed disc); drag offset in px maps to [-1, 1] over this

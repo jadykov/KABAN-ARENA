@@ -10,6 +10,7 @@ import {
   CAMERA_PITCH_MIN,
   FLOAT_DEADZONE,
   FLOAT_DRAG_RADIUS_PX,
+  TOUCH_SENSITIVITY_MULT,
 } from "../config";
 import { SceneManager } from "../engine/SceneManager";
 import {
@@ -369,14 +370,16 @@ describe("free-camera tick sim (A1: right-half drag rotates, never charges)", ()
     for (let i = 0; i < 60; i += 1) {
       const camVector = state.camVector();
       if (Math.hypot(camVector.x, camVector.y) >= FLOAT_DEADZONE) {
-        aimYaw -= camVector.x * AIM_YAW_RATE * yawScale * FRAME;
-        const nextCamPitch = aimPitch + camVector.y * AIM_PITCH_RATE * pitchScale * FRAME;
+        // Touch-only free-camera path (main.ts cam block): same formula
+        // incl. TOUCH_SENSITIVITY_MULT (+10% phone aim).
+        aimYaw -= camVector.x * AIM_YAW_RATE * yawScale * TOUCH_SENSITIVITY_MULT * FRAME;
+        const nextCamPitch = aimPitch + camVector.y * AIM_PITCH_RATE * pitchScale * TOUCH_SENSITIVITY_MULT * FRAME;
         aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextCamPitch));
         manager.setCameraAngles(aimYaw, aimPitch);
       }
       expect(isCharging).toBe(false);
     }
-    const expectedYaw = 0.5 - drag.x * AIM_YAW_RATE * 1 * (60 * FRAME);
+    const expectedYaw = 0.5 - drag.x * AIM_YAW_RATE * 1 * TOUCH_SENSITIVITY_MULT * (60 * FRAME);
     expect(aimYaw).toBeCloseTo(expectedYaw, 10);
     expect(aimYaw).toBeLessThan(0.5);
     expect(manager.getCameraAngles().yaw).toBeCloseTo(aimYaw, 10);
@@ -441,6 +444,7 @@ describe("FIRE-held aim tick sim (damped rates, identical to the old float feel)
   it("integrates at AIM_YAW_DAMP/AIM_PITCH_DAMP while charging", () => {
     expect(AIM_YAW_DAMP).toBe(0.6);
     expect(AIM_PITCH_DAMP).toBe(0.42);
+    expect(TOUCH_SENSITIVITY_MULT).toBe(1.1);
     expect(yawRateScale(true)).toBe(AIM_YAW_DAMP);
     expect(pitchRateScale(true)).toBe(AIM_PITCH_DAMP);
     const state = new TouchAimState();
@@ -453,13 +457,16 @@ describe("FIRE-held aim tick sim (damped rates, identical to the old float feel)
     for (let i = 0; i < 60; i += 1) {
       const fireVector = state.fireVector();
       if (Math.hypot(fireVector.x, fireVector.y) >= FLOAT_DEADZONE) {
-        aimYaw -= fireVector.x * AIM_YAW_RATE * yawScale * FRAME;
+        // Touch-only FIRE-held aim path (main.ts fire block): same formula
+        // incl. TOUCH_SENSITIVITY_MULT (+10% phone aim).
+        aimYaw -= fireVector.x * AIM_YAW_RATE * yawScale * TOUCH_SENSITIVITY_MULT * FRAME;
       }
     }
     // Damped: exactly 0.6 of the full-rate sweep, matching the legacy float
-    // path which ran the same scales (spec A8: identical feel).
-    expect(aimYaw).toBeCloseTo(0.5 - AIM_YAW_RATE * AIM_YAW_DAMP * 1, 10);
-    expect(aimYaw).toBeCloseTo(0.5 - 2.4 * 0.6, 10);
+    // path which ran the same scales (spec A8: identical feel), times the
+    // touch-only +10% phone multiplier (TOUCH_SENSITIVITY_MULT = 1.1).
+    expect(aimYaw).toBeCloseTo(0.5 - AIM_YAW_RATE * AIM_YAW_DAMP * TOUCH_SENSITIVITY_MULT * 1, 10);
+    expect(aimYaw).toBeCloseTo(0.5 - 2.4 * 0.6 * 1.1, 10);
     expect(aimYaw).toBeGreaterThan(0.5 - AIM_YAW_RATE * 1);
   });
 
@@ -477,14 +484,19 @@ describe("FIRE-held aim tick sim (damped rates, identical to the old float feel)
     expect(pitchRateScale(true)).toBe(AIM_PITCH_DAMP);
     let aimPitch = 0;
     const pitchScale = pitchRateScale(true);
-    for (let i = 0; i < 30; i += 1) {
+    // 20 frames (not 30): at the +10% touch rate 30 frames would slam into
+    // CAMERA_PITCH_MAX (0.36) and the pin would measure the clamp, not the
+    // rate — 20 frames stays below it so the expectation below pins the rate.
+    for (let i = 0; i < 20; i += 1) {
       const fireVector = state.fireVector();
       if (Math.hypot(fireVector.x, fireVector.y) >= FLOAT_DEADZONE) {
-        const nextPitch = aimPitch + fireVector.y * AIM_PITCH_RATE * pitchScale * FRAME;
+        // Touch-only FIRE-held aim path (main.ts fire block): same formula
+        // incl. TOUCH_SENSITIVITY_MULT (+10% phone aim).
+        const nextPitch = aimPitch + fireVector.y * AIM_PITCH_RATE * pitchScale * TOUCH_SENSITIVITY_MULT * FRAME;
         aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextPitch));
       }
     }
-    expect(aimPitch).toBeCloseTo(AIM_PITCH_RATE * AIM_PITCH_DAMP * (30 * FRAME), 10);
+    expect(aimPitch).toBeCloseTo(AIM_PITCH_RATE * AIM_PITCH_DAMP * TOUCH_SENSITIVITY_MULT * (20 * FRAME), 10);
     expect(aimPitch).toBeGreaterThan(0);
     // End-to-end: the fired shot reads pitch directly
     // (directionFromYawPitch, shared by the preview and the payload), so a
@@ -500,7 +512,10 @@ describe("FIRE-held aim tick sim (damped rates, identical to the old float feel)
     for (let i = 0; i < 30; i += 1) {
       const camVector = camState.camVector();
       if (Math.hypot(camVector.x, camVector.y) >= FLOAT_DEADZONE) {
-        const nextCamPitch = camPitch + camVector.y * AIM_PITCH_RATE * 1 * FRAME;
+        // Touch-only free-camera path (main.ts cam block): same formula
+        // incl. TOUCH_SENSITIVITY_MULT (+10% phone aim); sign convention
+        // (lowers the camera) is what this control pins.
+        const nextCamPitch = camPitch + camVector.y * AIM_PITCH_RATE * 1 * TOUCH_SENSITIVITY_MULT * FRAME;
         camPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextCamPitch));
       }
     }

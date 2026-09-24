@@ -76,6 +76,21 @@ function killfeedOf(handle: { element: HTMLDivElement }): FakeElement {
   return feed;
 }
 
+// The top-left info lines live nested (root > #hud-info > lines) while the
+// FakeElement querySelector only sees direct children — walk the tree.
+function byId(handle: { element: HTMLDivElement }, id: string): FakeElement {
+  const root = handle.element as unknown as FakeElement;
+  const queue: FakeElement[] = [root];
+  while (queue.length > 0) {
+    const current = queue.shift() as FakeElement;
+    if (current.id === id) {
+      return current;
+    }
+    queue.push(...current.children);
+  }
+  throw new Error(`hud element #${id} missing`);
+}
+
 beforeEach(() => {
   installFakeDocument();
 });
@@ -156,5 +171,59 @@ describe("createHud killfeed (event feed)", () => {
     // Second dispose is a safe no-op (never throws, never touches the parent).
     handle.dispose();
     expect(parent.children).toHaveLength(0);
+  });
+});
+
+// Phone-playtest HUD layout: timer + Players/Watching counters live in the
+// top-left #hud-info list; score + transient status live in the right-side
+// #hud-score-block (no centered topbar exists anymore); hearts stay centered
+// alone at center top, untouched.
+describe("createHud top-left info list", () => {
+  it("writes the timer and counter lines via the new setters", () => {
+    const parent = new FakeElement();
+    const handle = createHud(asHtml(parent));
+    try {
+      expect(byId(handle, "hud-info-timer").textContent).toBe("3:00");
+      expect(byId(handle, "hud-info-players").textContent).toBe("Players: 0");
+      expect(byId(handle, "hud-info-watching").textContent).toBe("Watching: 0");
+      handle.setTimer(65);
+      expect(byId(handle, "hud-info-timer").textContent).toBe("1:05");
+      handle.setPlayers(3);
+      expect(byId(handle, "hud-info-players").textContent).toBe("Players: 3");
+      handle.setWatching(2);
+      expect(byId(handle, "hud-info-watching").textContent).toBe("Watching: 2");
+      handle.setCounters(5, 1);
+      expect(byId(handle, "hud-info-players").textContent).toBe("Players: 5");
+      expect(byId(handle, "hud-info-watching").textContent).toBe("Watching: 1");
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("keeps score + transient status in the right score block (no topbar)", () => {
+    const parent = new FakeElement();
+    const handle = createHud(asHtml(parent));
+    try {
+      const root = handle.element as unknown as FakeElement;
+      const scoreBlock = root.querySelector("#hud-score-block");
+      if (scoreBlock === null) {
+        throw new Error("hud score block missing");
+      }
+      expect(scoreBlock.querySelector("#hud-score")).not.toBe(null);
+      expect(scoreBlock.querySelector("#hud-status")).not.toBe(null);
+      expect(scoreBlock.querySelector("#hud-timer")).toBe(null);
+      expect(scoreBlock.querySelector("#hud-info-timer")).toBe(null);
+      // The centered topbar pill is gone entirely (center top = hearts only).
+      expect(root.querySelector("#hud-topbar")).toBe(null);
+      handle.setScore(7);
+      expect(byId(handle, "hud-score").textContent).toBe("7");
+      handle.setStatus("Fragged — respawning…");
+      expect(byId(handle, "hud-status").textContent).toBe("Fragged — respawning…");
+      // Hearts container still a direct centered child of the root, untouched.
+      expect(root.querySelector("#hud-hearts")).not.toBe(null);
+      expect(byId(handle, "hud-hearts").textContent).toBeDefined();
+    } finally {
+      handle.dispose();
+    }
   });
 });

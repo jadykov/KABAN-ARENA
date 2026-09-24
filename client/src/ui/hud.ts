@@ -21,6 +21,9 @@ export interface HudHandle {
   element: HTMLDivElement;
   setTimer(totalSeconds: number): void;
   setScore(score: number): void;
+  setPlayers(count: number): void;
+  setWatching(count: number): void;
+  setCounters(players: number, watching: number): void;
   // R2: value is halves (0..8, 4 hearts x full/half/empty). Legacy callers
   // passing hearts (0..4) still render something sane — values <= 4 map to
   // full hearts (halves = value * 2) only via setHeartsFromHearts; prefer
@@ -38,22 +41,44 @@ export interface HudHandle {
   dispose(): void;
 }
 
-// Hybrid HUD (QD3 + R2 halves): DOM overlay top bar with always-visible
-// timer + score, 4 hearts top-center under the timer rendered from halves
-// (full/half/empty) and a SUPER badge for the x2-next-shot buff. Reload
-// lives in the aim overlay since Stage 4d.2 (dedicated bar under the power
-// bar). Minimal, readable on narrow mobile viewports, never blocks the
-// canvas (pointer-events none).
+// Hybrid HUD (QD3 + R2 halves, phone playtest round): DOM overlay with a
+// compact top-LEFT info list (timer / Players / Watching), 4 hearts alone
+// top-center rendered from halves (full/half/empty), a right-side score
+// block (score line + transient status line, clears the mute/fullscreen
+// buttons) and a SUPER badge for the x2-next-shot buff. Reload lives in the
+// aim overlay since Stage 4d.2 (dedicated bar under the power bar). Minimal,
+// readable on narrow mobile viewports, never blocks the canvas
+// (pointer-events none).
 export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): HudHandle {
   const root = document.createElement("div");
   root.id = "hud";
 
-  const topBar = document.createElement("div");
-  topBar.id = "hud-topbar";
+  // Top-left info list (phone playtest): timer line + live counters, always
+  // visible, separate from the centered hearts and the right score block.
+  const info = document.createElement("div");
+  info.id = "hud-info";
 
-  const timer = document.createElement("span");
-  timer.id = "hud-timer";
-  timer.textContent = formatTimer(180);
+  const infoTimer = document.createElement("div");
+  infoTimer.id = "hud-info-timer";
+  infoTimer.textContent = formatTimer(180);
+
+  const infoPlayers = document.createElement("div");
+  infoPlayers.id = "hud-info-players";
+  infoPlayers.textContent = "Players: 0";
+
+  const infoWatching = document.createElement("div");
+  infoWatching.id = "hud-info-watching";
+  infoWatching.textContent = "Watching: 0";
+
+  info.appendChild(infoTimer);
+  info.appendChild(infoPlayers);
+  info.appendChild(infoWatching);
+
+  // Right-side score block (playtest round): vertical dark pill pinned
+  // top-right, clear of the mute/fullscreen buttons — line 1 is the score,
+  // line 2 the transient status. Center top holds ONLY the hearts now.
+  const scoreBlock = document.createElement("div");
+  scoreBlock.id = "hud-score-block";
 
   const score = document.createElement("span");
   score.id = "hud-score";
@@ -63,9 +88,8 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
   status.id = "hud-status";
   status.textContent = "";
 
-  topBar.appendChild(timer);
-  topBar.appendChild(score);
-  topBar.appendChild(status);
+  scoreBlock.appendChild(score);
+  scoreBlock.appendChild(status);
 
   const hearts = document.createElement("div");
   hearts.id = "hud-hearts";
@@ -78,8 +102,9 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
   const killfeed = document.createElement("div");
   killfeed.id = "hud-killfeed";
 
-  root.appendChild(topBar);
+  root.appendChild(info);
   root.appendChild(hearts);
+  root.appendChild(scoreBlock);
   root.appendChild(superBadge);
   root.appendChild(killfeed);
   parent.appendChild(root);
@@ -111,10 +136,20 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
   const handle: HudHandle = {
     element: root,
     setTimer(totalSeconds: number): void {
-      timer.textContent = formatTimer(totalSeconds);
+      infoTimer.textContent = formatTimer(totalSeconds);
     },
     setScore(nextScore: number): void {
       score.textContent = String(nextScore);
+    },
+    setPlayers(count: number): void {
+      infoPlayers.textContent = `Players: ${count}`;
+    },
+    setWatching(count: number): void {
+      infoWatching.textContent = `Watching: ${count}`;
+    },
+    setCounters(players: number, watching: number): void {
+      infoPlayers.textContent = `Players: ${players}`;
+      infoWatching.textContent = `Watching: ${watching}`;
     },
     setHearts(nextHalves: number): void {
       const safe = Number.isFinite(nextHalves) ? Math.floor(nextHalves) : 0;

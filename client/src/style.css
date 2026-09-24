@@ -52,24 +52,66 @@ canvas {
   color: #fff;
 }
 
-#hud-topbar {
+/* Playtest round: center top holds ONLY the hearts (compact); the score +
+   transient status live in the right-side #hud-score-block below, clear of
+   the top-right mute/fullscreen buttons (right:96px clears both). */
+#hud-score-block {
+  position: fixed;
+  top: 8px;
+  right: 96px;
+  z-index: 20;
   display: flex;
-  gap: 16px;
-  align-items: center;
-  justify-content: center;
-  margin-top: 8px;
-  padding: 4px 16px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0;
+  padding: 4px 12px;
   background: rgba(0, 0, 0, 0.45);
-  border-radius: 999px;
+  border-radius: 10px;
   font-size: 14px;
   font-weight: 600;
   line-height: 1.4;
+  white-space: nowrap;
+  max-width: calc(100vw - 16px);
+  pointer-events: none;
+}
+
+/* Phone-playtest info list: compact vertical stack pinned top-left
+   (timer / Players / Watching), same dark-pill family as the right score
+   block, never captures input. Hearts stay centered alone at center top;
+   the score block shrinks to its content (score+status) so the two coexist
+   on narrow screens. Mute/fullscreen buttons live top-right — no overlap. */
+#hud-info {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+#hud-info-timer {
+  font-variant-numeric: tabular-nums;
+}
+
+#hud-info-players,
+#hud-info-watching {
+  opacity: 0.85;
+  font-weight: 400;
 }
 
 #hud-hearts {
   display: flex;
   gap: 4px;
-  margin-top: 4px;
+  margin-top: 8px;
   font-size: 18px;
   line-height: 1;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
@@ -225,9 +267,14 @@ canvas {
 }
 
 @media (max-width: 480px) {
-  #hud-topbar {
+  #hud-score-block {
     font-size: 12px;
-    padding: 3px 12px;
+    padding: 3px 10px;
+  }
+
+  #hud-info {
+    font-size: 11px;
+    padding: 3px 8px;
   }
 
   #hud-hearts {
@@ -290,8 +337,8 @@ canvas {
 
 #fire-button {
   position: fixed;
-  right: 24px;
-  bottom: 56px;
+  right: 40px;
+  bottom: 72px;
   z-index: 10;
   width: 84px;
   height: 84px;

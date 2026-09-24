@@ -31,6 +31,7 @@ import {
   SELF_RECONCILE_UP_SNAP_MAX_DIV,
   START_SCORE,
   TAP_FIRE_MIN_S,
+  TOUCH_SENSITIVITY_MULT,
   getServerUrl,
 } from "./config";
 import { SnapDebugOverlay } from "./engine/debugOverlay";
@@ -46,8 +47,9 @@ import {
   applyExpo,
   buildInputPayload,
   chargeToPower01,
+  countFighters,
+  countSpectators,
   directionFromYawPitch,
-  formatCounters,
   halvesForHp,
   muzzleForShot,
   normalizePlayNick,
@@ -575,12 +577,13 @@ async function boot(): Promise<void> {
   });
 
   const applySnapshot = (snapshot: RoomSnapshot): void => {
-    // Top bar timer + score always visible (QD3); R2 halves (4 hearts x
-    // full/half/empty from halvesForHp). Status line shows live counters
-    // only (Players N | Watching M) — runners never see a spectator list.
-    // Balls + SUPER core go straight to the scene (null hides the core).
+    // Top-left info list (timer + Players / Watching lines, QD3); R2 halves
+    // (4 hearts x full/half/empty from halvesForHp). The centered status span
+    // shows transient messages only (respawn/winner) — runners never see a
+    // spectator list. Balls + SUPER core go straight to the scene (null hides
+    // the core).
     sceneManager.setBattleSnapshot(snapshot.balls, snapshot.super ?? null);
-    const counters = formatCounters(snapshot.players);
+    hud.setCounters(countFighters(snapshot.players), countSpectators(snapshot.players));
     const selfId = net.ownSessionId;
     const self = snapshot.players.find((player) => player.sessionId === selfId);
     if (self !== undefined) {
@@ -604,7 +607,7 @@ async function boot(): Promise<void> {
     if (self !== undefined && isPlaying && !self.alive) {
       hud.setStatus("Fragged — respawning…");
     } else {
-      hud.setStatus(counters);
+      hud.setStatus("");
     }
     // Self spawn tracking: while fighting, an alive-again transition means
     // the server respawned us at a fresh corner — teleport the local avatar
@@ -646,7 +649,7 @@ async function boot(): Promise<void> {
       hud.setTimer(0);
       const winner = snapshot.players.find((player) => player.sessionId === snapshot.winner);
       if (winner !== undefined && (self === undefined || self.alive || !isPlaying)) {
-        hud.setStatus(`${winner.nick} wins! ${counters}`);
+        hud.setStatus(`${winner.nick} wins!`);
       }
     }
     // Stage 5 audio, snapshot-driven edges (all event-gated, never per-frame):
@@ -1454,9 +1457,13 @@ async function boot(): Promise<void> {
       // never replaced): reading them here allocates nothing per frame.
       const fireVector = touchState.fireVector();
       const camVector = touchState.camVector();
+      // Phone/touch aim +10% (TOUCH_SENSITIVITY_MULT): fireVector/camVector
+      // only arise from touch input, so the multiplier applies to these two
+      // touch-only paths; the float (LMB legacy desktop) path below stays raw.
+      const touchMult = TOUCH_SENSITIVITY_MULT;
       if (Math.hypot(fireVector.x, fireVector.y) >= FLOAT_DEADZONE) {
-        aimYaw -= fireVector.x * AIM_YAW_RATE * yawScale * deltaSeconds;
-        const nextPitch = aimPitch + fireVector.y * AIM_PITCH_RATE * pitchScale * deltaSeconds;
+        aimYaw -= fireVector.x * AIM_YAW_RATE * yawScale * touchMult * deltaSeconds;
+        const nextPitch = aimPitch + fireVector.y * AIM_PITCH_RATE * pitchScale * touchMult * deltaSeconds;
         aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextPitch));
       }
       if (Math.hypot(floatVector.x, floatVector.y) >= FLOAT_DEADZONE) {
@@ -1473,8 +1480,8 @@ async function boot(): Promise<void> {
       // the drag, new downs are ignored) so a second finger never swings aim.
       if (!isCharging) {
         if (Math.hypot(camVector.x, camVector.y) >= FLOAT_DEADZONE) {
-          aimYaw -= camVector.x * AIM_YAW_RATE * yawScale * deltaSeconds;
-          const nextCamPitch = aimPitch + camVector.y * AIM_PITCH_RATE * pitchScale * deltaSeconds;
+          aimYaw -= camVector.x * AIM_YAW_RATE * yawScale * touchMult * deltaSeconds;
+          const nextCamPitch = aimPitch + camVector.y * AIM_PITCH_RATE * pitchScale * touchMult * deltaSeconds;
           aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextCamPitch));
           sceneManager.setCameraAngles(aimYaw, aimPitch);
         }
