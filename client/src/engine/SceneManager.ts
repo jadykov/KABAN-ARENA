@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { AdsManager, getFenceSlotTransforms } from "../ads/AdsLoader";
+import { FOOTSTEP_MIN_SPEED01 } from "../audio/Sfx";
 import {
   ARENA_HALF_SIZE,
   AVATAR_BODY_RADIUS,
@@ -126,7 +127,12 @@ export interface LookDelta {
 export type ArenaEvent =
   | { type: "pickup"; kind: PowerUpKind }
   | { type: "speed-expired" }
-  | { type: "trampoline" };
+  | { type: "trampoline" }
+  // Own-avatar hop tick (Stage 5 audio): pushed on hop-boundary crossings
+  // while grounded and moving — main.ts maps it to the quiet footstep SFX.
+  // SceneManager stays audio-agnostic; the engine-level cooldown keeps the
+  // ~2-4 Hz hop cadence from ever machine-gunning.
+  | { type: "footstep" };
 
 // Authoritative on-top level for the UP-snap: XZ footprint of one elevated
 // block plus the body-center Y the server derives on its top (topY +
@@ -266,6 +272,10 @@ export class SceneManager {
   private avatarMaterial: THREE.MeshStandardMaterial | null = null;
   private readonly hop = createHopState();
   private readonly hopPrev = new THREE.Vector3();
+  // Last hop-boundary index the footstep event path consumed (Stage 5 audio):
+  // update() pushes one "footstep" event per hop-boundary crossing while
+  // grounded and moving, so the tick rate rides the hop cadence for free.
+  private lastFootstepHop = -1;
   // Flight gate: airborne while the Rapier body climbs/falls fast
   // (trampoline launch, platform drop) — the hop rig glides instead of
   // bouncing. Two-level gate with exit hold (no ramp trips, no apex
@@ -956,6 +966,16 @@ export class SceneManager {
         ? Math.min(1, Math.hypot(movedX, movedZ) / (deltaSeconds * MOVE_SPEED))
         : 0;
       updateHopVisual(this.avatarRig, 0, speed01, this.hop, deltaSeconds, this.airborneGate.isAirborne);
+      // Stage 5 audio footstep tick: one event per hop-boundary crossing
+      // (updateHopVisual advances lastHop once per bounce, ~2-4 Hz at full
+      // tilt) while grounded and actually moving. Mid-air crossings only
+      // re-arm the index so landing never replays a stale boundary.
+      if (this.hop.lastHop !== this.lastFootstepHop) {
+        this.lastFootstepHop = this.hop.lastHop;
+        if (!this.airborneGate.isAirborne && speed01 > FOOTSTEP_MIN_SPEED01) {
+          this.events.push({ type: "footstep" });
+        }
+      }
       this.hopPrev.set(this.avatar.position.x, this.avatar.position.y, this.avatar.position.z);
     }
     this.updateCameraTransform(deltaSeconds);
@@ -1133,6 +1153,7 @@ export class SceneManager {
   // zeroed state, so no residual bounce leaks into the next life.
   private resetHop(): void {
     resetHopState(this.hop);
+    this.lastFootstepHop = -1;
     if (this.avatarRig !== null) {
       resetHopVisual(this.avatarRig, 0);
     }

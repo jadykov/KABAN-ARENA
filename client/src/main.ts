@@ -37,6 +37,7 @@ import { SnapDebugOverlay } from "./engine/debugOverlay";
 import { Engine } from "./engine/Engine";
 import { InputController, isTypingTarget } from "./engine/InputController";
 import { SceneManager } from "./engine/SceneManager";
+import { clampIntensity, createSfx, detectRicochetOnsets } from "./audio/Sfx";
 import { NetworkManager, type RoomSnapshot } from "./net/NetworkManager";
 import { RemoteAvatars } from "./net/RemoteAvatars";
 import { beginChargeLevel, mirrorChargeCameraPitch, pitchRateScale, shouldTrackAimFromCamera, stepChargeLevel, unmirrorChargeCameraPitch, yawRateScale, type ChargeLevel } from "./net/chargeAim";
@@ -54,6 +55,7 @@ import {
   powerToSpeed,
   previewTimeAt,
   worldMoveFromYaw,
+  type RoundPhase,
 } from "./net/protocol";
 import { TRAJ_DOT_COUNT, createAim, type TrajSample } from "./ui/aim";
 import { createHud } from "./ui/hud";
@@ -148,6 +150,40 @@ async function boot(): Promise<void> {
   hud.setScore(START_SCORE);
   hud.setStatus("Watching live arena — pick a nick and press Play");
 
+  // Stage 5 audio: procedural SFX engine (zero asset files) + DOM mute
+  // toggle. Created in code like the FIRE button so index.html stays
+  // untouched. The button keeps default pointer events (like #fire-button /
+  // #join-play) and canvas-charge guards already ignore button targets via
+  // targetOnGameUi (HTMLButtonElement branch), so taps never leak into aim.
+  const sfx = createSfx();
+  const muteButton = document.createElement("button");
+  muteButton.id = "mute-button";
+  muteButton.title = "Toggle sound";
+  muteButton.textContent = sfx.isMuted() ? "🔇" : "🔊";
+  muteButton.addEventListener("click", (): void => {
+    sfx.unlock();
+    muteButton.textContent = sfx.toggleMuted() ? "🔇" : "🔊";
+    // A focused button would re-trigger on Space (the charge key) — drop
+    // focus immediately so gameplay keys stay gameplay keys.
+    muteButton.blur();
+  });
+  document.body.appendChild(muteButton);
+
+  // WebAudio unlock (iOS requirement, no autoplay): resume on every gesture
+  // until running — a cheap no-op once the context runs.
+  const unlockAudio = (): void => {
+    sfx.unlock();
+  };
+  window.addEventListener("pointerdown", unlockAudio);
+  window.addEventListener("keydown", unlockAudio);
+
+  // Meters from the local avatar for distance-attenuated remote sounds
+  // (event-driven only — the clone per event never touches the hot path).
+  function distanceToSelf(x: number, z: number): number {
+    const pos = sceneManager.getAvatarPosition();
+    return Math.hypot(x - pos.x, z - pos.z);
+  }
+
   const joystick = createJoystick(document.body, {
     diameter: MOVE_STICK_DIAMETER,
     onMove: (vector): void => {
@@ -176,6 +212,8 @@ async function boot(): Promise<void> {
   // visible local body).
   const remotes = new RemoteAvatars(engine.scene, (x, y, z, color): void => {
     sceneManager.spawnDeathBurst(x, y, z, color);
+    // Stage 5 audio: remote deaths read at a distance (attenuated).
+    sfx.play("death", { intensity: 0.8, distanceM: distanceToSelf(x, z) });
   });
 
   let latest: RoomSnapshot | null = null;
@@ -186,6 +224,14 @@ async function boot(): Promise<void> {
   // Last seen self alive flag (null = no snapshot yet): false->true while
   // playing means an authoritative respawn — teleport to the server spawn.
   let lastSelfAlive: boolean | null = null;
+  // Stage 5 audio edge state (all snapshot-driven, reset on leave):
+  // previous round phase (round start/end stingers), previous SUPER-core
+  // presence (spawn shimmer), previous own buff (pickup chime), and the last
+  // per-ball ricochet flags (wall-tick onsets).
+  let prevPhase: RoundPhase | null = null;
+  let prevSuperActive = false;
+  let prevSelfSuper = false;
+  const prevRicochet = new Map<string, boolean>();
 
   // R2 charge/reload state (ms wall clock via Date.now()).
   let chargeStartMs = 0;
@@ -337,6 +383,7 @@ async function boot(): Promise<void> {
       chargeLevel.active = false;
       sceneManager.cancelShotBodyTurn();
       isReloading = false;
+      sfx.chargeStop();
       sceneManager.setCharge01(0);
       sceneManager.setChargeZoom01(0);
       sceneManager.setChargeTranslucent(false);
@@ -364,6 +411,26 @@ async function boot(): Promise<void> {
       } else {
         remotes.flashVictim(info.victimId);
       }
+      // Stage 5 audio: rubbery thud scaled by the ball's charge power (the
+      // event payload carries no power, so it is resolved from the latest
+      // balls snapshot; SUPER hits read full strength). Attenuated by
+      // distance from the local avatar.
+      const ball = latest?.balls.find((candidate) => candidate.ballId === info.ballId);
+      const hitIntensity = info.super ? 1 : clampIntensity(ball?.power01);
+      const hitDistance = distanceToSelf(info.x, info.z);
+      sfx.play("impact", {
+        intensity: hitIntensity,
+        distanceM: hitDistance,
+      });
+      // Stage 5 audio: enemy hit squeal rides on top of the thud — only when
+      // the victim is NOT the local player (own hits keep the thud alone;
+      // spectators hear squeals for every victim).
+      if (selfId === null || info.victimId !== selfId) {
+        sfx.play("squeal", {
+          intensity: hitIntensity,
+          distanceM: hitDistance,
+        });
+      }
     },
     onLeave: (): void => {
       latest = null;
@@ -373,6 +440,11 @@ async function boot(): Promise<void> {
       sceneManager.cancelShotBodyTurn();
       isReloading = false;
       hasSuperBuff = false;
+      sfx.chargeStop();
+      prevPhase = null;
+      prevSuperActive = false;
+      prevSelfSuper = false;
+      prevRicochet.clear();
       sceneManager.setCharge01(0);
       sceneManager.setChargeZoom01(0);
       sceneManager.setChargeTranslucent(false);
@@ -404,7 +476,13 @@ async function boot(): Promise<void> {
     if (self !== undefined) {
       hud.setScore(self.score);
       hud.setHearts(halvesForHp(self.hp));
-      hasSuperBuff = self.superBuff === true;
+      // Stage 5 audio: own SUPER-buff acquirement reads as a pickup chime.
+      const superNow = self.superBuff === true;
+      if (superNow && !prevSelfSuper) {
+        sfx.play("superPickup");
+      }
+      prevSelfSuper = superNow;
+      hasSuperBuff = superNow;
       const canShowSuper = isPlaying && !sceneManager.isSpectating();
       hud.setSuperBadge(canShowSuper && hasSuperBuff);
       aimOverlay.setSuper(canShowSuper && hasSuperBuff);
@@ -428,11 +506,14 @@ async function boot(): Promise<void> {
     if (self !== undefined && isPlaying && self.alive && !sceneManager.isSpectating()) {
       if (lastSelfAlive === false) {
         sceneManager.teleportSelf(self.x, self.z);
+        // Stage 5 audio: authoritative respawn shimmer (own body re-placed).
+        sfx.play("respawn");
       } else if (lastSelfAlive === null) {
         const local = sceneManager.getAvatarPosition();
         const gap = Math.hypot(self.x - local.x, self.z - local.z);
         if (gap > SELF_RECONCILE_SNAP_M) {
           sceneManager.teleportSelf(self.x, self.z);
+          sfx.play("respawn");
         }
       }
       lastSelfAlive = true;
@@ -440,6 +521,8 @@ async function boot(): Promise<void> {
       if (lastSelfAlive === true && self.alive === false && !sceneManager.isSpectating()) {
         sceneManager.spawnDeathBurst(self.x, 1.2, self.z, ownerColorForSession(self.sessionId, selfId));
         sceneManager.cancelShotBodyTurn();
+        // Stage 5 audio: own frag reads full-strength (no attenuation).
+        sfx.play("death", { intensity: 1 });
       }
       lastSelfAlive = false;
     }
@@ -455,6 +538,36 @@ async function boot(): Promise<void> {
       if (winner !== undefined && (self === undefined || self.alive || !isPlaying)) {
         hud.setStatus(`${winner.nick} wins! ${counters}`);
       }
+    }
+    // Stage 5 audio, snapshot-driven edges (all event-gated, never per-frame):
+    // round start/end stingers on phase transitions (countdown->playing is
+    // the whistle, playing->ended the closer — lobby/countdown entries stay
+    // silent); SUPER-core spawn shimmer on null->active; ricochet ticks on
+    // per-ball flag onsets (strength from authoritative speed).
+    if (prevPhase !== null && snapshot.phase !== prevPhase) {
+      if (snapshot.phase === "playing") {
+        sfx.play("roundStart");
+      } else if (snapshot.phase === "ended") {
+        sfx.play("roundEnd");
+      }
+    }
+    prevPhase = snapshot.phase;
+    const superSnapshot = snapshot.super ?? null;
+    const superActive = superSnapshot !== null;
+    if (superActive && !prevSuperActive && superSnapshot !== null) {
+      sfx.play("superSpawn", { distanceM: distanceToSelf(superSnapshot.x, superSnapshot.z) });
+    }
+    prevSuperActive = superActive;
+    for (const onset of detectRicochetOnsets(prevRicochet, snapshot.balls)) {
+      const onsetBall = snapshot.balls.find((candidate) => candidate.ballId === onset.ballId);
+      sfx.play("ricochet", {
+        intensity: onset.intensity,
+        distanceM: onsetBall !== undefined ? distanceToSelf(onsetBall.x, onsetBall.z) : 0,
+      });
+    }
+    prevRicochet.clear();
+    for (const ball of snapshot.balls) {
+      prevRicochet.set(ball.ballId, ball.ricochet === true);
     }
   };
   // R1 Play: while offline it connects as a spectator first and then sends
@@ -566,6 +679,9 @@ async function boot(): Promise<void> {
     // cancel; zoom starts at default and eases per-frame below.
     sceneManager.setChargeTranslucent(true);
     sceneManager.setChargeZoom01(0);
+    // Stage 5 audio: soft rising hum while holding (stopped on release,
+    // cancel, leave, room-full and reset — all paths call chargeStop).
+    sfx.chargeStart();
     // No aim snapshot here: direction resolves at release (stopCharge).
     aimOverlay.show();
   }
@@ -578,6 +694,7 @@ async function boot(): Promise<void> {
     chargeLevel.active = false;
     sceneManager.cancelShotBodyTurn();
     sceneManager.setCharge01(0);
+    sfx.chargeStop();
     // Stage 4d.2: cancel returns zoom + opacity (eased, never mid-charge).
     sceneManager.setChargeZoom01(0);
     sceneManager.setChargeTranslucent(false);
@@ -595,6 +712,7 @@ async function boot(): Promise<void> {
     isCharging = false;
     chargeLevel.active = false;
     sceneManager.setCharge01(0);
+    sfx.chargeStop();
     // Stage 4d.2: the shot (or tap) returns zoom + opacity — held until here,
     // never reset mid-charge or on FIRE-aim moves.
     sceneManager.setChargeZoom01(0);
@@ -685,6 +803,8 @@ async function boot(): Promise<void> {
     // network wait. The server re-applies the same kick authoritatively.
     sceneManager.applyRecoilKick(power01);
     sceneManager.playThrow();
+    // Stage 5 audio: filtered-noise whoosh scaled by the charge power.
+    sfx.play("throw", { intensity: power01 });
     hasSuperBuff = false;
     hud.setSuperBadge(false);
     aimOverlay.setSuper(false);
@@ -1061,6 +1181,8 @@ async function boot(): Promise<void> {
       isCharging = false;
       chargeLevel.active = false;
       sceneManager.cancelShotBodyTurn();
+      // Stage 5 audio: a reset never leaves the charge hum running.
+      sfx.chargeStop();
       isReloading = false;
       reloadUntilMs = 0;
       touchState.reset();
@@ -1105,6 +1227,8 @@ async function boot(): Promise<void> {
     window.removeEventListener("pointercancel", handleCamPointerCancel);
     playButton.removeEventListener("click", handlePlay);
     fireButton.removeEventListener("pointerdown", handleFirePointerDown);
+    window.removeEventListener("pointerdown", unlockAudio);
+    window.removeEventListener("keydown", unlockAudio);
     void net.disconnect();
     joystick.destroy();
     snapDebug.dispose();
@@ -1114,11 +1238,17 @@ async function boot(): Promise<void> {
     remotes.dispose();
     sceneManager.dispose();
     engine.dispose();
+    // Stage 5 audio teardown (matches the SceneManager cleanup convention):
+    // release the shared AudioContext so no node outlives the session.
+    sfx.dispose();
     if (overlay.parentElement === document.body) {
       document.body.removeChild(overlay);
     }
     if (fireButton.parentElement === document.body) {
       document.body.removeChild(fireButton);
+    }
+    if (muteButton.parentElement === document.body) {
+      document.body.removeChild(muteButton);
     }
   };
   window.addEventListener("pagehide", handlePageHide);
@@ -1331,6 +1461,9 @@ async function boot(): Promise<void> {
       if (isCharging) {
         const charge01 = Math.max(0, Math.min(1, (nowMs - chargeStartMs) / (CHARGE_MAX_S * 1000)));
         sceneManager.setCharge01(charge01);
+        // Stage 5 audio: tension-creak progress feed (scalar write, zero
+        // allocs, no-op unless a charge is live in the engine).
+        sfx.setChargeProgress(charge01);
         // Stage 4d.2: zoom follows charge01 every frame (eased in the scene),
         // held until stopCharge/cancelCharge — FIRE-aim moves never reset it.
         sceneManager.setChargeZoom01(charge01);
@@ -1383,9 +1516,18 @@ async function boot(): Promise<void> {
     }
     // Event feed (owner 4d.4): pickup one-liners only — trampoline rides and
     // boost expiries stay silent so the feed shows join/kill/pickup alone.
+    // Stage 5 audio rides the same drain: pickup chime, trampoline bounce
+    // and hop-cadence footstep ticks (all cooldown-gated in the engine, and
+    // the killfeed itself stays silent by design — frags already read
+    // through the death sound, so a feed tick would only risk spam).
     for (const arenaEvent of sceneManager.drainEvents()) {
       if (arenaEvent.type === "pickup") {
         hud.addKillfeed(`Picked up ${arenaEvent.kind}`);
+        sfx.play("pickup");
+      } else if (arenaEvent.type === "trampoline") {
+        sfx.play("trampoline");
+      } else if (arenaEvent.type === "footstep") {
+        sfx.play("footstep");
       }
     }
     // Remote replication: ease every snapshot through lerp/slerp.

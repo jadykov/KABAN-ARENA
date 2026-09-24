@@ -307,3 +307,31 @@ canvas {
   user-select: none;
   -webkit-touch-callout: none;
 }
+
+/* Stage 5 audio mute toggle: small violet-family circle, top-right above the
+   killfeed (top 64px) so it never covers feed lines or the play zone. Same
+   interactive-HUD conventions as #fire-button (touch-action + no text
+   selection on double-tap); a compact 36px target that gameplay drags pass
+   around, and canvas-charge guards already ignore button targets. */
+#mute-button {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 25;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--palette-super-border);
+  background: var(--palette-super-bg);
+  color: var(--palette-super-text);
+  font-size: 17px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
