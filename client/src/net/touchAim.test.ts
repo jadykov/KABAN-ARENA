@@ -23,7 +23,7 @@ import {
   shouldIdleFollow,
   type IdleFollowGate,
 } from "./idleFollow";
-import { applyExpo, buildFirePayload } from "./protocol";
+import { applyExpo, buildFirePayload, directionFromYawPitch } from "./protocol";
 import {
   TouchAimState,
   computeTouchAimVector,
@@ -64,6 +64,16 @@ afterEach(() => {
 
 function point(pointerId: number, x: number, y: number): TouchDragPoint {
   return { pointerId, x, y };
+}
+
+// FIRE-convention expectation: fireMove negates the y component of
+// computeTouchAimVector (screen-up drag = aim/shot goes UP, matching the
+// desktop LMB float path), while the camera path keeps the raw vector.
+// Zero stays zero (fireMove normalizes negative zero away).
+function expectedFireVector(deltaXPx: number, deltaYPx: number): { x: number; y: number } {
+  const raw = computeTouchAimVector(deltaXPx, deltaYPx);
+  const negY = -raw.y;
+  return { x: raw.x, y: negY === 0 ? 0 : negY };
 }
 
 describe("isRightHalf (camera zone predicate)", () => {
@@ -186,19 +196,22 @@ describe("TouchAimState FIRE routing (charge + aim, slide-off keeps aiming)", ()
     expect(state.fireDown(point(7, 700, 300))).toBe(true);
     expect(state.fireDown(point(9, 710, 310))).toBe(false);
     // The first pointer still maps from its own origin, undisturbed.
+    // FIRE convention: y is negated vs computeTouchAimVector (screen-up = +y).
     expect(state.fireMove(point(7, 780, 300))).toBe(true);
-    expect(state.fireVector()).toEqual(computeTouchAimVector(80, 0));
+    expect(state.fireVector()).toEqual(expectedFireVector(80, 0));
   });
 
   it("keeps aiming when the thumb slides off the button (routing by id, never target)", () => {
     const state = new TouchAimState();
     state.fireDown(point(7, 700, 300));
-    // Slide far off the 76px button — even onto the left half: no cancel
+    // Slide far off the 84px button — even onto the left half: no cancel
     // exists on this path (there is deliberately no fireLeave/pointerleave
     // API; main.ts registers no pointerleave listener — see grep proof).
     expect("fireLeave" in state).toBe(false);
     expect(state.fireMove(point(7, 100, 500))).toBe(true);
-    expect(state.fireVector()).toEqual(computeTouchAimVector(-600, 200));
+    // FIRE convention: y is negated vs computeTouchAimVector, so a downward
+    // drag (dy +200) yields a negative fire y (aim pitches DOWN).
+    expect(state.fireVector()).toEqual(expectedFireVector(-600, 200));
     expect(state.isFireActive()).toBe(true);
   });
 
@@ -209,7 +222,7 @@ describe("TouchAimState FIRE routing (charge + aim, slide-off keeps aiming)", ()
     expect(state.fireVector()).toEqual({ x: 0, y: 0 });
     expect(state.fireMove(point(7, 740, 300))).toBe(true);
     expect(state.fireMove(point(8, 780, 300))).toBe(false);
-    expect(state.fireVector()).toEqual(computeTouchAimVector(40, 0));
+    expect(state.fireVector()).toEqual(expectedFireVector(40, 0));
   });
 
   it("release ends the hold with a zeroed vector (caller fires via stopCharge)", () => {
@@ -448,6 +461,50 @@ describe("FIRE-held aim tick sim (damped rates, identical to the old float feel)
     expect(aimYaw).toBeCloseTo(0.5 - AIM_YAW_RATE * AIM_YAW_DAMP * 1, 10);
     expect(aimYaw).toBeCloseTo(0.5 - 2.4 * 0.6, 10);
     expect(aimYaw).toBeGreaterThan(0.5 - AIM_YAW_RATE * 1);
+  });
+
+  it("screen-up FIRE drag raises aimPitch while charging (shot goes UP)", () => {
+    const state = new TouchAimState();
+    state.fireDown(point(7, 700, 300));
+    // Screen-up drag: 80px straight up. The camera convention would read
+    // y -1 (lowers the camera); the FIRE convention must surface y +1.
+    state.fireMove(point(7, 700, 220));
+    expect(computeTouchAimVector(0, -80)).toEqual({ x: 0, y: -1 });
+    expect(state.fireVector()).toEqual({ x: 0, y: 1 });
+    // Mirror-image of the free-cam tick sim, but on the charging path:
+    // damped pitch scale, same `aimPitch += vec.y * RATE` integration site
+    // as main.ts (charging aim block) — no path may re-negate fireVec.y.
+    expect(pitchRateScale(true)).toBe(AIM_PITCH_DAMP);
+    let aimPitch = 0;
+    const pitchScale = pitchRateScale(true);
+    for (let i = 0; i < 30; i += 1) {
+      const fireVector = state.fireVector();
+      if (Math.hypot(fireVector.x, fireVector.y) >= FLOAT_DEADZONE) {
+        const nextPitch = aimPitch + fireVector.y * AIM_PITCH_RATE * pitchScale * FRAME;
+        aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextPitch));
+      }
+    }
+    expect(aimPitch).toBeCloseTo(AIM_PITCH_RATE * AIM_PITCH_DAMP * (30 * FRAME), 10);
+    expect(aimPitch).toBeGreaterThan(0);
+    // End-to-end: the fired shot reads pitch directly
+    // (directionFromYawPitch, shared by the preview and the payload), so a
+    // positive pitch lobs the ball upward: y = sin(pitch) > 0.
+    expect(directionFromYawPitch(0, aimPitch).y).toBeGreaterThan(0);
+    // Control: the free camera keeps the opposite convention on the same
+    // screen-up drag — it LOWERS the camera (pitch decreases).
+    const camState = new TouchAimState();
+    camState.camDown(point(3, 600, 400), false);
+    camState.camMove(point(3, 600, 320));
+    expect(camState.camVector()).toEqual({ x: 0, y: -1 });
+    let camPitch = 0;
+    for (let i = 0; i < 30; i += 1) {
+      const camVector = camState.camVector();
+      if (Math.hypot(camVector.x, camVector.y) >= FLOAT_DEADZONE) {
+        const nextCamPitch = camPitch + camVector.y * AIM_PITCH_RATE * 1 * FRAME;
+        camPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, nextCamPitch));
+      }
+    }
+    expect(camPitch).toBeLessThan(0);
   });
 
   it("release resolves from the mirrored camera to true aim (zero-first order)", async () => {

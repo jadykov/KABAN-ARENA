@@ -7,14 +7,13 @@
 // and runs the charge FSM. Desktop mouse/keyboard paths are untouched.
 //
 // Feel: drag px maps to [-1, 1] over FLOAT_DRAG_RADIUS_PX with
-// AIM_EXPO shaping and the desktop mouse-away-lowers convention (touch-up =
-// -y = pitch down) — screen Y passes through unnegated so dragging up LOWERS
-// the camera, matching the desktop RMB free-look (InputController passes raw
-// movementY unnegated, SceneManager applies pitch += dy). NOTE: this
-// intentionally diverges from the desktop LMB float path in main.ts
-// (handleFloatPointerMove keeps -dy, screen-up +y). FIRE aim runs damped
-// while charging via yawRateScale/pitchRateScale and the free camera runs
-// the same math at full rate while idle.
+// AIM_EXPO shaping. The free camera keeps the desktop mouse-away-lowers
+// convention (touch-up = -y = pitch down, matching desktop RMB free-look:
+// InputController passes raw movementY unnegated, SceneManager applies
+// pitch += dy). FIRE aim instead matches the desktop LMB float path in
+// main.ts (handleFloatPointerMove bakes -dy, screen-up +y = pitch up), via a
+// y-negation inside fireMove only — computeTouchAimVector itself stays on
+// the camera convention verbatim.
 // Scalar only; the two vector objects are mutated in place and exposed by
 // reference so the per-frame loop reads them with zero allocations.
 import { AIM_EXPO, FLOAT_DEADZONE, FLOAT_DRAG_RADIUS_PX } from "../config";
@@ -138,16 +137,29 @@ export class TouchAimState {
     return true;
   }
 
-  // FIRE move: recompute the aim vector from the drag offset. Target-free by
-  // design — sliding off the button keeps aiming. Returns true only for the
-  // tracked pointer (other fingers never disturb FIRE aim).
+  // FIRE move: recompute the aim vector from the drag offset. Unlike the
+  // free camera (camMove keeps the camera convention verbatim: screen-up =
+  // negative y = pitch down, matching desktop RMB), the FIRE vector NEGATES
+  // y so screen-up drag aims/shoots UP — the same natural direction as the
+  // desktop LMB float path, which bakes -dy at its vector creation site
+  // (main.ts handleFloatPointerMove). The per-frame integration sites in
+  // main.ts stay uniform (`aimPitch += vec.y * RATE` for fire/float/cam), so
+  // this single negation at creation fixes charging aim, the trajectory
+  // preview, and the release payload together — no downstream path may
+  // re-negate fireVec.y. Target-free by design — sliding off the button keeps
+  // aiming. Returns true only for the tracked pointer (other fingers never
+  // disturb FIRE aim).
   public fireMove(point: TouchDragPoint): boolean {
     if (!this.fireActive || point.pointerId !== this.firePointerId) {
       return false;
     }
     const next = computeTouchAimVector(point.x - this.fireOriginX, point.y - this.fireOriginY);
     this.fireVec.x = next.x;
-    this.fireVec.y = next.y;
+    // Screen-up drag = shot/aim goes UP (fire convention); the camera path
+    // keeps the opposite sign (screen-up lowers the camera). Normalized so a
+    // zero drag never leaks negative zero into equality checks.
+    const negY = -next.y;
+    this.fireVec.y = negY === 0 ? 0 : negY;
     return true;
   }
 

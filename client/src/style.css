@@ -201,8 +201,8 @@ canvas {
    look-through layout that does not block the view (opacity < 0.5). */
 #joystick {
   position: fixed;
-  left: 16px;
-  bottom: 24px;
+  left: 24px;
+  bottom: 56px;
   z-index: 10;
   border-radius: 50%;
   border: 2px solid rgba(255, 255, 255, 0.5);
@@ -290,11 +290,11 @@ canvas {
 
 #fire-button {
   position: fixed;
-  right: 16px;
-  bottom: 24px;
+  right: 24px;
+  bottom: 56px;
   z-index: 10;
-  width: 76px;
-  height: 76px;
+  width: 84px;
+  height: 84px;
   border-radius: 50%;
   border: 2px solid rgba(255, 255, 255, 0.5);
   background: var(--palette-fire);
@@ -317,6 +317,34 @@ canvas {
   position: fixed;
   top: 8px;
   right: 8px;
+  z-index: 25;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--palette-super-border);
+  background: var(--palette-super-bg);
+  color: var(--palette-super-text);
+  font-size: 17px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Fullscreen toggle (phones: hides the browser URL bar): same 36px round
+   chrome as #mute-button, parked left of it (top 8, right 52) so the two
+   never overlap. Created in code only when fullscreen is actually available
+   (main.ts skips it on iPhone Safari, which has no element fullscreen) —
+   absent button = graceful no-op. Same touch conventions as #mute-button. */
+#fullscreen-button {
+  position: fixed;
+  top: 8px;
+  right: 52px;
   z-index: 25;
   width: 36px;
   height: 36px;

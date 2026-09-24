@@ -74,6 +74,47 @@ const POWERUP_KEYS: Record<string, PowerUpKind> = {
   Numpad3: "impulse",
 };
 
+// Fullscreen vendor shims (narrowly-scoped, documented): Android/iOS
+// webviews may expose only webkit-prefixed element-fullscreen APIs, and
+// iPhone Safari exposes none for arbitrary elements. No `any` — these small
+// interfaces cover exactly the prefixed members we touch.
+interface WebkitFullscreenDocument {
+  webkitFullscreenEnabled?: boolean;
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => void;
+}
+
+interface WebkitFullscreenElement {
+  webkitRequestFullscreen?: () => void;
+}
+
+// True while ANY element holds fullscreen (standard or webkit-prefixed).
+function isFullscreenActive(): boolean {
+  if (document.fullscreenElement !== null && document.fullscreenElement !== undefined) {
+    return true;
+  }
+  const shim = document as unknown as WebkitFullscreenDocument;
+  return shim.webkitFullscreenElement !== null && shim.webkitFullscreenElement !== undefined;
+}
+
+// True when element fullscreen can actually be entered: the standard flag,
+// the webkit flag, or a callable request entry. iPhone Safari fails all
+// three for arbitrary elements, so the toggle is skipped there entirely.
+function isFullscreenAvailable(): boolean {
+  if (document.fullscreenEnabled) {
+    return true;
+  }
+  const shim = document as unknown as WebkitFullscreenDocument;
+  if (shim.webkitFullscreenEnabled === true) {
+    return true;
+  }
+  const el = document.documentElement as unknown as HTMLElement & WebkitFullscreenElement;
+  return (
+    typeof el.requestFullscreen === "function" ||
+    typeof el.webkitRequestFullscreen === "function"
+  );
+}
+
 // Stage 4 entry with R1 pre-join spectator: boot joins the room immediately
 // as a spectator (no nick needed) and watches the live arena from the hover
 // camera behind a semi-transparent plate. Pressing Play sends "play" with a
@@ -168,6 +209,75 @@ async function boot(): Promise<void> {
     muteButton.blur();
   });
   document.body.appendChild(muteButton);
+
+  // Fullscreen toggle (phones: hides the browser URL bar). Same creation
+  // pattern as the mute button above so index.html stays untouched; taps
+  // never leak into aim (targetOnGameUi already ignores every
+  // HTMLButtonElement). iPhone Safari has no element fullscreen for
+  // arbitrary elements — when nothing is available the button is skipped
+  // entirely (graceful no-op, no console spam).
+  let fullscreenButton: HTMLButtonElement | null = null;
+  const handleFullscreenChange = (): void => {
+    if (fullscreenButton !== null) {
+      fullscreenButton.textContent = isFullscreenActive() ? "⤡" : "⛶";
+    }
+  };
+  if (isFullscreenAvailable()) {
+    fullscreenButton = document.createElement("button");
+    fullscreenButton.id = "fullscreen-button";
+    fullscreenButton.title = "Toggle fullscreen";
+    fullscreenButton.textContent = isFullscreenActive() ? "⤡" : "⛶";
+    fullscreenButton.addEventListener("click", (): void => {
+      const el = document.documentElement as unknown as HTMLElement & WebkitFullscreenElement;
+      const doc = document as unknown as Document & WebkitFullscreenDocument;
+      if (!isFullscreenActive()) {
+        if (typeof el.requestFullscreen === "function") {
+          try {
+            const pending = el.requestFullscreen();
+            if (pending instanceof Promise) {
+              pending.catch(() => {
+                // Denied (permissions policy / embedded webview): stay
+                // windowed, silent by design.
+              });
+            }
+          } catch {
+            // Synchronous stub failure: silent no-op.
+          }
+        } else if (typeof el.webkitRequestFullscreen === "function") {
+          try {
+            el.webkitRequestFullscreen();
+          } catch {
+            // Unsupported here — silent no-op.
+          }
+        }
+      } else {
+        if (typeof doc.exitFullscreen === "function") {
+          try {
+            const pending = doc.exitFullscreen();
+            if (pending instanceof Promise) {
+              pending.catch(() => {
+                // Already exited / denied: silent by design.
+              });
+            }
+          } catch {
+            // Synchronous stub failure: silent no-op.
+          }
+        } else if (typeof doc.webkitExitFullscreen === "function") {
+          try {
+            doc.webkitExitFullscreen();
+          } catch {
+            // Unsupported here — silent no-op.
+          }
+        }
+      }
+      // A focused button would re-trigger on Space (the charge key) — drop
+      // focus immediately so gameplay keys stay gameplay keys.
+      fullscreenButton?.blur();
+    });
+    document.body.appendChild(fullscreenButton);
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+  }
 
   // WebAudio unlock (iOS requirement, no autoplay): resume on every gesture
   // until running — a cheap no-op once the context runs.
@@ -1250,6 +1360,11 @@ async function boot(): Promise<void> {
     if (muteButton.parentElement === document.body) {
       document.body.removeChild(muteButton);
     }
+    if (fullscreenButton !== null && fullscreenButton.parentElement === document.body) {
+      document.body.removeChild(fullscreenButton);
+    }
+    document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
   };
   window.addEventListener("pagehide", handlePageHide);
 
