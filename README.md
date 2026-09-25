@@ -32,17 +32,18 @@
   - `npm run dev` — client Vite `--host 0.0.0.0 --port 5173`; server `tsx --watch src/index.ts`.
 - Local URLs after compose up: client `http://localhost:5173/`, server health `http://localhost:2567/health`.
 - After any change: `npm run typecheck` + `lint` + `test` + `build`, then `docker compose up --build -d` and confirm client HTTP 200 + `/health {"ok":true}` (established session cadence, see `LOG.md`).
-- Server URL resolution: `VITE_SERVER_URL` env wins, else `ws://<page-host>:2567` (`client/src/config.ts:269-280`); server port from `PORT` env, default 2567 (`server/src/index.ts:79-86`).
+- Server URL resolution: `VITE_SERVER_URL` env wins, else derived from the page URL — proxied pages (no port / :80 / :443) use the same origin with no port (`wss://` on https, `ws://` on http), pages on `:2567` keep `:2567`, dev `:5173` targets `ws://<page-host>:2567` (`client/src/config.ts` `getServerUrl`); server port from `PORT` env, default 2567 (`server/src/index.ts` `getPort`).
 - Ads: owner drops `fence-*.png/jpg` + `banner.png/jpg` into `client/assets/ads/`, synced to `public/ads` by `npm run sync-ads`, restart to pick up.
 
 ## Production deploy (VPS)
 
-- Single container serves the game client (static `client/dist`) + the Colyseus server on one express port (2567); bundle dir is configurable via `KABAN_CLIENT_DIST` (default `/app/client/dist`, `server/src/index.ts`).
-- `Dockerfile.prod` (multi-stage: client build → server build → `node:20-alpine` runtime with prod deps only) and `docker-compose.prod.yml` (service `kaban-arena`, host ports `80:2567` + `2567:2567`, `restart: always`, no volumes) are the only deploy files; dev `docker-compose.yml` / `Dockerfile.client` / `Dockerfile.server` are untouched.
+- Topology: Caddy (`caddy:2-alpine`, service `caddy`, container `kaban-caddy`) listens on host ports 80/443 (+443/udp for HTTP/3) and reverse-proxies to the game container (`kaban-arena:2567`) on the default compose network; the game container also keeps host port `2567:2567` as a direct legacy path (page + ws). WebSocket upgrade (Colyseus) is forwarded automatically by Caddy's `reverse_proxy`.
+- `https://kaban.wpgg.ru/` (A record → VPS IP): auto-HTTPS via Let's Encrypt with built-in auto-renew (no email configured — Caddy default ACME registration); plain-http on :80 redirects to https automatically. Raw-IP access `http://185.188.182.46/` keeps working through a scheme-only `http://` catch-all (port 80, any host, no TLS) in `Caddyfile`.
+- Files: `Dockerfile.prod` (multi-stage: client build → server build → `node:20-alpine` runtime with prod deps only), `docker-compose.prod.yml` (services `kaban-arena` + `caddy`, named volumes `caddy_data`/`caddy_config` persist certs across recreation), `Caddyfile` (mounted read-only into the proxy); dev `docker-compose.yml` / `Dockerfile.client` / `Dockerfile.server` are untouched.
 - Build the image locally (the VPS is too small to build on): `docker build -f Dockerfile.prod -t kaban-arena:prod .`
-- Transfer + load on the server: `docker save kaban-arena:prod | gzip > kaban-arena-prod.tgz`, copy over, `docker load < kaban-arena-prod.tgz`.
-- Start: `docker compose -f docker-compose.prod.yml up -d --no-build` (`--no-build` fails loudly if the `kaban-arena:prod` image was not loaded — compose must use the prebuilt image, never silently build a different one on the VPS).
-- Verify: `http://<server-IP>/` serves the game, `http://<server-IP>/health` returns `{"ok":true}`; the client auto-connects to `ws://<server-IP>:2567`.
+- Transfer + load on the server: `docker save kaban-arena:prod -o kaban-arena-prod.tar` (pipe-free; gzip separately if wanted), copy over, `docker load -i kaban-arena-prod.tar`.
+- Start: `docker compose -f docker-compose.prod.yml up -d --no-build` (also pulls `caddy:2-alpine`, ~50MB, fine on the 709MB-RAM VPS; `--no-build` fails loudly if the `kaban-arena:prod` image was not loaded — compose must use the prebuilt image, never silently build a different one on the VPS).
+- Verify: `https://kaban.wpgg.ru/` serves the game (browser must show `wss://` socket, no mixed-content block), `https://kaban.wpgg.ru/health` returns `{"ok":true}`, `http://185.188.182.46/` + `http://185.188.182.46/health` still work; the client auto-connects same-origin with no port on proxied pages (`wss://` on https, `ws://` on http).
 
 ## Repo map
 

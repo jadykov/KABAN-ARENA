@@ -604,7 +604,16 @@ export const CROSSHAIR_RELOAD_COLOR = HL_CHARTREUSE_CSS;
 export const CROSSHAIR_SUPER_COLOR = HL_CHARTREUSE_CSS;
 
 // WebSocket endpoint for the Colyseus server. Env override first
-// (VITE_SERVER_URL), otherwise same host as the page on the default port.
+// (VITE_SERVER_URL), otherwise derived from the page URL so the game works
+// both behind the prod reverse proxy and in local dev. Prod topology: Caddy
+// listens on :80/:443 and forwards to the game container on :2567, while
+// direct :2567 stays open as a legacy path. A page served from a default
+// port (no port / :80 / :443) is proxied, so the socket uses the same origin
+// with no port suffix — wss:// on https pages (ws:// would be blocked as
+// mixed content), ws:// on http pages. A page served from :2567 (direct
+// container access) falls through to the same :2567 socket. Anything else
+// (Vite dev :5173, custom ports) targets ws(s)://host:2567, preserving dev
+// behavior.
 export function getServerUrl(): string {
   const fromEnv = import.meta.env["VITE_SERVER_URL"];
   if (typeof fromEnv === "string" && fromEnv.length > 0) {
@@ -612,7 +621,12 @@ export function getServerUrl(): string {
   }
   if (typeof window !== "undefined" && window.location !== undefined) {
     const host = window.location.hostname !== "" ? window.location.hostname : "localhost";
-    return `ws://${host}:${SERVER_URL_DEFAULT_PORT}`;
+    const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+    const port = window.location.port;
+    if (port === "" || port === "80" || port === "443") {
+      return `${scheme}://${host}`;
+    }
+    return `${scheme}://${host}:${SERVER_URL_DEFAULT_PORT}`;
   }
   return `ws://localhost:${SERVER_URL_DEFAULT_PORT}`;
 }

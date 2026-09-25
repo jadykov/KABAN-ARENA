@@ -1,0 +1,23 @@
+# KABAN ARENA — Caddy reverse proxy (production).
+#
+# Topology: Caddy listens on :80/:443 and forwards to the game container
+# (kaban-arena:2567) on the default compose network; direct :2567 stays
+# published on the host as a legacy path (ws + page). WebSocket upgrade
+# (Colyseus) is forwarded automatically by reverse_proxy.
+#
+# - kaban.wpgg.ru: auto-HTTPS via Let's Encrypt (auto-renew built in;
+#   unproxied HTTP on :80 redirects to https automatically). No email is
+#   configured, so Caddy uses its default ACME registration flow.
+# - http:// (scheme-only = catch-all for any host on port 80, no TLS):
+#   keeps raw-IP access http://185.188.182.46/ working without a cert.
+{
+	# No email configured — Let's Encrypt uses the Caddy default registration flow.
+}
+
+kaban.wpgg.ru {
+	reverse_proxy kaban-arena:2567
+}
+
+http:// {
+	reverse_proxy kaban-arena:2567
+}

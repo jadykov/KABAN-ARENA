@@ -1,8 +1,9 @@
 # KABAN ARENA — production compose for the VPS deploy.
-# Single service: one container serves the game client (static) + the
-# Colyseus server on port 2567. No bind mounts — the image is self-contained
-# (built from Dockerfile.prod). Host port 80 lets players visit http://IP
-# directly; the client auto-connects to ws://IP:2567.
+# Two services: the game container (client static + Colyseus on :2567) behind
+# a Caddy reverse proxy (auto-HTTPS for kaban.wpgg.ru, plain-http catch-all
+# for raw-IP access). No bind mounts on the game service — the image is
+# self-contained (built from Dockerfile.prod). Host port 80/443 belong to
+# Caddy now; direct :2567 stays published as a legacy path (ws + page).
 services:
   kaban-arena:
     build:
@@ -11,8 +12,25 @@ services:
     image: kaban-arena:prod
     container_name: kaban-arena
     ports:
-      - "80:2567"
       - "2567:2567"
     environment:
       - PORT=2567
     restart: always
+  caddy:
+    image: caddy:2-alpine
+    container_name: kaban-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - kaban-arena
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}
