@@ -1,8 +1,9 @@
 import * as THREE from "three";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ARENA_HALF_SIZE,
   ICE_FRICTION,
+  ICE_RADIUS,
   MOVE_SPEED,
   OBSTACLE_COUNT,
   PHYSICS_GRAVITY_Y,
@@ -12,6 +13,7 @@ import {
   PLAYER_LINEAR_DAMPING,
   RAMP_SLOPE_DEG,
   SPAWN_COUNT,
+  SWAMP_RADIUS,
   TRAMPOLINE_IMPULSE,
   TRAMPOLINE_PAD_DIM,
 } from "../config";
@@ -19,14 +21,18 @@ import type { PhysicsWorld } from "../physics/World";
 import {
   ArenaBuilder,
   getFrictionAt,
+  getIceZones,
   getObstacleLayout,
   getPlatforms,
   getRamps,
-  getSlipperyZones,
+  getSwampZones,
   getSpawnPoints,
   getTrampolines,
-  isOnSlippery,
+  isInsideZone,
+  isOnIce,
+  isOnSwamp,
 } from "./Arena";
+import { ARENA_LAYOUT } from "../layout";
 
 interface RecordedBox {
   hx: number;
@@ -67,57 +73,40 @@ function createRecordingPhysics(): {
   return { boxes, rotated, physics: fake as unknown as PhysicsWorld };
 }
 
-describe("arena obstacle layout (QD5-A + 4d.3 central towers)", () => {
-  it("keeps 8 mirror-symmetric blocks with the central 4 doubled", () => {
+describe("arena obstacle layout", () => {
+  it("keeps the central jump towers tall and the movable outer cover low", () => {
     const specs = getObstacleLayout();
     expect(specs).toHaveLength(OBSTACLE_COUNT);
-    expect(OBSTACLE_COUNT).toBe(8);
-    for (const spec of specs) {
-      // Mirror-symmetric on both axes and under 180-degree rotation.
-      const mirrors = [
-        specs.some((o) => o.x === -spec.x && o.z === spec.z),
-        specs.some((o) => o.x === spec.x && o.z === -spec.z),
-        specs.some((o) => o.x === -spec.x && o.z === -spec.z),
-      ];
-      expect(mirrors).toEqual([true, true, true]);
-    }
-    // Stage 4d.3: the 4 CENTRAL towers (at +-4.8) double to hy 1.0 (2.0m
-    // full height, topY 2.0 — mirrors server SERVER_OBSTACLES topY).
+    // The owner moved the four outer blocks in the editor. Only the central
+    // tower quartet remains symmetric and tall enough for bounce landings.
     const central = specs.filter((s) => Math.abs(s.x) === 4.8 && Math.abs(s.z) === 4.8);
     expect(central).toHaveLength(4);
     for (const spec of central) {
       expect(spec.hy).toBe(1.0);
       expect(spec.hy * 2).toBe(2.0);
     }
-    // The 4 OUTER blocks stay low so the phone camera sees over the lanes.
+    // The outer cover can move independently and stays low enough to see over.
     const outer = specs.filter((s) => !(Math.abs(s.x) === 4.8 && Math.abs(s.z) === 4.8));
     expect(outer).toHaveLength(4);
     for (const spec of outer) {
-      expect(spec.hy).toBe(0.4);
       expect(spec.hy * 2).toBeLessThanOrEqual(1.0);
     }
   });
 
-  it("doubles ONLY the central 4 (positions/half-extents unchanged)", () => {
+  it("uses each saved obstacle's position, footprint, and top height", () => {
     const specs = getObstacleLayout();
-    const expected = [
-      { x: 4.8, z: 4.8, hx: 1, hz: 1, hy: 1.0 },
-      { x: -4.8, z: 4.8, hx: 1, hz: 1, hy: 1.0 },
-      { x: 4.8, z: -4.8, hx: 1, hz: 1, hy: 1.0 },
-      { x: -4.8, z: -4.8, hx: 1, hz: 1, hy: 1.0 },
-      { x: 10.8, z: 0, hx: 1.5, hz: 0.75, hy: 0.4 },
-      { x: -10.8, z: 0, hx: 1.5, hz: 0.75, hy: 0.4 },
-      { x: 0, z: 10.8, hx: 0.75, hz: 1.5, hy: 0.4 },
-      { x: 0, z: -10.8, hx: 0.75, hz: 1.5, hy: 0.4 },
-    ];
-    expect(specs).toHaveLength(expected.length);
-    for (const want of expected) {
-      const match = specs.find((s) => s.x === want.x && s.z === want.z);
-      expect(match).toBeDefined();
-      expect(match?.hx).toBe(want.hx);
-      expect(match?.hz).toBe(want.hz);
-      expect(match?.hy).toBe(want.hy);
+    expect(specs).toHaveLength(ARENA_LAYOUT.obstacles.length);
+    const centers = new Set<string>();
+    for (const [index, saved] of ARENA_LAYOUT.obstacles.entries()) {
+      const spec = specs[index];
+      expect(spec).toEqual({
+        x: saved.x, z: saved.z, hx: saved.hx, hz: saved.hz, hy: saved.topY / 2,
+      });
+      centers.add(`${saved.x},${saved.z}`);
+      expect(Math.abs(saved.x) + saved.hx).toBeLessThanOrEqual(ARENA_HALF_SIZE);
+      expect(Math.abs(saved.z) + saved.hz).toBeLessThanOrEqual(ARENA_HALF_SIZE);
     }
+    expect(centers.size).toBe(specs.length);
   });
 
   it("leaves the central towers ramp-free (trampoline-only reachability)", () => {
@@ -210,9 +199,10 @@ describe("arena obstacle layout (QD5-A + 4d.3 central towers)", () => {
     }
   });
 
-  it("places 4 distinct corner spawns inside the arena", () => {
+  it("shows all six distinct server spawns inside the arena", () => {
     const spawns = getSpawnPoints();
     expect(spawns).toHaveLength(SPAWN_COUNT);
+    expect(spawns).toHaveLength(6);
     const keys = new Set(spawns.map((s) => `${s.x},${s.z}`));
     expect(keys.size).toBe(spawns.length);
     for (const spawn of spawns) {
@@ -222,16 +212,131 @@ describe("arena obstacle layout (QD5-A + 4d.3 central towers)", () => {
   });
 });
 
-describe("slippery zones and trampolines", () => {
-  it("keeps ice friction inside the QT3-A 0.05-0.1 band", () => {
+describe("swamp, ice, and trampolines", () => {
+  it("keeps the new surface detail on shared textures and three instanced batches", () => {
+    const scene = new THREE.Scene();
+    const builder = new ArenaBuilder();
+    builder.buildVisuals(scene);
+    const floor = scene.getObjectByName("arena-floor") as THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>;
+    const ice = scene.getObjectByName("ice-zones") as THREE.InstancedMesh;
+    const pads = scene.getObjectByName("trampoline-pads") as THREE.InstancedMesh;
+    const edges = scene.getObjectByName("obstacle-top-edges") as THREE.InstancedMesh;
+    const marks = scene.getObjectByName("ramp-surface-marks") as THREE.InstancedMesh;
+    const slabs = scene.getObjectByName("ramp-slabs") as THREE.InstancedMesh;
+    const plinths = scene.getObjectByName("wall-plinths") as THREE.InstancedMesh;
+    const textures = [
+      floor.material.map!,
+      (ice.material as THREE.MeshStandardMaterial).map!,
+      (pads.material as THREE.MeshStandardMaterial).map!,
+    ];
+    const disposalSpies = textures.map((texture) => vi.spyOn(texture, "dispose"));
+    try {
+      expect(floor.geometry.parameters.width).toBe(ARENA_HALF_SIZE * 2);
+      expect(floor.material.color.getHex()).toBe(0xffffff);
+      expect(floor.material.map!.repeat.toArray()).toEqual([6, 6]);
+      expect(textures.every((texture) => texture.colorSpace === THREE.SRGBColorSpace)).toBe(true);
+      expect(edges.count).toBe(getObstacleLayout().length * 4);
+      expect(marks.count).toBe(getRamps().length * 4);
+      expect(slabs.count).toBe(getRamps().length);
+      expect(plinths.count).toBe(4);
+      const matrix = new THREE.Matrix4();
+      const position = new THREE.Vector3();
+      const rotation = new THREE.Quaternion();
+      const scale = new THREE.Vector3();
+      for (const [index, ramp] of getRamps().entries()) {
+        slabs.getMatrixAt(index, matrix);
+        matrix.decompose(position, rotation, scale);
+        expect(position.x).toBeCloseTo(ramp.x, 5);
+        expect(position.y).toBeCloseTo(ramp.y, 5);
+        expect(position.z).toBeCloseTo(ramp.z, 5);
+        expect(scale.x).toBeCloseTo((ramp.axis === "x" ? ramp.halfWidth : ramp.halfLength) * 2, 6);
+        expect(scale.y).toBeCloseTo(ramp.halfThick * 2, 6);
+        expect(scale.z).toBeCloseTo((ramp.axis === "x" ? ramp.halfLength : ramp.halfWidth) * 2, 6);
+        const expected = new THREE.Quaternion().setFromAxisAngle(
+          ramp.axis === "x" ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1),
+          ramp.angle,
+        );
+        expect(Math.abs(rotation.dot(expected))).toBeCloseTo(1, 6);
+      }
+      expect(scene.children.filter((child) => child instanceof THREE.Light)).toHaveLength(0);
+    } finally {
+      builder.dispose(scene);
+      expect(disposalSpies.every((spy) => spy.mock.calls.length === 1)).toBe(true);
+      expect(scene.children).toHaveLength(0);
+    }
+  });
+
+  it("uses the saved zone sizes and detects their centers and edges", () => {
+    const swamp = getSwampZones();
+    const ice = getIceZones();
+    expect(swamp).toEqual(ARENA_LAYOUT.swampZones);
+    expect(ice).toEqual(ARENA_LAYOUT.iceZones);
+    expect(SWAMP_RADIUS).toBe(swamp[0]?.radius ?? 0);
+    expect(ICE_RADIUS).toBe(ice[0]?.radius ?? 0);
+    for (const zone of swamp) {
+      expect(isOnSwamp(zone.x, zone.z)).toBe(true);
+      expect(isOnSwamp(zone.x + zone.radius - 0.001, zone.z)).toBe(true);
+      expect(isInsideZone(zone.x + zone.radius + 0.001, zone.z, zone)).toBe(false);
+      expect(isOnIce(zone.x, zone.z)).toBe(false);
+    }
+    for (const zone of ice) {
+      expect(isOnIce(zone.x, zone.z)).toBe(true);
+      expect(isOnIce(zone.x + zone.radius - 0.001, zone.z)).toBe(true);
+      expect(isInsideZone(zone.x + zone.radius + 0.001, zone.z, zone)).toBe(false);
+      expect(isOnSwamp(zone.x, zone.z)).toBe(false);
+    }
+  });
+
+  it("keeps ice friction low and swamp friction ordinary", () => {
     expect(ICE_FRICTION).toBeGreaterThanOrEqual(0.05);
     expect(ICE_FRICTION).toBeLessThanOrEqual(0.1);
-    const zones = getSlipperyZones();
-    expect(zones).toHaveLength(2);
-    expect(isOnSlippery(zones[0]?.x ?? 0, zones[0]?.z ?? 0)).toBe(true);
-    expect(isOnSlippery(0, 0)).toBe(false);
-    expect(getFrictionAt(zones[1]?.x ?? 0, zones[1]?.z ?? 0)).toBe(ICE_FRICTION);
-    expect(getFrictionAt(0, 0)).toBe(PLAYER_FRICTION);
+    const ice = getIceZones();
+    const swamp = getSwampZones();
+    for (const zone of ice) {
+      expect(getFrictionAt(zone.x, zone.z)).toBe(ICE_FRICTION);
+    }
+    for (const zone of swamp) {
+      expect(getFrictionAt(zone.x, zone.z)).toBe(PLAYER_FRICTION);
+    }
+    const clearSpawn = getSpawnPoints().find((spawn) => !isOnIce(spawn.x, spawn.z));
+    expect(clearSpawn).toBeDefined();
+    if (clearSpawn !== undefined) {
+      expect(getFrictionAt(clearSpawn.x, clearSpawn.z)).toBe(PLAYER_FRICTION);
+    }
+  });
+
+  it("animates the same small bubble batch and disposes its texture", () => {
+    const scene = new THREE.Scene();
+    const builder = new ArenaBuilder();
+    builder.buildVisuals(scene);
+    const ice = scene.getObjectByName("ice-zones") as THREE.InstancedMesh;
+    const swamp = scene.getObjectByName("swamp-zones") as THREE.InstancedMesh;
+    const bubbles = scene.getObjectByName("swamp-bubbles") as THREE.InstancedMesh;
+    const material = swamp.material as THREE.MeshBasicMaterial;
+    const iceDispose = vi.spyOn(ice, "dispose");
+    const swampDispose = vi.spyOn(swamp, "dispose");
+    const bubbleDispose = vi.spyOn(bubbles, "dispose");
+    const textureDispose = vi.spyOn(material.map!, "dispose");
+    try {
+      expect(ice.count).toBe(getIceZones().length);
+      expect(swamp.count).toBe(getSwampZones().length);
+      expect(bubbles.count).toBe(getSwampZones().length * 10);
+      expect(material.map).toBeInstanceOf(THREE.DataTexture);
+      expect(material.map?.magFilter).toBe(THREE.NearestFilter);
+      const before = new THREE.Matrix4();
+      const after = new THREE.Matrix4();
+      bubbles.getMatrixAt(0, before);
+      builder.update(0.25);
+      bubbles.getMatrixAt(0, after);
+      expect(after.elements).not.toEqual(before.elements);
+    } finally {
+      builder.dispose(scene);
+    }
+    expect(scene.children).toHaveLength(0);
+    expect(iceDispose).toHaveBeenCalledOnce();
+    expect(swampDispose).toHaveBeenCalledOnce();
+    expect(bubbleDispose).toHaveBeenCalledOnce();
+    expect(textureDispose).toHaveBeenCalledOnce();
   });
 
   it("puts two trampolines on the center lane, clear of obstacles", () => {

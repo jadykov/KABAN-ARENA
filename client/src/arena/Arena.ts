@@ -7,35 +7,47 @@ import {
   PLAYER_FRICTION,
   RAMP_SLAB_THICKNESS,
   RAMP_SLOPE_DEG,
-  SLIPPERY_RADIUS,
-  SPAWN_COUNT,
-  SPAWN_INSET,
   TRAMPOLINE_PAD_DIM,
-  TRAMPOLINE_RADIUS,
   WALL_FADE_OPACITY,
   WALL_GLASS_OPACITY,
   WALL_HEIGHT,
   WALL_THICKNESS,
 } from "../config";
+import { ARENA_LAYOUT } from "../layout";
 import type { PhysicsWorld } from "../physics/World";
 import {
   ACCENT_ICE_GLOW,
   ACCENT_OBSTACLE_TINT,
+  ACCENT_SWAMP_BUBBLE,
+  ACCENT_SWAMP_BUBBLE_LIGHT,
+  ACCENT_SWAMP_MUD,
+  ACCENT_SWAMP_MUD_EDGE,
+  ACCENT_SWAMP_MUD_LIGHT,
   ACCENT_STRIP,
   ACCENT_STRIP_BASE,
   BASE_CAP,
   BASE_FIGURE_TINTS,
   BASE_FLOOR,
+  BASE_FLOOR_GROUT,
+  BASE_FLOOR_LIGHT,
+  BASE_FLOOR_STAR,
   BASE_ICE,
+  BASE_ICE_EDGE,
+  BASE_ICE_FACET,
   BASE_OBSTACLE,
+  BASE_OBSTACLE_EDGE,
   BASE_OBSTACLE_TOP,
   BASE_PAD,
+  BASE_PAD_RIM,
   BASE_PLATFORM,
   BASE_PLATFORM_TOP,
   BASE_RAMP,
+  BASE_RAMP_MARK,
   BASE_TRAMPOLINE,
   BASE_WALL,
+  BASE_WALL_PLINTH,
   HL_CHARTREUSE,
+  HL_CHARTREUSE_DEEP,
   NEUTRAL_WHITE,
 } from "../palette";
 
@@ -83,30 +95,9 @@ export interface SpawnSpec {
   z: number;
 }
 
-// QD5-A: 8 symmetric obstacle blocks + Stage 4d.3 central towers. Layout is
-// mirror-symmetric on both axes and under 180-degree rotation, so no spawn
-// side has an advantage. The 4 CENTRAL blocks (at +-4.8) are doubled to
-// hy 1.0 (2.0m full height, topY 2.0 — mirrors server SERVER_OBSTACLES):
-// reachable ONLY via trampoline bounce (no ramps touch them — see the
-// Arena.test trampoline-only pin), so they read as high ground worth
-// fighting for. The 4 OUTER blocks (at +-10.8) stay low (hy 0.4) so the
-// phone camera always sees over the lanes. Positions/half-extents unchanged
-// (gameplay density kept); block sizes scaled +20% with the map long ago
-// (4 -> 4.8, 9 -> 10.8).
+// The shared JSON stores topY; Rapier's centered box needs half-height hy.
 export function getObstacleLayout(): ObstacleSpec[] {
-  const corner: ObstacleSpec[] = [];
-  for (const sx of [-1, 1]) {
-    for (const sz of [-1, 1]) {
-      corner.push({ x: 4.8 * sx, z: 4.8 * sz, hx: 1, hy: 1.0, hz: 1 });
-    }
-  }
-  return [
-    ...corner,
-    { x: 10.8, z: 0, hx: 1.5, hy: 0.4, hz: 0.75 },
-    { x: -10.8, z: 0, hx: 1.5, hy: 0.4, hz: 0.75 },
-    { x: 0, z: 10.8, hx: 0.75, hy: 0.4, hz: 1.5 },
-    { x: 0, z: -10.8, hx: 0.75, hy: 0.4, hz: 1.5 },
-  ];
+  return ARENA_LAYOUT.obstacles.map(({ x, z, hx, hz, topY }) => ({ x, z, hx, hz, hy: topY / 2 }));
 }
 
 // CS-like asymmetric figures (owner 2A, see config PLATFORM_FIGURES): four
@@ -189,35 +180,28 @@ export function getRamps(): RampSpec[] {
   });
 }
 
-// Two slippery puddles/ice zones, 180-degree symmetric, clear of obstacles.
-// Positions scaled +20% with the map (8/-5 -> 9.6/-6).
-export function getSlipperyZones(): ZoneSpec[] {
-  return [
-    { x: 9.6, z: -6, radius: SLIPPERY_RADIUS },
-    { x: -9.6, z: 6, radius: SLIPPERY_RADIUS },
-  ];
+// The previous slow diagonal becomes swamp; the open diagonal holds ice.
+// Static arrays avoid allocations in the movement query every frame.
+const SWAMP_ZONES: readonly ZoneSpec[] = ARENA_LAYOUT.swampZones;
+const ICE_ZONES: readonly ZoneSpec[] = ARENA_LAYOUT.iceZones;
+
+export function getSwampZones(): readonly ZoneSpec[] {
+  return SWAMP_ZONES;
+}
+
+export function getIceZones(): readonly ZoneSpec[] {
+  return ICE_ZONES;
 }
 
 // Two auto trampolines on the center lane, clear of obstacles.
 // Positions scaled +20% with the map (3.5 -> 4.2).
-export function getTrampolines(): ZoneSpec[] {
-  return [
-    { x: 0, z: 4.2, radius: TRAMPOLINE_RADIUS },
-    { x: 0, z: -4.2, radius: TRAMPOLINE_RADIUS },
-  ];
+export function getTrampolines(): readonly ZoneSpec[] {
+  return ARENA_LAYOUT.trampolines;
 }
 
-// Four corner spawns (2-6 players cycle through them in Stage 4).
-export function getSpawnPoints(): SpawnSpec[] {
-  const inset = ARENA_HALF_SIZE - SPAWN_INSET;
-  const spawns: SpawnSpec[] = [];
-  for (let i = 0; i < SPAWN_COUNT; i += 1) {
-    spawns.push({
-      x: i % 2 === 0 ? -inset : inset,
-      z: i < 2 ? -inset : inset,
-    });
-  }
-  return spawns;
+// All six authoritative FFA spawns are visible in the client arena.
+export function getSpawnPoints(): readonly SpawnSpec[] {
+  return ARENA_LAYOUT.spawns;
 }
 
 export function isInsideZone(x: number, z: number, zone: ZoneSpec): boolean {
@@ -226,8 +210,20 @@ export function isInsideZone(x: number, z: number, zone: ZoneSpec): boolean {
   return dx * dx + dz * dz <= zone.radius * zone.radius;
 }
 
-export function isOnSlippery(x: number, z: number): boolean {
-  return getSlipperyZones().some((zone) => isInsideZone(x, z, zone));
+export function isOnSwamp(x: number, z: number): boolean {
+  for (let i = 0; i < SWAMP_ZONES.length; i += 1) {
+    const zone = SWAMP_ZONES[i];
+    if (zone !== undefined && isInsideZone(x, z, zone)) return true;
+  }
+  return false;
+}
+
+export function isOnIce(x: number, z: number): boolean {
+  for (let i = 0; i < ICE_ZONES.length; i += 1) {
+    const zone = ICE_ZONES[i];
+    if (zone !== undefined && isInsideZone(x, z, zone)) return true;
+  }
+  return false;
 }
 
 export function getTrampolineAt(x: number, z: number): ZoneSpec | null {
@@ -236,11 +232,10 @@ export function getTrampolineAt(x: number, z: number): ZoneSpec | null {
 
 // Friction reported for Rapier tuning checks (ice inside QT3-A 0.05-0.1).
 export function getFrictionAt(x: number, z: number): number {
-  return isOnSlippery(x, z) ? ICE_FRICTION : PLAYER_FRICTION;
+  return isOnIce(x, z) ? ICE_FRICTION : PLAYER_FRICTION;
 }
 
-// Neon-warehouse builder (QD2-A: dark floor + neon accents, readable
-// contrast). One InstancedMesh per repeated shape (perf budget), Rapier
+// Stylized nocturnal arena. One InstancedMesh per repeated shape (perf budget), Rapier
 // static colliders matching every visual that blocks movement. Owns all
 // geometries/materials it creates — dispose() releases them.
 export class ArenaBuilder {
@@ -248,13 +243,19 @@ export class ArenaBuilder {
   private readonly actors: THREE.Object3D[] = [];
   private wallMaterial: THREE.MeshStandardMaterial | null = null;
   private wallOpacity = WALL_GLASS_OPACITY;
+  private swampBubbles: THREE.InstancedMesh | null = null;
+  private swampBubbleTime = 0;
+  private readonly swampBubbleMatrix = new THREE.Matrix4();
+  private readonly swampBubbleScale = new THREE.Vector3();
+  private readonly swampBubbleLocations: Array<{ x: number; z: number; phase: number }> = [];
 
   public buildVisuals(scene: THREE.Scene): void {
     this.buildFloor(scene);
     this.buildWalls(scene);
     this.buildObstacles(scene);
     this.buildPlatforms(scene);
-    this.buildSlipperyZones(scene);
+    this.buildIceZones(scene);
+    this.buildSwampZones(scene);
     this.buildTrampolines(scene);
     this.buildSpawns(scene);
   }
@@ -294,8 +295,8 @@ export class ArenaBuilder {
         );
       }
     }
-    // Deliberately no colliders for slippery zones (friction switch in
-    // PhysicsWorld.setSlippery) or trampoline pads: pads are trigger-only
+    // Deliberately no colliders for ice/swamp (surface switch in
+    // SceneManager.updatePhysics) or trampoline pads: pads are trigger-only
     // by design (proximity launch in SceneManager at TRAMPOLINE_TRIGGER_Y),
     // so the capsule passes over them freely and never gets stuck on a lip.
   }
@@ -324,6 +325,27 @@ export class ArenaBuilder {
     return this.wallOpacity;
   }
 
+  // Called from SceneManager.updateCombat in both play and spectator paths.
+  // Only one instance buffer changes; bubbles share one geometry/material.
+  public update(deltaSeconds: number): void {
+    const bubbles = this.swampBubbles;
+    if (bubbles === null || deltaSeconds <= 0) return;
+    this.swampBubbleTime += deltaSeconds;
+    for (let i = 0; i < this.swampBubbleLocations.length; i += 1) {
+      const bubble = this.swampBubbleLocations[i];
+      if (bubble === undefined) continue;
+      const phase = (this.swampBubbleTime * 0.48 + bubble.phase) % 1;
+      const pulse = Math.sin(Math.PI * phase);
+      const scale = 0.05 + 0.43 * pulse;
+      this.swampBubbleMatrix.makeRotationX(-Math.PI / 2);
+      this.swampBubbleScale.set(scale, scale, 1);
+      this.swampBubbleMatrix.scale(this.swampBubbleScale);
+      this.swampBubbleMatrix.setPosition(bubble.x, 0.04 + 0.012 * pulse, bubble.z);
+      bubbles.setMatrixAt(i, this.swampBubbleMatrix);
+    }
+    bubbles.instanceMatrix.needsUpdate = true;
+  }
+
   public dispose(scene: THREE.Scene): void {
     for (const actor of this.actors) {
       scene.remove(actor);
@@ -331,6 +353,9 @@ export class ArenaBuilder {
     this.actors.length = 0;
     this.wallMaterial = null;
     this.wallOpacity = WALL_GLASS_OPACITY;
+    this.swampBubbles = null;
+    this.swampBubbleTime = 0;
+    this.swampBubbleLocations.length = 0;
     for (const tracked of this.disposables) {
       tracked.dispose();
     }
@@ -350,10 +375,13 @@ export class ArenaBuilder {
   private buildFloor(scene: THREE.Scene): void {
     const size = ARENA_HALF_SIZE * 2;
     const geometry = this.track(new THREE.PlaneGeometry(size, size));
+    const texture = this.track(createFloorTexture());
+    texture.repeat.set(6, 6);
     const material = this.track(
-      new THREE.MeshStandardMaterial({ color: BASE_FLOOR, roughness: 0.9, metalness: 0.05 }),
+      new THREE.MeshStandardMaterial({ color: NEUTRAL_WHITE, map: texture, roughness: 0.94, metalness: 0 }),
     );
     const floor = new THREE.Mesh(geometry, material);
+    floor.name = "arena-floor";
     floor.rotation.x = -Math.PI / 2;
     floor.receiveShadow = true;
     this.place(floor, scene);
@@ -403,7 +431,24 @@ export class ArenaBuilder {
     walls.receiveShadow = true;
     this.place(walls, scene);
 
-    // Neon top strips (muted red): one more InstancedMesh, emissive, no shadows.
+    // A low, opaque plinth makes the boundary legible without hiding the
+    // night sky through the existing transparent wall mesh.
+    const plinthGeometry = this.track(new THREE.BoxGeometry(1, 1, 1));
+    const plinthMaterial = this.track(new THREE.MeshStandardMaterial({
+      color: BASE_WALL_PLINTH, roughness: 0.92,
+    }));
+    const plinths = new THREE.InstancedMesh(plinthGeometry, plinthMaterial, 4);
+    plinths.name = "wall-plinths";
+    transforms.forEach((transform, index) => {
+      matrix.makeScale(transform.sx, 0.17, transform.sz);
+      matrix.setPosition(transform.x, 0.085, transform.z);
+      plinths.setMatrixAt(index, matrix);
+    });
+    plinths.instanceMatrix.needsUpdate = true;
+    plinths.receiveShadow = true;
+    this.place(plinths, scene);
+
+    // Amber top strips follow the original wall footprint and light budget.
     const stripGeometry = this.track(new THREE.BoxGeometry(1, 0.08, 1));
     const stripMaterial = this.track(
       new THREE.MeshStandardMaterial({
@@ -424,19 +469,20 @@ export class ArenaBuilder {
 
   private buildObstacles(scene: THREE.Scene): void {
     const specs = getObstacleLayout();
-    // Vertex colors: top face carries a subtle neon tint (QD4-A polish),
-    // multiplied with the dark base material.
+    // Face colors are already lit material colors. A white material prevents
+    // the bright moss tops from being multiplied back into darkness.
     const geometry = this.track(new THREE.BoxGeometry(1, 1, 1));
-    paintTopFaceVertices(geometry, new THREE.Color(BASE_OBSTACLE_TOP), new THREE.Color(NEUTRAL_WHITE));
+    paintBoxFaceVertices(geometry, BASE_OBSTACLE_TOP, BASE_OBSTACLE);
     const material = this.track(
       new THREE.MeshStandardMaterial({
-        color: BASE_OBSTACLE,
-        roughness: 0.8,
-        metalness: 0.15,
+        color: NEUTRAL_WHITE,
+        roughness: 0.94,
+        metalness: 0,
         vertexColors: true,
       }),
     );
     const blocks = new THREE.InstancedMesh(geometry, material, specs.length);
+    blocks.name = "arena-obstacles";
     const matrix = new THREE.Matrix4();
     const accent = new THREE.Color(ACCENT_OBSTACLE_TINT);
     const plain = new THREE.Color(NEUTRAL_WHITE);
@@ -444,7 +490,7 @@ export class ArenaBuilder {
       matrix.makeScale(spec.hx * 2, spec.hy * 2, spec.hz * 2);
       matrix.setPosition(spec.x, spec.hy, spec.z);
       blocks.setMatrixAt(index, matrix);
-      // Alternate subtle muted-red edge instance tint for readability.
+      // Alternating pale leaf tones keep all blocks in the same material family.
       blocks.setColorAt(index, index % 2 === 0 ? plain : accent);
     });
     blocks.instanceMatrix.needsUpdate = true;
@@ -454,28 +500,53 @@ export class ArenaBuilder {
     blocks.castShadow = true;
     blocks.receiveShadow = true;
     this.place(blocks, scene);
+
+    // Thin inset paint on the existing top perimeter. The trim is visual
+    // only, so the authoritative cover footprints and heights remain exact.
+    const edgeGeometry = this.track(new THREE.BoxGeometry(1, 1, 1));
+    const edgeMaterial = this.track(new THREE.MeshStandardMaterial({
+      color: BASE_OBSTACLE_EDGE, roughness: 0.9,
+    }));
+    const edges = new THREE.InstancedMesh(edgeGeometry, edgeMaterial, specs.length * 4);
+    edges.name = "obstacle-top-edges";
+    let edgeIndex = 0;
+    for (const spec of specs) {
+      const y = spec.hy * 2 + 0.012;
+      const longX = Math.max(0.1, spec.hx * 2 - 0.12);
+      const longZ = Math.max(0.1, spec.hz * 2 - 0.12);
+      for (const side of [-1, 1]) {
+        matrix.makeScale(longX, 0.016, 0.035);
+        matrix.setPosition(spec.x, y, spec.z + side * (spec.hz - 0.055));
+        edges.setMatrixAt(edgeIndex++, matrix);
+        matrix.makeScale(0.035, 0.016, longZ);
+        matrix.setPosition(spec.x + side * (spec.hx - 0.055), y, spec.z);
+        edges.setMatrixAt(edgeIndex++, matrix);
+      }
+    }
+    edges.instanceMatrix.needsUpdate = true;
+    this.place(edges, scene);
   }
 
   private buildPlatforms(scene: THREE.Scene): void {
-    // Elevated CS-like hills: one InstancedMesh for all figure tops (dark
-    // material, neon-tinted top vertices, per-instance accent tint so the
+    // Elevated shops: one InstancedMesh for all figure volumes (warm-lit
+    // moss tops and cooler shaded side faces, per-instance pale tint so the
     // four figures read as distinct), plus one thin inset cap plate per
     // figure (tiered prism look, top 5mm below the collider top so the faces
     // never z-fight — the capsule stands on the figure box). No extra lights.
     const platforms = getPlatforms();
     const topGeometry = this.track(new THREE.BoxGeometry(1, 1, 1));
-    paintTopFaceVertices(topGeometry, new THREE.Color(BASE_PLATFORM_TOP), new THREE.Color(NEUTRAL_WHITE));
+    paintBoxFaceVertices(topGeometry, BASE_PLATFORM_TOP, BASE_PLATFORM);
     const topMaterial = this.track(
       new THREE.MeshStandardMaterial({
-        color: BASE_PLATFORM,
-        roughness: 0.8,
-        metalness: 0.15,
+        color: NEUTRAL_WHITE,
+        roughness: 0.94,
+        metalness: 0,
         vertexColors: true,
       }),
     );
     const tops = new THREE.InstancedMesh(topGeometry, topMaterial, platforms.length);
     const matrix = new THREE.Matrix4();
-    // Distinct accent per figure (white / muted red / dark violet / pale violet).
+    // Four gently varied leaf tints preserve each shop's silhouette.
     const accents = [
       new THREE.Color(BASE_FIGURE_TINTS[0] ?? NEUTRAL_WHITE),
       new THREE.Color(BASE_FIGURE_TINTS[1] ?? NEUTRAL_WHITE),
@@ -513,47 +584,89 @@ export class ArenaBuilder {
       this.place(cap, scene);
     }
 
-    // Walk-up ramps: individual rotated slabs (2 meshes, no instancing —
-    // only two of them). Same material family, tilted to match colliders.
+    // Walk-up ramps retain their exact collider-aligned transforms, now in a
+    // single instanced batch to pay for the new surface detail draw calls.
     const rampMaterial = this.track(
-      new THREE.MeshStandardMaterial({ color: BASE_RAMP, roughness: 0.75, metalness: 0.15 }),
+      new THREE.MeshStandardMaterial({ color: BASE_RAMP, roughness: 0.9, metalness: 0 }),
     );
-    for (const ramp of getRamps()) {
+    const ramps = getRamps();
+    const rampGeometry = this.track(new THREE.BoxGeometry(1, 1, 1));
+    const rampSlabs = new THREE.InstancedMesh(rampGeometry, rampMaterial, ramps.length);
+    rampSlabs.name = "ramp-slabs";
+    const slabMatrix = new THREE.Matrix4();
+    const slabRotation = new THREE.Quaternion();
+    const slabPosition = new THREE.Vector3();
+    const slabScale = new THREE.Vector3();
+    ramps.forEach((ramp, index) => {
       const length = ramp.halfLength * 2;
       const thick = ramp.halfThick * 2;
       const width = ramp.halfWidth * 2;
       const isX = ramp.axis === "x";
-      const geometry = this.track(
-        new THREE.BoxGeometry(isX ? width : length, thick, isX ? length : width),
+      slabPosition.set(ramp.x, ramp.y, ramp.z);
+      slabRotation.setFromAxisAngle(
+        isX ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1),
+        ramp.angle,
       );
-      const mesh = new THREE.Mesh(geometry, rampMaterial);
-      mesh.position.set(ramp.x, ramp.y, ramp.z);
-      if (isX) {
-        mesh.rotation.x = ramp.angle;
-      } else {
-        mesh.rotation.z = ramp.angle;
+      slabScale.set(isX ? width : length, thick, isX ? length : width);
+      slabMatrix.compose(slabPosition, slabRotation, slabScale);
+      rampSlabs.setMatrixAt(index, slabMatrix);
+    });
+    rampSlabs.instanceMatrix.needsUpdate = true;
+    rampSlabs.castShadow = true;
+    rampSlabs.receiveShadow = true;
+    this.place(rampSlabs, scene);
+
+    // Four short stair-like markings on every slope communicate that ramps
+    // are walkable, while the space underneath remains visibly open.
+    const markGeometry = this.track(new THREE.BoxGeometry(1, 1, 1));
+    const markMaterial = this.track(new THREE.MeshStandardMaterial({
+      color: BASE_RAMP_MARK, roughness: 0.96,
+    }));
+    const marks = new THREE.InstancedMesh(markGeometry, markMaterial, ramps.length * 4);
+    marks.name = "ramp-surface-marks";
+    const markMatrix = new THREE.Matrix4();
+    const rotation = new THREE.Quaternion();
+    const markPosition = new THREE.Vector3();
+    const markScale = new THREE.Vector3();
+    let markIndex = 0;
+    for (const ramp of ramps) {
+      const runsOnZ = ramp.axis === "x";
+      rotation.setFromAxisAngle(
+        runsOnZ ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1),
+        ramp.angle,
+      );
+      markScale.set(runsOnZ ? ramp.halfWidth * 1.3 : 0.10, 0.013,
+        runsOnZ ? 0.10 : ramp.halfWidth * 1.3);
+      for (let band = 0; band < 4; band += 1) {
+        const along = ((band + 1) / 5 - 0.5) * ramp.halfLength * 2;
+        markPosition.set(runsOnZ ? 0 : along, ramp.halfThick + 0.014, runsOnZ ? along : 0);
+        markPosition.applyQuaternion(rotation).add(new THREE.Vector3(ramp.x, ramp.y, ramp.z));
+        markMatrix.compose(markPosition, rotation, markScale);
+        marks.setMatrixAt(markIndex++, markMatrix);
       }
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      this.place(mesh, scene);
     }
+    marks.instanceMatrix.needsUpdate = true;
+    this.place(marks, scene);
   }
 
-  private buildSlipperyZones(scene: THREE.Scene): void {
-    const zones = getSlipperyZones();
+  private buildIceZones(scene: THREE.Scene): void {
+    const zones = getIceZones();
     const geometry = this.track(new THREE.CircleGeometry(1, 40));
+    const texture = this.track(createIceTexture());
     const material = this.track(
       new THREE.MeshStandardMaterial({
-        color: BASE_ICE,
+        color: NEUTRAL_WHITE,
+        map: texture,
         emissive: ACCENT_ICE_GLOW,
-        emissiveIntensity: 0.35,
+        emissiveIntensity: 0.18,
         transparent: true,
-        opacity: 0.75,
-        roughness: 0.25,
-        metalness: 0.1,
+        opacity: 0.9,
+        roughness: 0.36,
+        metalness: 0.04,
       }),
     );
-    const puddles = new THREE.InstancedMesh(geometry, material, zones.length);
+    const puddles = this.track(new THREE.InstancedMesh(geometry, material, zones.length));
+    puddles.name = "ice-zones";
     const matrix = new THREE.Matrix4();
     const rotation = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
     zones.forEach((zone, index) => {
@@ -566,6 +679,63 @@ export class ArenaBuilder {
     this.place(puddles, scene);
   }
 
+  private buildSwampZones(scene: THREE.Scene): void {
+    const zones = getSwampZones();
+    const texture = this.track(createSwampTexture());
+    const geometry = this.track(new THREE.PlaneGeometry(2, 2));
+    const material = this.track(new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      alphaTest: 0.1,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }));
+    const ground = this.track(new THREE.InstancedMesh(geometry, material, zones.length));
+    ground.name = "swamp-zones";
+    const matrix = new THREE.Matrix4();
+    const rotation = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
+    const scale = new THREE.Vector3();
+    zones.forEach((zone, index) => {
+      matrix.copy(rotation);
+      scale.set(zone.radius, zone.radius, 1);
+      matrix.scale(scale);
+      matrix.setPosition(zone.x, 0.025, zone.z);
+      ground.setMatrixAt(index, matrix);
+    });
+    ground.instanceMatrix.needsUpdate = true;
+    ground.frustumCulled = false;
+    this.place(ground, scene);
+
+    const bubbleGeometry = this.track(createBubbleGeometry());
+    const bubbleMaterial = this.track(new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.85,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }));
+    // 10 sparse pixel ripples per circle, all in one draw call. The instance
+    // matrix alone changes each frame; positions and phases are deterministic.
+    const bubbleCountPerZone = 10;
+    const bubbles = this.track(new THREE.InstancedMesh(bubbleGeometry, bubbleMaterial, zones.length * bubbleCountPerZone));
+    bubbles.name = "swamp-bubbles";
+    bubbles.frustumCulled = false;
+    zones.forEach((zone, zoneIndex) => {
+      for (let i = 0; i < bubbleCountPerZone; i += 1) {
+        const angle = (i * 2.399963229728653) + zoneIndex * 0.45;
+        const distance = zone.radius * (0.22 + (i % 4) * 0.18);
+        this.swampBubbleLocations.push({
+          x: zone.x + Math.cos(angle) * distance,
+          z: zone.z + Math.sin(angle) * distance,
+          phase: (i * 0.61803398875 + zoneIndex * 0.31) % 1,
+        });
+      }
+    });
+    this.swampBubbles = bubbles;
+    this.update(1 / 60);
+    this.place(bubbles, scene);
+  }
+
   private buildTrampolines(scene: THREE.Scene): void {
     const zones = getTrampolines();
     const baseGeometry = this.track(new THREE.CylinderGeometry(1, 1.15, 0.25, 24));
@@ -574,9 +744,11 @@ export class ArenaBuilder {
     );
     const bases = new THREE.InstancedMesh(baseGeometry, baseMaterial, zones.length);
     const padGeometry = this.track(new THREE.CylinderGeometry(0.85, 0.85, 0.12, 24));
+    const padTexture = this.track(createPadTexture());
     const padMaterial = this.track(
       new THREE.MeshStandardMaterial({
-        color: BASE_PAD,
+        color: NEUTRAL_WHITE,
+        map: padTexture,
         emissive: HL_CHARTREUSE,
         // 4d.3 feedback dim (-20% via TRAMPOLINE_PAD_DIM, palette untouched).
         emissiveIntensity: 0.9 * TRAMPOLINE_PAD_DIM,
@@ -584,6 +756,7 @@ export class ArenaBuilder {
       }),
     );
     const pads = new THREE.InstancedMesh(padGeometry, padMaterial, zones.length);
+    pads.name = "trampoline-pads";
     const matrix = new THREE.Matrix4();
     zones.forEach((zone, index) => {
       matrix.makeScale(zone.radius, 1, zone.radius);
@@ -619,21 +792,157 @@ export class ArenaBuilder {
   }
 }
 
-// Paint a neon tint onto the top (+Y) face vertices of a BoxGeometry so the
-// obstacle blocks read as warehouse crates under the single directional
-// light. Cheap stylized polish, zero extra draw calls.
-function paintTopFaceVertices(
-  geometry: THREE.BoxGeometry,
-  top: THREE.Color,
-  side: THREE.Color,
-): void {
-  const positions = geometry.getAttribute("position");
-  const colors = new Float32Array(positions.count * 3);
-  for (let i = 0; i < positions.count; i += 1) {
-    const picked = positions.getY(i) > 0 ? top : side;
+// Paint whole faces, rather than using vertex Y (which used to brighten the
+// top edge of side walls). Cool shade and warm-facing sides stay distinct even
+// on devices with a small shadow map. Vertex colors are linear in Three.js.
+function paintBoxFaceVertices(geometry: THREE.BoxGeometry, topHex: number, sideHex: number): void {
+  const normals = geometry.getAttribute("normal");
+  const colors = new Float32Array(normals.count * 3);
+  const top = new THREE.Color(topHex);
+  const warm = new THREE.Color(sideHex).lerp(new THREE.Color(ACCENT_STRIP), 0.11);
+  const cool = new THREE.Color(sideHex).multiplyScalar(0.78);
+  const bottom = new THREE.Color(sideHex).multiplyScalar(0.62);
+  for (let i = 0; i < normals.count; i += 1) {
+    const picked = normals.getY(i) > 0.5 ? top
+      : normals.getY(i) < -0.5 ? bottom
+        : normals.getX(i) + normals.getZ(i) > 0 ? warm : cool;
     colors[i * 3] = picked.r;
     colors[i * 3 + 1] = picked.g;
     colors[i * 3 + 2] = picked.b;
   }
   geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+}
+
+function makeRgbTexture(size: number, pick: (x: number, y: number) => number): THREE.DataTexture {
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const hex = pick(x, y);
+      const pixel = (y * size + x) * 4;
+      data[pixel] = (hex >> 16) & 255;
+      data[pixel + 1] = (hex >> 8) & 255;
+      data[pixel + 2] = hex & 255;
+      data[pixel + 3] = 255;
+    }
+  }
+  const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+// Two by two stone tiles repeat six times across the unchanged floor. Subtle
+// grout, value variation and a sparse four-point star borrow the references'
+// tactile paving while keeping combat silhouettes dominant.
+function createFloorTexture(): THREE.DataTexture {
+  const texture = makeRgbTexture(256, (x, y) => {
+    const tx = Math.floor(x / 128);
+    const ty = Math.floor(y / 128);
+    const lx = x % 128;
+    const ly = y % 128;
+    if (lx < 3 || ly < 3 || lx > 124 || ly > 124) return BASE_FLOOR_GROUT;
+    const dx = Math.abs(lx - 64);
+    const dy = Math.abs(ly - 64);
+    const star = tx === ty && (
+      (dx < 2 && dy < 20) || (dy < 2 && dx < 20) || dx + dy < 11
+    );
+    if (star) return BASE_FLOOR_STAR;
+    const fleck = ((Math.floor(x / 9) * 37 + Math.floor(y / 11) * 23) % 17) === 0;
+    return fleck || (tx + ty) % 2 === 0 ? BASE_FLOOR_LIGHT : BASE_FLOOR;
+  });
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  return texture;
+}
+
+// Faceted icy puddles use the existing circle mesh and no new draw call.
+function createIceTexture(): THREE.DataTexture {
+  return makeRgbTexture(128, (x, y) => {
+    const dx = (x - 63.5) / 63.5;
+    const dy = (y - 63.5) / 63.5;
+    const radius = Math.hypot(dx, dy);
+    const angle = Math.atan2(dy, dx);
+    if (radius > 0.86) return BASE_ICE_EDGE;
+    if (radius > 0.27 && Math.abs(Math.sin(angle * 6 + radius * 0.9)) < 0.06) return BASE_ICE_FACET;
+    const facet = Math.floor((angle + Math.PI) * 6 / Math.PI) % 3;
+    return facet === 0 ? BASE_ICE_FACET : BASE_ICE;
+  });
+}
+
+// Concentric mechanical rings clarify the trampoline's trigger surface.
+function createPadTexture(): THREE.DataTexture {
+  return makeRgbTexture(128, (x, y) => {
+    const dx = (x - 63.5) / 63.5;
+    const dy = (y - 63.5) / 63.5;
+    const radius = Math.hypot(dx, dy);
+    if (radius > 0.84) return BASE_PAD_RIM;
+    if (radius > 0.58 && radius < 0.67) return HL_CHARTREUSE_DEEP;
+    if (radius < 0.22) return HL_CHARTREUSE_DEEP;
+    return BASE_PAD;
+  });
+}
+
+// A single 64px nearest-filter map gives the mud blocky edge and small value
+// shifts. It is built once, shared by both circles, and disposed by Arena.
+function createSwampTexture(): THREE.DataTexture {
+  const size = 64;
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const gx = Math.floor(x / 4);
+      const gy = Math.floor(y / 4);
+      const hash = ((gx * 37 + gy * 71 + gx * gy * 19) ^ (gx * gy * 13)) & 255;
+      const dx = (x + 0.5 - size / 2) / (size / 2);
+      const dy = (y + 0.5 - size / 2) / (size / 2);
+      const radius = Math.hypot(dx, dy);
+      const limit = 0.99 + ((hash % 5) - 2) * 0.005;
+      const pixel = (y * size + x) * 4;
+      const color = radius > limit - 0.075
+        ? ACCENT_SWAMP_MUD_EDGE
+        : hash % 9 < 2 ? ACCENT_SWAMP_MUD_LIGHT : ACCENT_SWAMP_MUD;
+      data[pixel] = (color >> 16) & 255;
+      data[pixel + 1] = (color >> 8) & 255;
+      data[pixel + 2] = color & 255;
+      data[pixel + 3] = radius <= limit ? 255 : 0;
+    }
+  }
+  const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+// A bubble is a tiny broken square ripple made of pixels. Building these
+// quads into one geometry lets all 20 animated ripples use one instanced mesh.
+function createBubbleGeometry(): THREE.BufferGeometry {
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const light = new THREE.Color(ACCENT_SWAMP_BUBBLE_LIGHT);
+  const dark = new THREE.Color(ACCENT_SWAMP_BUBBLE);
+  const cells = [
+    [-2, -1], [-2, 0], [-2, 1], [-1, -2], [0, -2], [1, -2],
+    [2, -1], [2, 0], [2, 1], [1, 2], [0, 2], [-1, 2],
+  ] as const;
+  for (const [cx, cy] of cells) {
+    const x = cx * 0.2;
+    const y = cy * 0.2;
+    const half = 0.095;
+    const tint = cx < 0 || cy > 0 ? light : dark;
+    positions.push(
+      x - half, y - half, 0, x + half, y - half, 0, x + half, y + half, 0,
+      x - half, y - half, 0, x + half, y + half, 0, x - half, y + half, 0,
+    );
+    for (let vertex = 0; vertex < 6; vertex += 1) colors.push(tint.r, tint.g, tint.b);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  geometry.computeBoundingSphere();
+  return geometry;
 }

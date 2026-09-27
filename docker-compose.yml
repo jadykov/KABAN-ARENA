@@ -27,7 +27,21 @@ services:
     working_dir: /workbench/new-game
     command: npm run dev --workspace @kaban-arena/server
 
+  editor-api:
+    image: node:20-alpine
+    ports:
+      - "127.0.0.1:5174:5174"
+    volumes:
+      - .:/workbench/new-game
+    working_dir: /workbench/new-game
+    command: node client/scripts/editor-api.mjs
+    networks:
+      - editor-local
+
 volumes:
   client-node-modules: {}
   server-node-modules: {}
   root-node-modules: {}
+
+networks:
+  editor-local: {}

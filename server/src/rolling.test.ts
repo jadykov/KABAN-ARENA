@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Client } from "colyseus";
 import {
+  ARENA_LAYOUT,
   ARENA_HALF_SIZE,
   BALL_GROUND_Y,
   BALL_HIT_PLAYER_MESSAGE,
@@ -258,47 +259,50 @@ describe("4d.4 rolling: tower roll-off ends on the ground, never hovering", () =
   });
 });
 
-describe("4d.4 rolling: low outer-block step climbs onto the block top", () => {
+describe("4d.4 rolling: low-block step climbs onto the block top", () => {
   it("rolling into the block footprint ends on the block top (0.65 step clears)", async () => {
     expect(BALL_ROLL_CLIMB_MAX).toBe(0.65);
-    const room = await playingRoom();
-    isolateDuel(room);
-    room.state.balls.clear();
-    const block = SERVER_OBSTACLES.find((entry) => entry.x === 10.8 && entry.z === 0);
-    if (block === undefined) {
-      throw new Error("no outer block defined");
+    // The owner's editable map need not contain a low block. Add a local
+    // fixture to preserve this rolling regression without changing the map.
+    const block = { x: 5, z: 2, hx: 1, hz: 1, topY: 0.6 };
+    ARENA_LAYOUT.obstacles.push(block);
+    try {
+      const room = await playingRoom();
+      isolateDuel(room);
+      room.state.balls.clear();
+      // Floor support 0.58 -> block-top support 1.18: a 0.6 step, inside
+      // the 0.65 climb budget. Fast open-floor approach from the -x side.
+      insertProbe(room, "climb", "s1", block.x - 3.3, 0.5, block.z, 8, -1, 0);
+      let sawRolling = false;
+      let rested = false;
+      for (let i = 0; i < 150; i += 1) {
+        tick50(room);
+        const ball = getBall(room, "climb");
+        if (ball === undefined) {
+          throw new Error("rolling ball vanished mid-roll");
+        }
+        if (ball.rolling === true) {
+          sawRolling = true;
+        }
+        if (ball.resting === true) {
+          rested = true;
+          break;
+        }
+      }
+      expect(sawRolling).toBe(true);
+      expect(rested).toBe(true);
+      const final = getBall(room, "climb");
+      // The roll must have ended INSIDE the block footprint — otherwise the
+      // top-height assertion below is vacuous.
+      expect(Math.abs((final?.x ?? 0) - block.x)).toBeLessThanOrEqual(block.hx);
+      expect(Math.abs((final?.z ?? 0) - block.z)).toBeLessThanOrEqual(block.hz);
+      expect(final?.y).toBeCloseTo(block.topY + BALL_RADIUS, 9);
+      expect(final?.restY).toBeCloseTo(block.topY + BALL_RADIUS, 9);
+      // A floor rest would sit at 0.58, embedded would sit below the top.
+      expect(final?.y ?? 0).toBeGreaterThan(block.topY);
+    } finally {
+      ARENA_LAYOUT.obstacles.pop();
     }
-    // Floor support 0.58 -> block-top support 1.18: a 0.6 step, inside the
-    // 0.65 climb budget. Fast open-floor approach from the -x side.
-    insertProbe(room, "climb", "s1", 7.5, 0.5, 0, 8, -1, 0);
-    let sawRolling = false;
-    let rested = false;
-    for (let i = 0; i < 150; i += 1) {
-      tick50(room);
-      const ball = getBall(room, "climb");
-      if (ball === undefined) {
-        throw new Error("rolling ball vanished mid-roll");
-      }
-      if (ball.rolling === true) {
-        sawRolling = true;
-      }
-      if (ball.resting === true) {
-        rested = true;
-        break;
-      }
-    }
-    expect(sawRolling).toBe(true);
-    expect(rested).toBe(true);
-    const final = getBall(room, "climb");
-    // The roll must have ended INSIDE the block footprint — otherwise the
-    // top-height assertion below is vacuous.
-    expect(Math.abs((final?.x ?? 0) - block.x)).toBeLessThanOrEqual(block.hx);
-    expect(Math.abs((final?.z ?? 0) - block.z)).toBeLessThanOrEqual(block.hz);
-    expect(final?.y).toBeCloseTo(block.topY + BALL_RADIUS, 9);
-    expect(final?.restY).toBeCloseTo(block.topY + BALL_RADIUS, 9);
-    // Discriminating: a floor rest would sit at 0.58, embedded would sit
-    // below the top — the ball cleared the step onto the top.
-    expect(final?.y ?? 0).toBeGreaterThan(block.topY);
   });
 });
 

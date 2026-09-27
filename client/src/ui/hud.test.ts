@@ -12,8 +12,13 @@ class FakeElement {
   public textContent = "";
   public readonly dataset: Record<string, string> = {};
   public readonly style: Record<string, string> = {};
+  public readonly attributes: Record<string, string> = {};
   public readonly children: FakeElement[] = [];
   public parentElement: FakeElement | null = null;
+
+  public setAttribute(name: string, value: string): void {
+    this.attributes[name] = value;
+  }
 
   public appendChild(child: FakeElement): FakeElement {
     child.parentElement = this;
@@ -217,11 +222,26 @@ describe("createHud top-left info list", () => {
       expect(root.querySelector("#hud-topbar")).toBe(null);
       handle.setScore(7);
       expect(byId(handle, "hud-score").textContent).toBe("7");
+      expect(byId(handle, "hud-score").attributes["aria-label"]).toBe("Score: 7");
       handle.setStatus("Fragged — respawning…");
       expect(byId(handle, "hud-status").textContent).toBe("Fragged — respawning…");
       // Hearts container still a direct centered child of the root, untouched.
       expect(root.querySelector("#hud-hearts")).not.toBe(null);
       expect(byId(handle, "hud-hearts").textContent).toBeDefined();
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("announces health and renders a half heart as a heart glyph", () => {
+    const parent = new FakeElement();
+    const handle = createHud(asHtml(parent));
+    try {
+      handle.setHearts(5);
+      const hearts = byId(handle, "hud-hearts");
+      expect(hearts.attributes.role).toBe("img");
+      expect(hearts.attributes["aria-label"]).toBe("Health: 5 of 8 half hearts");
+      expect(hearts.children.find((heart) => heart.className === "heart heart-half")?.textContent).toBe("♥");
     } finally {
       handle.dispose();
     }

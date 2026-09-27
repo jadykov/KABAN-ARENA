@@ -1,5 +1,5 @@
 import {
-  ARENA_HALF_SIZE,
+  ARENA_LAYOUT,
   BALL_GROUND_Y,
   BALL_MAX_SPEED,
   BALL_MIN_SPEED,
@@ -21,42 +21,30 @@ import {
   MAX_PLAYERS,
   NICK_MAX_LENGTH,
   NICK_MIN_LENGTH,
-  RAMP_SLOPE_DEG,
   RECOIL_FULL_M,
   RECOIL_WEAK_M,
+  RAMP_SLOPE_DEG,
   SERVER_OBSTACLES,
   SERVER_PLATFORMS,
-  SPAWN_INSET,
+  type ServerPlatformDef,
   SUPER_DAMAGE_MULT,
   TRAMPOLINE_AIR_DAMPING,
   TRAMPOLINE_GRAVITY,
   TRAMPOLINE_IMPULSE,
-  TRAMPOLINE_RADIUS,
   TRAMPOLINE_SPOTS,
   WEAK_DAMAGE,
   WIN_SCORE,
-  type ServerPlatformDef,
 } from "./config.js";
+import { rampHeightAt, rampRunForTop } from "../../shared/arena-layout.mjs";
 import type { PlayerState } from "./state.js";
 
-// Six FFA spawn points: the first four mirror the client corner spawns
-// (ARENA_HALF_SIZE - SPAWN_INSET), plus two mid-lane
-// extras so 5-6 player rooms never stack two avatars on one marker.
+export { rampHeightAt, rampRunForTop };
+
+// All player and bot spawns cycle through the shared map's spawn markers.
 export function getSpawnForIndex(index: number): { x: number; z: number } {
-  const inset = ARENA_HALF_SIZE - SPAWN_INSET;
-  const corners = [
-    { x: -inset, z: -inset },
-    { x: inset, z: -inset },
-    { x: -inset, z: inset },
-    { x: inset, z: inset },
-  ];
-  const extra = [
-    { x: 0, z: -inset },
-    { x: 0, z: inset },
-  ];
-  const all = [...corners, ...extra];
-  const slot = ((index % all.length) + all.length) % all.length;
-  const picked = all[slot];
+  const spots = ARENA_LAYOUT.spawns;
+  const slot = ((index % spots.length) + spots.length) % spots.length;
+  const picked = spots[slot];
   if (picked === undefined) {
     return { x: 0, z: 0 };
   }
@@ -180,59 +168,7 @@ export function muzzleForShot(
 //   v0 = TRAMPOLINE_IMPULSE, exp damping TRAMPOLINE_AIR_DAMPING, gravity
 //   TRAMPOLINE_GRAVITY). Pure + unit-tested.
 // - isOnTrampolinePad: XZ inside a TRAMPOLINE_SPOTS pad (launch trigger).
-export function rampRunForTop(topY: number): number {
-  if (!Number.isFinite(topY) || topY <= 0) {
-    return 0;
-  }
-  const tan = Math.tan((RAMP_SLOPE_DEG * Math.PI) / 180);
-  if (!(tan > 0)) {
-    return 0;
-  }
-  return topY / tan;
-}
-
-export function rampHeightAt(
-  platform: ServerPlatformDef,
-  x: number,
-  z: number,
-  extraBand: number = 0,
-): number {
-  if (!Number.isFinite(x) || !Number.isFinite(z)) {
-    return 0;
-  }
-  const run = rampRunForTop(platform.topY);
-  if (!(run > 0)) {
-    return 0;
-  }
-  const halfW = platform.rampWidth / 2;
-  const band = halfW + (extraBand > 0 ? extraBand : 0);
-  let lateral = 0;
-  let outward = -1;
-  switch (platform.rampSide) {
-    case "+z":
-      lateral = x - platform.x;
-      outward = z - (platform.z + platform.hz);
-      break;
-    case "-z":
-      lateral = x - platform.x;
-      outward = platform.z - platform.hz - z;
-      break;
-    case "+x":
-      lateral = z - platform.z;
-      outward = x - (platform.x + platform.hx);
-      break;
-    case "-x":
-      lateral = z - platform.z;
-      outward = platform.x - platform.hx - x;
-      break;
-    default:
-      return 0;
-  }
-  if (Math.abs(lateral) > band || outward < 0 || outward > run) {
-    return 0;
-  }
-  return platform.topY * (1 - outward / run);
-}
+// Ramp geometry lives in the same shared module as the editor validator.
 
 // Ramp-band-only height (bug A leak 2): max rampHeightAt over platforms,
 // WITHOUT footprint tops — the wedge-side entry check needs the surface a
@@ -274,6 +210,66 @@ export function rampBandHeightAtExpanded(x: number, z: number, extraBand: number
     }
   }
   return top;
+}
+
+// The browser's ramp collider is a 0.2m thick rotated slab whose center is
+// 0.05m below the nominal slope. A grounded Rapier capsule is 2m tall:
+// cylinder length 1m with 0.5m hemispheres. Compare its upper hemisphere to
+// the slab's *lower* plane, including the capsule's horizontal reach along
+// the slope. This deliberately treats contact as blocked; the clearance must
+// be positive before the authoritative server lets a fighter run underneath.
+const RAMP_SLAB_HALF_THICKNESS = 0.1;
+const RAMP_SLAB_CENTER_DROP = 0.05;
+const CAPSULE_CYLINDER_LENGTH = 1;
+const RAMP_CLEARANCE_EPS = 1e-4;
+export function rampClearsCapsuleAt(
+  platform: ServerPlatformDef,
+  x: number,
+  z: number,
+  feet: number,
+  radius: number,
+): boolean {
+  if (!Number.isFinite(feet) || !(radius > 0)) {
+    return false;
+  }
+  const height = rampHeightAt(platform, x, z, radius);
+  if (!(height > 0)) {
+    return false;
+  }
+  const cosine = Math.cos((RAMP_SLOPE_DEG * Math.PI) / 180);
+  const underside = height - RAMP_SLAB_CENTER_DROP - RAMP_SLAB_HALF_THICKNESS / cosine;
+  const capsuleUpperSphereCenter = feet + CAPSULE_CYLINDER_LENGTH + radius;
+  return underside > capsuleUpperSphereCenter + radius / cosine + RAMP_CLEARANCE_EPS;
+}
+
+function groundTopForFighterAt(x: number, z: number, feet: number, radius: number, solidExpand: number): number {
+  if (!Number.isFinite(x) || !Number.isFinite(z)) {
+    return 0;
+  }
+  let top = 0;
+  for (const platform of SERVER_PLATFORMS) {
+    if (Math.abs(x - platform.x) <= platform.hx + solidExpand &&
+        Math.abs(z - platform.z) <= platform.hz + solidExpand) {
+      top = Math.max(top, platform.topY);
+    }
+    const rampH = rampHeightAt(platform, x, z);
+    if (rampH > top && !rampClearsCapsuleAt(platform, x, z, feet, radius)) {
+      top = rampH;
+    }
+  }
+  for (const block of SERVER_OBSTACLES) {
+    if (Math.abs(x - block.x) <= block.hx + solidExpand &&
+        Math.abs(z - block.z) <= block.hz + solidExpand) {
+      top = Math.max(top, block.topY);
+    }
+  }
+  return top;
+}
+
+// Fighter support differs from ball support under a raised slab: the ball
+// still lands on its upper face, while a capsule fitting below stays on y=0.
+export function bodyCenterYForFighterAt(x: number, z: number, feet: number, radius: number, solidExpand = 0): number {
+  return groundTopForFighterAt(x, z, feet, radius, solidExpand) + BODY_CENTER_Y;
 }
 
 export function groundTopAt(x: number, z: number): number {
@@ -383,7 +379,7 @@ export function isOnTrampolinePad(x: number, z: number): boolean {
   for (const pad of TRAMPOLINE_SPOTS) {
     const dx = x - pad.x;
     const dz = z - pad.z;
-    if (dx * dx + dz * dz <= TRAMPOLINE_RADIUS * TRAMPOLINE_RADIUS) {
+    if (dx * dx + dz * dz <= pad.radius * pad.radius) {
       return true;
     }
   }

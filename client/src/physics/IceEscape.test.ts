@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { afterEach, describe, expect, it } from "vitest";
-import { getSlipperyZones } from "../arena/Arena";
-import { SLIPPERY_RADIUS } from "../config";
+import { getIceZones, isOnIce } from "../arena/Arena";
+import { ICE_RADIUS, MOVE_SPEED } from "../config";
 import { SceneManager } from "../engine/SceneManager";
 
 const FRAME = 1 / 60;
@@ -27,26 +27,44 @@ afterEach(() => {
   }
 });
 
-// Ice escape: starting from rest in the middle of a puddle, steady input
-// must carry the body out of the slippery radius (blending redirects slowly
-// on ice, but never traps the player).
-describe("SceneManager ice escape (zero velocity + input leaves the puddle)", () => {
-  it("escapes the puddle with steady input from rest", async () => {
-    expect(SLIPPERY_RADIUS).toBeCloseTo(2.64, 10);
+// Ice escape: after losing momentum inside a puddle, steady input must carry
+// the body out; normal speed returns once the body crosses the edge.
+describe("SceneManager ice escape", () => {
+  it("escapes from a stop inside the puddle and regains ground speed outside", async () => {
     const manager = await createSceneManager();
-    const zone = getSlipperyZones()[0];
+    const zone = getIceZones()[0];
     if (zone === undefined) {
-      throw new Error("no slippery zone defined");
+      throw new Error("no ice zone defined");
     }
+    expect(ICE_RADIUS).toBe(zone.radius);
     manager.debugSetPlayerState(
       { x: zone.x, y: 1.1, z: zone.z },
-      { x: 0, y: 0, z: 0 },
+      { x: 2.5, y: 0, z: 0 },
     );
-    for (let i = 0; i < 600; i += 1) {
+    for (let i = 0; i < 120; i += 1) {
+      manager.update(FRAME, { x: 0, y: 0 }, NO_LOOK);
+    }
+    const stopped = manager.getAvatarPosition();
+    const stoppedVelocity = manager.getPlayerVelocity();
+    expect(isOnIce(stopped.x, stopped.z)).toBe(true);
+    expect(stoppedVelocity).not.toBeNull();
+    expect(Math.hypot(stoppedVelocity?.x ?? 0, stoppedVelocity?.z ?? 0)).toBeLessThan(0.1);
+
+    let exited = false;
+    for (let i = 0; i < 360; i += 1) {
+      manager.update(FRAME, PUSH, NO_LOOK);
+      const position = manager.getAvatarPosition();
+      if (!isOnIce(position.x, position.z)) {
+        exited = true;
+        break;
+      }
+    }
+    expect(exited).toBe(true);
+    for (let i = 0; i < 24; i += 1) {
       manager.update(FRAME, PUSH, NO_LOOK);
     }
-    const end = manager.getAvatarPosition();
-    const dist = Math.hypot(end.x - zone.x, end.z - zone.z);
-    expect(dist).toBeGreaterThan(SLIPPERY_RADIUS);
+    const velocity = manager.getPlayerVelocity();
+    expect(velocity).not.toBeNull();
+    expect(Math.hypot(velocity?.x ?? 0, velocity?.z ?? 0)).toBeGreaterThan(MOVE_SPEED * 0.7);
   });
 });

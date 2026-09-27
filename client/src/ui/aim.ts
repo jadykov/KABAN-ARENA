@@ -50,10 +50,10 @@ export function isTrajDotLit(index: number, charge01: number, count: number = TR
   return charge01 >= trajDotLitThreshold(index, count);
 }
 
-// Throw-polish aim: tiny symbolic center dot (4px, 40% opacity) + 5
+// Throw-polish aim: a fine center reticle + 5
 // trajectory dots + Worms-style power bar (120px, bottom-center, charge
 // ONLY since Stage 4d.2) + a dedicated thin reload bar right below it
-// (same 120px width, blue fill, 1 = ready; a sibling outside #aim so the
+// (same 120px width, highlight fill, 1 = ready; a sibling outside #aim so the
 // sweep stays visible while #aim hides during reload — reviewer F1).
 // While charging the caller feeds setTrajectory() with the REAL projected
 // arc (same v0 from charge power + server gravity), so the dots move with power/aim; the symbolic fan below
@@ -82,6 +82,11 @@ export function createAim(parent: HTMLElement): AimHandle {
   powerFill.id = "power-bar-fill";
   powerBar.appendChild(powerFill);
   el.appendChild(powerBar);
+
+  const powerCaption = document.createElement("div");
+  powerCaption.id = "power-caption";
+  powerCaption.textContent = "CHARGING";
+  el.appendChild(powerCaption);
 
   const reloadBar = document.createElement("div");
   reloadBar.id = "reload-bar";
@@ -157,6 +162,8 @@ export function createAim(parent: HTMLElement): AimHandle {
     // empty white -> charging chartreuse -> FULL muted red. Bar width
     // carries the fine granularity; color carries the band.
     powerFill.style.width = `${Math.round(lastCharge * 100)}%`;
+    el.dataset.state = superMode ? "super" : lastCharge >= 1 ? "full" : lastCharge > 0 ? "charging" : "idle";
+    powerCaption.textContent = lastCharge >= 1 ? "FULL POWER" : superMode ? "SUPER CHARGE" : "CHARGING";
     if (superMode && lastCharge > 0) {
       powerFill.style.background = CROSSHAIR_SUPER_COLOR;
       return;
@@ -171,7 +178,7 @@ export function createAim(parent: HTMLElement): AimHandle {
     }
   };
 
-  // Dedicated reload bar: blue fill, 1 = ready, 0 = just fired. Owns its own
+  // Dedicated reload bar: highlight fill, 1 = ready, 0 = just fired. Owns its own
   // visibility: shown only mid-sweep (strictly between 0 and 1) so the fill
   // is observable end-to-end after a shot; idle (0) and ready (1) hide it so
   // no permanent bar sits on screen (spectator/pre-join included).

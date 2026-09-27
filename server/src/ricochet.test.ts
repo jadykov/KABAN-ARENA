@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Client } from "colyseus";
 import {
+  ARENA_LAYOUT,
   ARENA_HALF_SIZE,
   BALL_GROUND_Y,
   BALL_HIT_PLAYER_MESSAGE,
@@ -492,45 +493,47 @@ describe("rolling slide re-snaps support: tower-top fast arrival never hovers", 
     expect(final?.y ?? 0).toBeLessThan(tower.topY);
   });
 
-  it("floor-settling ball sliding into an outer block rests on the block top", async () => {
-    const room = await playingRoom();
-    isolateDuel(room);
-    room.state.balls.clear();
-    const block = SERVER_OBSTACLES.find((entry) => entry.x === 10.8 && entry.z === 0);
-    if (block === undefined) {
-      throw new Error("no outer block defined");
-    }
-    // Mid-settle state on open floor just outside the -x face, sliding +X
-    // into the footprint (slide distance ~1m > 0.5m to the face).
-    const startX = block.x - block.hx - 0.5;
-    const ball = insertProbe(room, "floor-slide", "s1", startX, BALL_GROUND_Y + BALL_RADIUS, 0, 10, 0, 0);
-    ball.restY = BALL_GROUND_Y + BALL_RADIUS;
-    ball.settleMs = PATCH_RATE_MS;
-    expect(Math.abs(startX - block.x)).toBeGreaterThan(block.hx);
-    let rested = false;
-    for (let i = 0; i < 20; i += 1) {
-      tick50(room);
-      if (getBall(room, "floor-slide")?.resting === true) {
-        rested = true;
-        break;
+  it("floor-settling ball sliding into a low block rests on its top", async () => {
+    // Use a fixture because the editable map may contain no low block.
+    const block = { x: 5, z: 2, hx: 1, hz: 1, topY: 0.6 };
+    ARENA_LAYOUT.obstacles.push(block);
+    try {
+      const room = await playingRoom();
+      isolateDuel(room);
+      room.state.balls.clear();
+      // Mid-settle state on open floor just outside the -x face, sliding +X
+      // into the footprint (slide distance ~1m > 0.5m to the face).
+      const startX = block.x - block.hx - 0.5;
+      const ball = insertProbe(room, "floor-slide", "s1", startX, BALL_GROUND_Y + BALL_RADIUS, block.z, 10, 0, 0);
+      ball.restY = BALL_GROUND_Y + BALL_RADIUS;
+      ball.settleMs = PATCH_RATE_MS;
+      expect(Math.abs(startX - block.x)).toBeGreaterThan(block.hx);
+      let rested = false;
+      for (let i = 0; i < 20; i += 1) {
+        tick50(room);
+        if (getBall(room, "floor-slide")?.resting === true) {
+          rested = true;
+          break;
+        }
       }
+      expect(rested).toBe(true);
+      const final = getBall(room, "floor-slide");
+      expect(final?.vx).toBe(0);
+      expect(final?.vy).toBe(0);
+      expect(final?.vz).toBe(0);
+      // The slide must have carried the ball into the block footprint.
+      expect(Math.abs((final?.x ?? 0) - block.x)).toBeLessThanOrEqual(block.hx);
+      expect(Math.abs((final?.z ?? 0) - block.z)).toBeLessThanOrEqual(block.hz);
+      // True support at the final xz is the block top, not the entry floor.
+      const expected = Math.max(BALL_GROUND_Y, groundTopAt(final?.x ?? 0, final?.z ?? 0)) + BALL_RADIUS;
+      expect(expected).toBeCloseTo(block.topY + BALL_RADIUS, 9);
+      expect(final?.restY).toBeCloseTo(expected, 9);
+      expect(final?.y).toBeCloseTo(block.topY + BALL_RADIUS, 9);
+      // The stale floor pin would rest embedded below the block top.
+      expect(final?.y ?? 0).toBeGreaterThan(block.topY);
+    } finally {
+      ARENA_LAYOUT.obstacles.pop();
     }
-    expect(rested).toBe(true);
-    const final = getBall(room, "floor-slide");
-    expect(final?.vx).toBe(0);
-    expect(final?.vy).toBe(0);
-    expect(final?.vz).toBe(0);
-    // The slide must have carried the ball into the block footprint.
-    expect(Math.abs((final?.x ?? 0) - block.x)).toBeLessThanOrEqual(block.hx);
-    expect(Math.abs((final?.z ?? 0) - block.z)).toBeLessThanOrEqual(block.hz);
-    // True support at the final xz is the block top, not the entry floor.
-    const expected = Math.max(BALL_GROUND_Y, groundTopAt(final?.x ?? 0, final?.z ?? 0)) + BALL_RADIUS;
-    expect(expected).toBeCloseTo(block.topY + BALL_RADIUS, 9);
-    expect(final?.restY).toBeCloseTo(expected, 9);
-    expect(final?.y).toBeCloseTo(block.topY + BALL_RADIUS, 9);
-    // Discriminating: the stale floor pin would rest embedded (center below
-    // the solid top, i.e. inside the block).
-    expect(final?.y ?? 0).toBeGreaterThan(block.topY);
   });
 });
 

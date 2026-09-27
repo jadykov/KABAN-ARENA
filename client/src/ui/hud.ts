@@ -41,14 +41,10 @@ export interface HudHandle {
   dispose(): void;
 }
 
-// Hybrid HUD (QD3 + R2 halves, phone playtest round): DOM overlay with a
-// compact top-LEFT info list (timer / Players / Watching), 4 hearts alone
-// top-center rendered from halves (full/half/empty), a right-side score
-// block (score line + transient status line, clears the mute/fullscreen
-// buttons) and a SUPER badge for the x2-next-shot buff. Reload lives in the
-// aim overlay since Stage 4d.2 (dedicated bar under the power bar). Minimal,
-// readable on narrow mobile viewports, never blocks the canvas
-// (pointer-events none).
+// The HUD stays in its established touch-safe zones: match info at top-left,
+// health alone at top-center, score/status at top-right, and a short event
+// line below the right-side buttons. CSS supplies the illustrated plate
+// treatment; this DOM tree keeps the same input and update contracts.
 export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): HudHandle {
   const root = document.createElement("div");
   root.id = "hud";
@@ -80,19 +76,27 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
   const scoreBlock = document.createElement("div");
   scoreBlock.id = "hud-score-block";
 
+  const scoreLabel = document.createElement("span");
+  scoreLabel.id = "hud-score-label";
+  scoreLabel.textContent = "SCORE";
+
   const score = document.createElement("span");
   score.id = "hud-score";
   score.textContent = "0";
+  score.setAttribute("aria-label", "Score: 0");
 
   const status = document.createElement("span");
   status.id = "hud-status";
   status.textContent = "";
 
+  scoreBlock.appendChild(scoreLabel);
   scoreBlock.appendChild(score);
   scoreBlock.appendChild(status);
+  status.setAttribute("aria-live", "polite");
 
   const hearts = document.createElement("div");
   hearts.id = "hud-hearts";
+  hearts.setAttribute("role", "img");
 
   const superBadge = document.createElement("div");
   superBadge.id = "hud-super";
@@ -101,6 +105,8 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
 
   const killfeed = document.createElement("div");
   killfeed.id = "hud-killfeed";
+  killfeed.setAttribute("role", "log");
+  killfeed.setAttribute("aria-live", "polite");
 
   root.appendChild(info);
   root.appendChild(hearts);
@@ -123,13 +129,14 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
         heart.textContent = "♥";
       } else if (fill === 1) {
         heart.className = "heart heart-half";
-        heart.textContent = "◐";
+        heart.textContent = "♥";
       } else {
         heart.className = "heart heart-empty";
         heart.textContent = "♡";
       }
       hearts.appendChild(heart);
     }
+    hearts.setAttribute("aria-label", `Health: ${currentHalves} of ${maxHearts * 2} half hearts`);
   };
   renderHearts();
 
@@ -140,6 +147,7 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
     },
     setScore(nextScore: number): void {
       score.textContent = String(nextScore);
+      score.setAttribute("aria-label", `Score: ${nextScore}`);
     },
     setPlayers(count: number): void {
       infoPlayers.textContent = `Players: ${count}`;

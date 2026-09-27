@@ -30,11 +30,20 @@ import {
   NEBULA_COUNT,
   PARTICLE_BURST_COUNT,
   RECOIL_FULL_M,
+  SHADOW_MAP_SIZE,
   WALL_FADE_OPACITY,
   WALL_GLASS_OPACITY,
   WALL_HEIGHT,
 } from "../config";
 import { mirrorChargeCameraPitch } from "../net/chargeAim";
+import {
+  ACCENT_DEATH_PALE,
+  ACCENT_DEATH_RED,
+  ACCENT_DEATH_WHITE,
+  HL_CHARTREUSE,
+  SCENE_COOL_FILL,
+  SCENE_WARM_LIGHT,
+} from "../palette";
 import {
   FIREFLY_BLINK,
   FIREFLY_OPACITY,
@@ -114,6 +123,20 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     managers.push(manager);
     return { manager, scene };
   }
+
+  it("uses one warm shadow key and one cool ambient fill", async () => {
+    const { scene } = await createManagerWithScene();
+    const directional = scene.children.filter((child): child is THREE.DirectionalLight => child instanceof THREE.DirectionalLight);
+    const ambient = scene.children.filter((child): child is THREE.AmbientLight => child instanceof THREE.AmbientLight);
+    const spots = scene.children.filter((child): child is THREE.SpotLight => child instanceof THREE.SpotLight);
+    expect(directional).toHaveLength(1);
+    expect(ambient).toHaveLength(1);
+    expect(spots).toHaveLength(1); // Existing banner light only.
+    expect(directional[0]!.color.getHex()).toBe(SCENE_WARM_LIGHT);
+    expect(ambient[0]!.color.getHex()).toBe(SCENE_COOL_FILL);
+    expect(directional[0]!.shadow.mapSize.x).toBeLessThanOrEqual(SHADOW_MAP_SIZE);
+    expect(directional[0]!.shadow.mapSize.y).toBeLessThanOrEqual(SHADOW_MAP_SIZE);
+  });
 
   it("renders the 4 walls as transparent glass at the glass rest opacity", async () => {
     expect(WALL_GLASS_OPACITY).toBe(0.2);
@@ -241,15 +264,15 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
 describe("SceneManager death burst (80, palette + identity + chartreuse)", () => {
   it("spawns 80 pooled particles with the white/pale/red/identity/chartreuse split", async () => {
     expect(DEATH_BURST_COUNT).toBe(80);
-    expect(DEATH_BURST_YELLOW).toBe(0xf5f0ff);
-    expect(DEATH_BURST_ORANGE).toBe(0xb9a3e6);
-    expect(DEATH_BURST_RED).toBe(0xa8434e);
-    expect(DEATH_BURST_CHARTREUSE).toBe(0xb8e04a);
+    expect(DEATH_BURST_YELLOW).toBe(ACCENT_DEATH_WHITE);
+    expect(DEATH_BURST_ORANGE).toBe(ACCENT_DEATH_PALE);
+    expect(DEATH_BURST_RED).toBe(ACCENT_DEATH_RED);
+    expect(DEATH_BURST_CHARTREUSE).toBe(HL_CHARTREUSE);
     expect(DEATH_BURST_SPREAD).toBe(4.5);
     expect(DEATH_BURST_UP).toBe(4.5);
     expect(DEATH_BURST_LIFE_S).toBe(0.9);
-    // 10% white / 30% pale violet / 15% identity / 5% chartreuse of the
-    // 80-burst, muted red remainder.
+    // 10% cream / 30% pale amber / 15% identity / 5% lime of the
+    // 80-burst, warm coral remainder.
     expect(Math.round(DEATH_BURST_COUNT * 0.1)).toBe(8);
     expect(Math.round(DEATH_BURST_COUNT * 0.3)).toBe(24);
     expect(Math.round(DEATH_BURST_COUNT * 0.15)).toBe(12);

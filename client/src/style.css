@@ -2,34 +2,40 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Palette mirror (single source of truth is client/src/palette.ts — these
-   :root values must match the *_CSS constants named beside them; style.css
-   cannot import TS). Scheme: violet base / muted-red accents / chartreuse
-   highlights. Neutral UI chrome (white borders, dark plates) stays as-is. */
+/* CSS mirrors of palette.ts. Keep these values aligned with the named
+   constants; CSS cannot import the TypeScript palette. */
 :root {
-  --palette-bg: #100c1d; /* BASE_BG_CSS */
-  --palette-heart-full: #c14e56; /* ACCENT_HEART_FULL */
-  --palette-heart-half: #c9b8ee; /* ACCENT_HEART_HALF */
-  --palette-power: #b8e04a; /* HL_CHARTREUSE_CSS */
-  --palette-reload: #b8e04a; /* HL_CHARTREUSE_CSS */
-  --palette-join: #b8e04a; /* HL_CHARTREUSE_CSS */
-  --palette-join-text: #1e2407; /* HL_JOIN_TEXT */
-  --palette-fire: rgba(193, 78, 86, 0.25); /* ACCENT_FIRE_BUTTON */
-  --palette-super-bg: rgba(74, 54, 112, 0.35); /* dark-violet base family */
-  --palette-super-border: rgba(201, 184, 238, 0.8); /* pale violet */
-  --palette-super-text: #e9d5ff; /* ACCENT_SUPER_TEXT_CSS */
-  --palette-plate: rgba(16, 12, 29, 0.85); /* BASE_BG at 0.85 */
+  --palette-bg: #0b1829; /* BASE_BG_CSS */
+  --palette-warm: #ffe0ab; /* SCENE_WARM_LIGHT_CSS */
+  --palette-heart-full: #e87568; /* ACCENT_HEART_FULL */
+  --palette-heart-half: #f3c5aa; /* ACCENT_HEART_HALF */
+  --palette-power: #d8ea70; /* HL_CHARTREUSE_CSS */
+  --palette-reload: #d8ea70; /* HL_CHARTREUSE_CSS */
+  --palette-join: #d8ea70; /* HL_CHARTREUSE_CSS */
+  --palette-join-text: #243117; /* HL_JOIN_TEXT */
+  --palette-fire: rgba(232, 117, 104, 0.28); /* ACCENT_FIRE_BUTTON */
+  --palette-super-text: #f9e4b0; /* ACCENT_SUPER_TEXT_CSS */
+  --palette-plate: rgba(11, 24, 41, 0.91); /* BASE_BG_CSS at 0.91 */
+  --ui-text: rgba(250, 251, 245, 0.98);
+  --ui-muted: rgba(205, 225, 224, 0.78);
+  --ui-cool-line: rgba(166, 198, 215, 0.42);
+  --ui-shadow: rgba(2, 11, 21, 0.55);
 }
 
 html,
 body,
 #app {
-  margin: 0;
-  padding: 0;
   width: 100%;
   height: 100%;
+  margin: 0;
+  padding: 0;
   overflow: hidden;
   background: var(--palette-bg);
+}
+
+body {
+  font-family: ui-rounded, "Trebuchet MS", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 canvas {
@@ -37,106 +43,217 @@ canvas {
   touch-action: none;
 }
 
-/* Hybrid HUD (QD3): DOM overlay, always on top, never captures input. */
+button,
+input {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 3px solid var(--palette-warm);
+  outline-offset: 3px;
+}
+
+/* HUD readouts never capture aim or movement input. */
 #hud {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
+  inset: 0;
   z-index: 20;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+  color: var(--ui-text);
   pointer-events: none;
-  font-family: system-ui, sans-serif;
-  color: #fff;
+  font-variant-numeric: tabular-nums;
 }
 
-/* Playtest round: center top holds ONLY the hearts (compact); the score +
-   transient status live in the right-side #hud-score-block below, clear of
-   the top-right mute/fullscreen buttons (right:96px clears both). */
-#hud-score-block {
-  position: fixed;
-  top: 8px;
-  right: 96px;
-  z-index: 20;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0;
-  padding: 4px 12px;
-  background: rgba(0, 0, 0, 0.45);
-  border-radius: 10px;
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1.4;
-  white-space: nowrap;
-  max-width: calc(100vw - 16px);
-  pointer-events: none;
+#hud-info,
+#hud-score-block,
+#hud-hearts {
+  border: 1px solid var(--ui-cool-line);
+  background: linear-gradient(135deg, rgba(24, 53, 65, 0.92), var(--palette-plate));
+  box-shadow: 0 4px 0 rgba(2, 11, 21, 0.27), 0 8px 24px var(--ui-shadow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.11);
 }
 
-/* Phone-playtest info list: compact vertical stack pinned top-left
-   (timer / Players / Watching), same dark-pill family as the right score
-   block, never captures input. Hearts stay centered alone at center top;
-   the score block shrinks to its content (score+status) so the two coexist
-   on narrow screens. Mute/fullscreen buttons live top-right — no overlap. */
 #hud-info {
   position: fixed;
-  top: 8px;
-  left: 8px;
-  z-index: 20;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  left: calc(8px + env(safe-area-inset-left, 0px));
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 4px 10px;
-  background: rgba(0, 0, 0, 0.45);
-  border-radius: 10px;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.4;
+  padding: 8px 11px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
   white-space: nowrap;
-  pointer-events: none;
 }
 
 #hud-info-timer {
-  font-variant-numeric: tabular-nums;
+  color: var(--palette-warm);
+  font-size: 17px;
+  font-weight: 900;
+  line-height: 1.05;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 0 var(--ui-shadow);
+}
+
+#hud-info-timer::before {
+  content: "TIME";
+  display: inline-block;
+  margin-right: 7px;
+  color: var(--ui-muted);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+  vertical-align: 2px;
 }
 
 #hud-info-players,
 #hud-info-watching {
-  opacity: 0.85;
-  font-weight: 400;
+  color: var(--ui-muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+#hud-score-block {
+  position: fixed;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  right: calc(104px + env(safe-area-inset-right, 0px));
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: baseline;
+  justify-content: end;
+  column-gap: 8px;
+  padding: 7px 10px;
+  border-radius: 12px;
+  text-align: right;
+  line-height: 1.2;
+}
+
+#hud-score-label {
+  color: var(--ui-muted);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.11em;
+}
+
+#hud-score {
+  color: var(--palette-warm);
+  font-size: 18px;
+  font-weight: 900;
+  text-shadow: 0 1px 0 var(--ui-shadow);
+}
+
+#hud-status {
+  grid-column: 1 / -1;
+  max-width: 175px;
+  max-height: 3.75em;
+  margin-top: 2px;
+  color: var(--ui-muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+#hud-status:empty {
+  display: none;
 }
 
 #hud-hearts {
+  position: fixed;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  left: 50%;
   display: flex;
   gap: 4px;
-  margin-top: 8px;
-  font-size: 18px;
-  line-height: 1;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  align-items: center;
+  min-height: 25px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  transform: translateX(-50%);
+  white-space: nowrap;
 }
 
-#hud-hearts .heart-full {
+#hud-hearts .heart {
+  display: inline-block;
+  min-width: 19px;
   color: var(--palette-heart-full);
+  font-family: Arial, sans-serif;
+  font-size: 22px;
+  font-weight: 900;
+  line-height: 1;
+  text-align: center;
+  text-shadow: 0 1px 1px rgba(2, 11, 21, 0.9), 0 0 9px rgba(232, 117, 104, 0.35);
 }
 
 #hud-hearts .heart-half {
-  color: var(--palette-heart-half);
+  background: linear-gradient(90deg, var(--palette-heart-full) 0 49%, var(--palette-heart-half) 50% 100%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: none;
+}
+
+#hud-hearts .heart-empty {
+  color: rgba(243, 197, 170, 0.5);
+  text-shadow: 0 1px 1px rgba(2, 11, 21, 0.9);
 }
 
 #hud-super {
-  margin-top: 4px;
-  padding: 2px 10px;
-  background: var(--palette-super-bg);
-  border: 1px solid var(--palette-super-border);
+  position: fixed;
+  top: calc(49px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  padding: 4px 11px;
+  border: 1px solid rgba(255, 224, 171, 0.65);
   border-radius: 999px;
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 1px;
+  background: rgba(50, 56, 53, 0.88);
+  box-shadow: 0 3px 12px var(--ui-shadow), 0 0 12px rgba(255, 224, 171, 0.19);
   color: var(--palette-super-text);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  transform: translateX(-50%);
 }
 
+#hud-super::before {
+  content: "✦";
+  margin-right: 5px;
+  color: var(--palette-warm);
+}
+
+#hud-killfeed {
+  position: fixed;
+  top: calc(62px + env(safe-area-inset-top, 0px));
+  right: calc(8px + env(safe-area-inset-right, 0px));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  max-width: min(260px, 45vw);
+  font-size: 11px;
+}
+
+#hud-killfeed .killfeed-entry {
+  max-width: 100%;
+  padding: 6px 9px;
+  overflow: hidden;
+  border: 1px solid var(--ui-cool-line);
+  border-left: 3px solid var(--palette-warm);
+  border-radius: 9px;
+  background: var(--palette-plate);
+  box-shadow: 0 4px 12px var(--ui-shadow);
+  font-weight: 700;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  /* KILLFEED_OPACITY in config.ts is applied inline by hud.ts. */
+  opacity: 0.7;
+}
+
+/* Reticle and projected arc are visual-only overlays. */
 #aim {
   position: fixed;
   inset: 0;
@@ -144,269 +261,529 @@ canvas {
   pointer-events: none;
 }
 
-#aim-dot {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 4px;
-  height: 4px;
-  margin-left: -2px;
-  margin-top: -2px;
-  border-radius: 50%;
-  background: #fff;
-  opacity: 0.4;
-}
-
+#aim-dot,
 #aim .traj-dot {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 4px;
-  height: 4px;
-  margin-left: -2px;
-  margin-top: -2px;
   border-radius: 50%;
-  background: #fff;
-  opacity: 0.15;
+}
+
+#aim-dot {
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  background: var(--palette-warm);
+  box-shadow: 0 0 0 2px rgba(11, 24, 41, 0.9), 0 0 11px rgba(255, 224, 171, 0.85);
+}
+
+#aim-dot::before {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 19px;
+  height: 19px;
+  border: 1px solid rgba(255, 250, 235, 0.78);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(11, 24, 41, 0.42), inset 0 0 0 1px rgba(11, 24, 41, 0.55);
+  content: "";
+  transform: translate(-50%, -50%);
+}
+
+#aim[data-state="full"] #aim-dot::before {
+  border-color: var(--palette-heart-full);
+  box-shadow: 0 0 9px rgba(232, 117, 104, 0.8);
+}
+
+#aim[data-state="super"] #aim-dot::before {
+  border-color: var(--palette-power);
+  box-shadow: 0 0 10px rgba(216, 234, 112, 0.8);
+}
+
+#aim .traj-dot {
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border: 1px solid rgba(11, 24, 41, 0.83);
+  background: var(--palette-warm);
+  box-shadow: 0 0 8px rgba(255, 224, 171, 0.68);
+}
+
+#power-caption,
+#reload-bar::before {
+  position: fixed;
+  left: 50%;
+  color: var(--palette-warm);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  line-height: 1;
+  text-shadow: 0 1px 2px rgba(2, 11, 21, 0.95);
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+#power-caption {
+  bottom: calc(44px + env(safe-area-inset-bottom, 0px));
+}
+
+#aim[data-state="full"] #power-caption {
+  color: var(--palette-heart-full);
+}
+
+#aim[data-state="super"] #power-caption {
+  color: var(--palette-power);
+}
+
+#power-bar,
+#reload-bar {
+  position: fixed;
+  left: 50%;
+  width: 120px;
+  box-sizing: border-box;
+  border: 1px solid rgba(166, 198, 215, 0.64);
+  border-radius: 999px;
+  background: rgba(11, 24, 41, 0.85);
+  box-shadow: 0 3px 9px rgba(2, 11, 21, 0.7), inset 0 1px 3px rgba(2, 11, 21, 0.7);
+  transform: translateX(-50%);
+  pointer-events: none;
 }
 
 #power-bar {
-  position: fixed;
-  left: 50%;
-  bottom: 24px;
-  width: 120px;
-  height: 10px;
-  margin-left: -60px;
+  bottom: calc(27px + env(safe-area-inset-bottom, 0px));
+  height: 11px;
+}
+
+#reload-bar {
+  z-index: 15;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  height: 6px;
+}
+
+#reload-bar::before {
+  bottom: calc(25px + env(safe-area-inset-bottom, 0px));
+  color: var(--palette-reload);
+  content: "RELOADING";
+}
+
+#power-bar-fill,
+#reload-bar-fill {
+  height: 100%;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.15);
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  overflow: hidden;
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.35), transparent 65%);
+  box-shadow: 0 0 9px rgba(216, 234, 112, 0.5);
 }
 
 #power-bar-fill {
   width: 0%;
-  height: 100%;
-  background: var(--palette-power);
-}
-
-/* Stage 4d.2 dedicated reload bar: sibling of #aim (reparented out of it so
-   the sweep stays visible during reload while #aim hides), same 120px
-   width, centered, thin chartreuse fill (1 = ready). DOM only, never
-   captures input. */
-#reload-bar {
-  position: fixed;
-  left: 50%;
-  bottom: 10px;
-  width: 120px;
-  height: 5px;
-  margin-left: -60px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.15);
-  overflow: hidden;
-  pointer-events: none;
+  background-color: var(--palette-power);
 }
 
 #reload-bar-fill {
   width: 100%;
-  height: 100%;
-  background: var(--palette-reload);
+  background-color: var(--palette-reload);
 }
 
-#hud-killfeed {
-  position: fixed;
-  top: 64px;
-  right: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-width: 45vw;
-  font-size: 11px;
-  pointer-events: none;
-}
-
-#hud-killfeed .killfeed-entry {
-  padding: 2px 8px;
-  background: rgba(0, 0, 0, 0.45);
-  border-radius: 6px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  /* Event feed (owner 4d.4): mirror of KILLFEED_OPACITY in
-     client/src/config.ts (the inline style in ui/hud.ts is the source of
-     truth; this keeps static rendering identical). pointer-events none so
-     the feed never blocks gameplay HUD / touch-safe zones. */
-  opacity: 0.7;
-  pointer-events: none;
-}
-
-/* Virtual joystick: large transparent see-through disc, bottom-left,
-   look-through layout that does not block the view (opacity < 0.5). */
+/* Keep the existing lower-corner touch zones. The older joystick's inline
+   opacity is raised here so its outline remains visible in sunlight. */
 #joystick {
   position: fixed;
-  left: 24px;
-  bottom: 56px;
+  left: calc(24px + env(safe-area-inset-left, 0px));
+  bottom: calc(56px + env(safe-area-inset-bottom, 0px));
   z-index: 10;
+  box-sizing: border-box;
+  border: 2px solid rgba(166, 198, 215, 0.94);
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.5);
-  background: rgba(255, 255, 255, 0.08);
+  background: radial-gradient(circle at 38% 30%, rgba(142, 196, 203, 0.25), rgba(11, 24, 41, 0.55) 70%);
+  box-shadow: 0 3px 0 rgba(2, 11, 21, 0.45), 0 8px 22px rgba(2, 11, 21, 0.45),
+    inset 0 0 0 8px rgba(166, 198, 215, 0.1), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
+  opacity: 0.82 !important;
   touch-action: none;
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
-  opacity: 0.4;
+}
+
+#joystick::before,
+#joystick::after {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 4px;
+  height: 12px;
+  border-radius: 4px;
+  background: rgba(226, 247, 247, 0.36);
+  content: "";
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
+#joystick::after {
+  transform: translate(-50%, -50%) rotate(90deg);
 }
 
 #joystick-knob {
   position: absolute;
   left: 50%;
   top: 50%;
+  box-sizing: border-box;
+  border: 2px solid rgba(246, 251, 239, 0.96);
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.35);
-  border: 2px solid rgba(255, 255, 255, 0.6);
-  opacity: 0.55;
-}
-
-@media (max-width: 480px) {
-  #hud-score-block {
-    font-size: 12px;
-    padding: 3px 10px;
-  }
-
-  #hud-info {
-    font-size: 11px;
-    padding: 3px 8px;
-  }
-
-  #hud-hearts {
-    font-size: 16px;
-  }
-}
-
-/* Stage 4: join overlay (guest nick + Play, no auth) + FIRE button.
-   DOM overlay only — zero WebGL cost, inside the mobile perf budget. */
-#hud-status {
-  opacity: 0.75;
-  font-weight: 400;
-  font-size: 12px;
+  background: radial-gradient(circle at 35% 28%, rgba(255, 224, 171, 0.78), rgba(115, 161, 174, 0.72) 67%, rgba(11, 24, 41, 0.9));
+  box-shadow: 0 3px 8px rgba(2, 11, 21, 0.65), inset 0 1px 1px rgba(255, 255, 255, 0.65);
+  opacity: 0.96 !important;
 }
 
 #join-overlay {
   position: fixed;
   left: 50%;
   top: 50%;
-  transform: translate(-50%, -50%);
   z-index: 30;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  width: min(356px, calc(100vw - 32px));
+  max-height: calc(100vh - 80px);
+  max-height: calc(100dvh - 80px);
+  box-sizing: border-box;
+  gap: 10px;
+  padding: 22px 24px 20px;
+  overflow-y: auto;
+  border: 1px solid rgba(166, 198, 215, 0.56);
+  border-radius: 22px;
+  background: linear-gradient(155deg, rgba(32, 65, 73, 0.97), rgba(11, 24, 41, 0.96) 52%, rgba(14, 36, 47, 0.97));
+  box-shadow: 0 7px 0 rgba(2, 11, 21, 0.42), 0 23px 65px rgba(2, 11, 21, 0.68),
+    inset 0 1px 0 rgba(255, 255, 255, 0.17), 0 0 45px rgba(255, 224, 171, 0.1);
+  color: var(--ui-text);
+  scrollbar-width: thin;
+  transform: translate(-50%, -50%);
+}
+
+#join-overlay::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 5px;
+  border-radius: 22px 22px 0 0;
+  background: linear-gradient(90deg, rgba(166, 198, 215, 0.8), var(--palette-warm) 46%, var(--palette-join));
+  content: "";
+}
+
+#join-brand {
+  display: flex;
   align-items: center;
-  padding: 24px 28px;
-  background: var(--palette-plate);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 16px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  gap: 8px;
+  min-height: 28px;
+}
+
+#join-emblem {
+  display: inline-flex;
+  width: 27px;
+  height: 27px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 224, 171, 0.76);
+  border-radius: 9px;
+  background: rgba(255, 224, 171, 0.12);
+  box-shadow: 0 0 14px rgba(255, 224, 171, 0.2);
+  color: var(--palette-warm);
+  font-size: 19px;
+  line-height: 1;
+}
+
+#join-kicker,
+#join-nick-label,
+#join-controls-label {
+  color: var(--palette-warm);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.15em;
+}
+
+#join-title {
+  margin: 0;
+  color: var(--ui-text);
+  font-size: clamp(27px, 8vw, 35px);
+  font-weight: 950;
+  letter-spacing: 0.035em;
+  line-height: 1;
+  text-shadow: 0 3px 0 rgba(2, 11, 21, 0.65), 0 0 18px rgba(255, 224, 171, 0.15);
+}
+
+#join-subtitle {
+  margin: -4px 0 5px;
+  color: var(--ui-muted);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+#join-nick-label {
+  margin-top: 3px;
 }
 
 #join-nick {
-  width: 200px;
-  padding: 8px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
-  font-size: 14px;
-  text-align: center;
+  width: 100%;
+  min-height: 43px;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid rgba(166, 198, 215, 0.65);
+  border-radius: 10px;
+  background: rgba(4, 19, 30, 0.56);
+  box-shadow: inset 0 2px 5px rgba(2, 11, 21, 0.35);
+  color: var(--ui-text);
+  font-size: 15px;
+  font-weight: 700;
   outline: none;
 }
 
+#join-nick::placeholder {
+  color: rgba(205, 225, 224, 0.6);
+}
+
+#join-nick:focus {
+  border-color: var(--palette-warm);
+  box-shadow: inset 0 2px 5px rgba(2, 11, 21, 0.35), 0 0 0 3px rgba(255, 224, 171, 0.17);
+}
+
 #join-play {
-  padding: 8px 18px;
-  border: none;
-  border-radius: 8px;
-  background: var(--palette-join);
+  display: flex;
+  width: 100%;
+  min-height: 45px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  padding: 9px 18px;
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  border-radius: 11px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.37), transparent 57%), var(--palette-join);
+  box-shadow: 0 4px 0 rgba(76, 100, 37, 0.9), 0 9px 15px rgba(2, 11, 21, 0.28);
   color: var(--palette-join-text);
-  font-size: 14px;
-  font-weight: 700;
   cursor: pointer;
+  font-size: 15px;
+  font-weight: 950;
+  letter-spacing: 0.04em;
+  touch-action: manipulation;
   -webkit-user-select: none;
   user-select: none;
-  -webkit-touch-callout: none;
+}
+
+#join-play:active {
+  box-shadow: 0 1px 0 rgba(76, 100, 37, 0.9);
+  transform: translateY(3px);
+}
+
+#join-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 7px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(166, 198, 215, 0.29);
+}
+
+#join-controls-label {
+  color: var(--ui-muted);
+}
+
+.join-control {
+  margin: 0;
+  color: var(--ui-muted);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.join-control--touch {
+  display: none;
 }
 
 #fire-button {
   position: fixed;
-  right: 40px;
-  bottom: 72px;
+  right: calc(36px + env(safe-area-inset-right, 0px));
+  bottom: calc(72px + env(safe-area-inset-bottom, 0px));
   z-index: 10;
-  width: 84px;
-  height: 84px;
+  display: flex;
+  width: 88px;
+  height: 88px;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border: 2px solid rgba(255, 224, 171, 0.9);
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.5);
-  background: var(--palette-fire);
-  color: #fff;
-  font-size: 13px;
-  font-weight: 700;
-  opacity: 0.6;
+  background: radial-gradient(circle at 38% 28%, rgba(255, 224, 171, 0.61), rgba(232, 117, 104, 0.42) 55%, var(--palette-fire) 75%);
+  box-shadow: 0 4px 0 rgba(75, 35, 44, 0.7), 0 9px 21px rgba(2, 11, 21, 0.55),
+    inset 0 0 0 6px rgba(11, 24, 41, 0.34), inset 0 2px 2px rgba(255, 255, 255, 0.37);
+  color: var(--ui-text);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  text-shadow: 0 2px 2px rgba(47, 22, 28, 0.85);
   touch-action: none;
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
 }
 
-/* Stage 5 audio mute toggle: small violet-family circle, top-right above the
-   killfeed (top 64px) so it never covers feed lines or the play zone. Same
-   interactive-HUD conventions as #fire-button (touch-action + no text
-   selection on double-tap); a compact 36px target that gameplay drags pass
-   around, and canvas-charge guards already ignore button targets. */
-#mute-button {
-  position: fixed;
-  top: 8px;
-  right: 8px;
-  z-index: 25;
-  width: 36px;
-  height: 36px;
+#fire-button::before {
+  position: absolute;
+  inset: -8px;
+  border: 1px dashed rgba(255, 224, 171, 0.66);
   border-radius: 50%;
-  border: 1px solid var(--palette-super-border);
-  background: var(--palette-super-bg);
-  color: var(--palette-super-text);
-  font-size: 17px;
-  line-height: 1;
+  content: "";
+  pointer-events: none;
+}
+
+#fire-button:active {
+  box-shadow: 0 1px 0 rgba(75, 35, 44, 0.7), 0 3px 11px rgba(2, 11, 21, 0.55),
+    inset 0 0 0 6px rgba(11, 24, 41, 0.34);
+  transform: translateY(3px);
+}
+
+#mute-button,
+#fullscreen-button {
+  position: fixed;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  z-index: 25;
   display: flex;
+  width: 40px;
+  height: 40px;
   align-items: center;
   justify-content: center;
+  padding: 0;
+  border: 1px solid var(--ui-cool-line);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(37, 69, 78, 0.96), var(--palette-plate));
+  box-shadow: 0 3px 0 rgba(2, 11, 21, 0.32), 0 6px 16px var(--ui-shadow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.11);
+  color: var(--palette-warm);
   cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
   touch-action: manipulation;
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
 }
 
-/* Fullscreen toggle (phones: hides the browser URL bar): same 36px round
-   chrome as #mute-button, parked left of it (top 8, right 52) so the two
-   never overlap. Created in code only when fullscreen is actually available
-   (main.ts skips it on iPhone Safari, which has no element fullscreen) —
-   absent button = graceful no-op. Same touch conventions as #mute-button. */
+#mute-button {
+  right: calc(8px + env(safe-area-inset-right, 0px));
+}
+
 #fullscreen-button {
-  position: fixed;
-  top: 8px;
-  right: 52px;
-  z-index: 25;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  border: 1px solid var(--palette-super-border);
-  background: var(--palette-super-bg);
-  color: var(--palette-super-text);
-  font-size: 17px;
-  line-height: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  touch-action: manipulation;
-  -webkit-user-select: none;
-  user-select: none;
-  -webkit-touch-callout: none;
+  right: calc(56px + env(safe-area-inset-right, 0px));
+}
+
+@media (hover: hover) {
+  #join-play:hover,
+  #fire-button:hover {
+    filter: brightness(1.1);
+  }
+
+  #mute-button:hover,
+  #fullscreen-button:hover {
+    border-color: var(--palette-warm);
+    filter: brightness(1.12);
+  }
+}
+
+@media (pointer: coarse) {
+  .join-control--desktop {
+    display: none;
+  }
+
+  .join-control--touch {
+    display: block;
+  }
+}
+
+@media (max-width: 700px) {
+  #hud-score-block {
+    top: calc(74px + env(safe-area-inset-top, 0px));
+    right: calc(8px + env(safe-area-inset-right, 0px));
+    max-width: 132px;
+  }
+
+  #hud-status {
+    max-width: 128px;
+  }
+
+  #hud-killfeed {
+    top: calc(150px + env(safe-area-inset-top, 0px));
+    max-width: min(210px, 58vw);
+  }
+}
+
+@media (max-width: 480px) {
+  #hud-info {
+    padding: 7px 9px;
+  }
+
+  #hud-hearts {
+    gap: 2px;
+    padding: 5px 6px;
+  }
+
+  #hud-hearts .heart {
+    min-width: 17px;
+    font-size: 19px;
+  }
+
+  #fire-button {
+    right: calc(28px + env(safe-area-inset-right, 0px));
+    width: 82px;
+    height: 82px;
+  }
+
+  #join-overlay {
+    gap: 8px;
+    padding: 20px 19px 17px;
+  }
+}
+
+@media (max-height: 540px) {
+  #join-overlay {
+    max-height: calc(100vh - 24px);
+    max-height: calc(100dvh - 24px);
+    gap: 7px;
+    padding-top: 17px;
+    padding-bottom: 15px;
+  }
+
+  #join-subtitle {
+    margin-bottom: 0;
+  }
+
+  #join-controls {
+    margin-top: 3px;
+    padding-top: 8px;
+  }
+
+  #joystick {
+    bottom: calc(21px + env(safe-area-inset-bottom, 0px));
+  }
+
+  #fire-button {
+    bottom: calc(37px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (max-width: 360px) {
+  #hud-hearts {
+    gap: 1px;
+  }
+
+  #hud-hearts .heart {
+    min-width: 15px;
+    font-size: 17px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #join-play,
+  #fire-button,
+  #mute-button,
+  #fullscreen-button {
+    transition: none;
+    animation: none;
+  }
 }

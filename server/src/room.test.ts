@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Client } from "colyseus";
 import { SchemaSerializer } from "colyseus";
 import {
+  ARENA_LAYOUT,
   BALL_HIT_PLAYER_MESSAGE,
   BALL_MUZZLE_OFFSET,
   BALL_TORSO_OFFSET,
@@ -42,6 +43,19 @@ import {
 } from "./hits.js";
 import { ArenaRoom, SERVER_OBSTACLES } from "./rooms/ArenaRoom.js";
 import type { PlayerState } from "./state.js";
+
+type TestPlatform = (typeof SERVER_PLATFORMS)[number];
+
+// Outward distance is measured from the platform face toward the ramp foot;
+// lateral distance is measured across the slab from its centerline.
+function rampPoint(platform: TestPlatform, outward: number, lateral = 0): readonly [number, number] {
+  switch (platform.rampSide) {
+    case "+z": return [platform.x + lateral, platform.z + platform.hz + outward];
+    case "-z": return [platform.x + lateral, platform.z - platform.hz - outward];
+    case "+x": return [platform.x + platform.hx + outward, platform.z + lateral];
+    case "-x": return [platform.x - platform.hx - outward, platform.z + lateral];
+  }
+}
 
 function fakeClient(sessionId: string): Client {
   return {
@@ -342,12 +356,46 @@ describe("round loop: score-or-timer end, respawn, clean reset", () => {
     expect(respawned?.superBuff).toBe(false);
     expect(respawned?.reloadUntil).toBe(0);
     // Deterministic spawn cycle, invuln counted from the respawn moment.
-    const spawn = getSpawnForIndex(cursorBefore % MAX_PLAYERS);
+    const spawn = getSpawnForIndex(cursorBefore);
     expect(respawned?.x).toBeCloseTo(spawn.x, 9);
     expect(respawned?.z).toBeCloseTo(spawn.z, 9);
     const respawnedAt = (respawned?.invulnUntil ?? 0) - INVULN_MS;
     expect(respawnedAt).toBeGreaterThanOrEqual(fireNow);
     expect(respawnedAt).toBeLessThanOrEqual(room.testNow ?? 0);
+  });
+
+  it("uses spawn markers beyond room capacity when respawning", async () => {
+    const room = new ArenaRoom();
+    room.testNow = 0;
+    await room.onCreate();
+    await joinRoom(room, "extra-spawn", "Extra");
+    const player = getPlayer(room, "extra-spawn");
+    expect(player).toBeDefined();
+    if (player === undefined) return;
+
+    const originalCount = ARENA_LAYOUT.spawns.length;
+    const extra = { x: 0, z: 0 };
+    ARENA_LAYOUT.spawns.push(extra);
+    try {
+      const internals = room as unknown as {
+        spawnCursor: number;
+        respawnAt: Map<string, number>;
+        tickRespawns(now: number): void;
+      };
+      internals.spawnCursor = originalCount;
+      player.alive = false;
+      internals.respawnAt.set(player.sessionId, 0);
+      internals.tickRespawns(100);
+      expect({ x: player.x, z: player.z }).toEqual(extra);
+      expect(internals.spawnCursor).toBe(originalCount + 1);
+
+      player.alive = false;
+      internals.respawnAt.set(player.sessionId, 0);
+      internals.tickRespawns(200);
+      expect({ x: player.x, z: player.z }).toEqual(ARENA_LAYOUT.spawns[0]);
+    } finally {
+      ARENA_LAYOUT.spawns.pop();
+    }
   });
 
   it("single client fills bots and can start/finish a round vs bots", async () => {
@@ -581,8 +629,8 @@ describe("R2 muzzle sync: spawn leaves the torso along aim", () => {
     if (platform === undefined) {
       throw new Error("no server platform defined");
     }
-    // Stand the shooter on the first platform top (2.6): derived body-center
-    // is 3.7, so spawn y = 4.0 with no client elevation sent.
+    // Stand on the configured platform top; omitted elevation derives from
+    // that top rather than a former hardcoded map height.
     shooter.x = platform.x;
     shooter.z = platform.z;
     fireAs(room, "s1", { power01: 1, yaw: 0.4, pitch: 0.2, super: false });
@@ -592,7 +640,6 @@ describe("R2 muzzle sync: spawn leaves the torso along aim", () => {
       spawnedY = ball.y;
     });
     expect(spawnedY).toBeCloseTo(platform.topY + BODY_CENTER_Y + BALL_TORSO_OFFSET, 10);
-    expect(spawnedY).toBeCloseTo(4.0, 10);
   });
 
   it("bot path (6-arg spawnBall) derives elevation like missing throwerY", async () => {
@@ -609,7 +656,7 @@ describe("R2 muzzle sync: spawn leaves the torso along aim", () => {
     const now = room.testNow ?? 0;
     const ball = room.spawnBall(shooter, 1, 0.4, 0.2, false, now);
     expect(ball).not.toBe(null);
-    expect(ball?.y).toBeCloseTo(4.0, 10);
+    expect(ball?.y).toBeCloseTo(platform.topY + BODY_CENTER_Y + BALL_TORSO_OFFSET, 10);
   });
 
   it("insane throwerY falls back to the derived footprint elevation", async () => {
@@ -1089,25 +1136,33 @@ describe("server movement collision (humans + bots stop/slide, never pass)", () 
   it("platform sheer sides block, the ramp side stays walkable", async () => {
     const room = await playingRoom();
     godmode(room);
+    const platform = SERVER_PLATFORMS.find((entry) => entry.rampSide === "+z");
+    if (platform === undefined) throw new Error("missing +z platform");
     const player = getPlayer(room, "s1");
     if (player === undefined) {
       throw new Error("missing s1");
     }
-    player.x = 10;
-    player.z = -8.5;
+    player.x = platform.x - platform.hx - PLAYER_BODY_RADIUS - 1;
+    player.z = platform.z;
+    player.y = BODY_CENTER_Y;
     sendMove(room, "s1", 1, 0);
     for (let i = 0; i < 40; i += 1) {
       tick50(room);
     }
-    expect(getPlayer(room, "s1")?.x ?? 99).toBeLessThanOrEqual(12.1 + 1e-9);
-    // Ramp side (+z of platform 0): walks in past the open face plane (-6.8).
-    player.x = 13.8;
-    player.z = -6.0;
+    expect(getPlayer(room, "s1")?.x ?? 99).toBeLessThanOrEqual(
+      platform.x - platform.hx - PLAYER_BODY_RADIUS + 1e-9,
+    );
+    // The centerline crosses the configured +z ramp and reaches its top.
+    const [footX, footZ] = rampPoint(platform, rampRunForTop(platform.topY) + 0.4);
+    player.x = footX;
+    player.z = footZ;
+    player.y = BODY_CENTER_Y;
     sendMove(room, "s1", 0, -1);
-    for (let i = 0; i < 20; i += 1) {
+    for (let i = 0; i < 75 && player.z > platform.z + 0.2; i += 1) {
       tick50(room);
     }
-    expect(getPlayer(room, "s1")?.z ?? 0).toBeLessThan(-7.5);
+    expect(getPlayer(room, "s1")?.z ?? 0).toBeLessThan(platform.z + platform.hz);
+    expect(getPlayer(room, "s1")?.y ?? 0).toBeCloseTo(platform.topY + BODY_CENTER_Y, 1);
   });
 
   it("bots never penetrate solids (same resolver as humans)", async () => {
@@ -1166,7 +1221,7 @@ describe("server movement collision (humans + bots stop/slide, never pass)", () 
 // Stage 4d.3 central towers: the 4 blocks at +-4.8 double to topY 2.0
 // (mirrors client hy 1.0). Balls arcing over at y 1.0-2.0 now impact.
 describe("central towers (doubled topY intercepts mid-height shots)", () => {
-  it("doubles ONLY the central 4 obstacle tops (outer untouched)", () => {
+  it("uses the configured obstacle tops at central and outer blocks", () => {
     expect(SERVER_OBSTACLES).toHaveLength(8);
     const central = SERVER_OBSTACLES.filter((b) => Math.abs(b.x) === 4.8 && Math.abs(b.z) === 4.8);
     expect(central).toHaveLength(4);
@@ -1178,11 +1233,12 @@ describe("central towers (doubled topY intercepts mid-height shots)", () => {
     const outer = SERVER_OBSTACLES.filter((b) => !(Math.abs(b.x) === 4.8 && Math.abs(b.z) === 4.8));
     expect(outer).toHaveLength(4);
     for (const block of outer) {
-      expect(block.topY).toBe(0.8);
+      expect(block.topY).toBeGreaterThan(0);
+      expect(block.topY).toBeLessThan(2);
     }
-    // Positions mirror the client layout exactly (Arena.getObstacleLayout).
+    // The server references the live editor map, including moved outer blocks.
     expect(SERVER_OBSTACLES.map((b) => `${b.x},${b.z}`).sort()).toEqual(
-      ["4.8,4.8", "-4.8,4.8", "4.8,-4.8", "-4.8,-4.8", "10.8,0", "-10.8,0", "0,10.8", "0,-10.8"].sort(),
+      ARENA_LAYOUT.obstacles.map((b) => `${b.x},${b.z}`).sort(),
     );
   });
 
@@ -1501,10 +1557,11 @@ describe("server elevation (tower tops walkable, ground impenetrable)", () => {
     expect(getPlayer(room, "s1")?.x ?? 0).toBeGreaterThan(5.5);
   });
 
-  it("AC-A: ground walk through the ramp mismatch band is blocked at the face", async () => {
-    // Platform 4 (-x ramp, support band z in [12.7, 14.3]): z = 12.4 sits
-    // OUTSIDE the support band but INSIDE the old +radius admit band — the
-    // exact leak-1 geometry. Ground-level entry must clamp, never teleport.
+  it("AC-A: ground under a raised ramp stops at the solid platform face", async () => {
+    const platform = SERVER_PLATFORMS.find((entry) => entry.rampSide === "-x");
+    if (platform === undefined) throw new Error("missing -x platform");
+    // This is beside the visual slab but within capsule reach. The high slab
+    // clears the body; the solid platform face still stops the ground run.
     const room = await playingRoom();
     godmode(room);
     const solids = [...SERVER_OBSTACLES, ...SERVER_PLATFORMS];
@@ -1512,55 +1569,134 @@ describe("server elevation (tower tops walkable, ground impenetrable)", () => {
     if (player === undefined) {
       throw new Error("missing s1");
     }
-    player.x = 2.0;
-    player.z = 12.4;
-    player.y = 1.1;
+    player.x = platform.x - platform.hx - 1;
+    player.z = platform.z + platform.rampWidth / 2 + 0.25;
+    const laneZ = player.z;
+    player.y = BODY_CENTER_Y;
     sendMove(room, "s1", 1, 0);
     for (let i = 0; i < 40; i += 1) {
       tick50(room);
       expectOutsideSolids(room, solids, "s1");
-      expect(getPlayer(room, "s1")?.y ?? 99).toBeCloseTo(1.1, 9);
+      expect(getPlayer(room, "s1")?.y ?? 99).toBeCloseTo(BODY_CENTER_Y, 9);
     }
-    // Pinned at the expanded min-x face (3.5), y never left the ground.
-    expect(getPlayer(room, "s1")?.x ?? 99).toBeCloseTo(3.5, 9);
-    expect(getPlayer(room, "s1")?.z ?? 99).toBeCloseTo(12.4, 9);
+    expect(getPlayer(room, "s1")?.x ?? 99).toBeCloseTo(platform.x - platform.hx - PLAYER_BODY_RADIUS, 9);
+    expect(getPlayer(room, "s1")?.z ?? 99).toBeCloseTo(laneZ, 9);
   });
 
   it("AC-A: lateral walk into the ramp band edge does not teleport y", async () => {
-    // Northward walk at x = 2.0 meets the platform-4 ramp band edge
-    // (z = 12.7, surface 1.50m there) at ground level: the wedge side must
-    // hold XZ (no step-in) so y cannot jump 1.1 -> 2.6 in one tick.
+    const platform = SERVER_PLATFORMS.find((entry) => entry.rampSide === "-x");
+    if (platform === undefined) throw new Error("missing -x platform");
+    const [rampX] = rampPoint(platform, rampRunForTop(platform.topY) / 2);
+    // Halfway up the ramp the slab is too low for a 2m capsule, so lateral
+    // entry must stop at its side without a height jump.
     const room = await playingRoom();
     godmode(room);
     const player = getPlayer(room, "s1");
     if (player === undefined) {
       throw new Error("missing s1");
     }
-    player.x = 2.0;
-    player.z = 12.0;
-    player.y = 1.1;
+    player.x = rampX;
+    player.z = platform.z - platform.rampWidth / 2 - PLAYER_BODY_RADIUS - 0.5;
+    player.y = BODY_CENTER_Y;
     sendMove(room, "s1", 0, 1);
     for (let i = 0; i < 20; i += 1) {
       tick50(room);
-      expect(getPlayer(room, "s1")?.y ?? 99).toBeCloseTo(1.1, 9);
+      expect(getPlayer(room, "s1")?.y ?? 99).toBeCloseTo(BODY_CENTER_Y, 9);
     }
-    expect(getPlayer(room, "s1")?.z ?? 99).toBeLessThan(12.7);
-    expect(getPlayer(room, "s1")?.x ?? 99).toBeCloseTo(2.0, 9);
+    expect(getPlayer(room, "s1")?.z ?? 99).toBeLessThanOrEqual(
+      platform.z - platform.rampWidth / 2 - PLAYER_BODY_RADIUS + 1e-9,
+    );
+    expect(getPlayer(room, "s1")?.x ?? 99).toBeCloseTo(rampX, 9);
+  });
+
+  it("a grounded human runs across and along the high ramp underpass without snapping up", async () => {
+    const platform = SERVER_PLATFORMS.find((entry) => entry.rampSide === "+z" && entry.topY > 2.5);
+    if (platform === undefined) throw new Error("no tall +z ramp defined");
+    const room = await playingRoom();
+    const { shooter } = isolateDuel(room);
+    const [underX, underZ] = rampPoint(platform, 1);
+    shooter.x = platform.x - platform.rampWidth / 2 - PLAYER_BODY_RADIUS - 0.5;
+    shooter.z = underZ;
+    shooter.y = BODY_CENTER_Y;
+    sendMove(room, shooter.sessionId, 1, 0);
+    for (let i = 0; i < 10; i += 1) {
+      tick50(room);
+      expect(shooter.y).toBeCloseTo(BODY_CENTER_Y, 9);
+    }
+    expect(shooter.x).toBeGreaterThan(underX - 0.2);
+
+    sendMove(room, shooter.sessionId, 0, 1);
+    for (let i = 0; i < 6; i += 1) {
+      tick50(room);
+      expect(shooter.y).toBeCloseTo(BODY_CENTER_Y, 9);
+    }
+    expect(shooter.z).toBeGreaterThan(underZ + 0.9);
+
+    // Continuing downhill reaches a section where the 2m capsule cannot
+    // fit. The slab stops movement rather than lifting the fighter onto it.
+    for (let i = 0; i < 20; i += 1) {
+      tick50(room);
+      expect(shooter.y).toBeCloseTo(BODY_CENTER_Y, 9);
+    }
+    expect(shooter.z).toBeLessThan(platform.z + platform.hz + 4);
+  });
+
+  it("a bot follows the same raised-ramp underpass at ground height", async () => {
+    const platform = SERVER_PLATFORMS.find((entry) => entry.rampSide === "+z" && entry.topY > 2.5);
+    if (platform === undefined) throw new Error("no tall +z ramp defined");
+    const room = await playingRoom();
+    let bot: PlayerState | undefined;
+    room.state.players.forEach((candidate): void => {
+      if (candidate.isBot && bot === undefined) bot = candidate;
+    });
+    if (bot === undefined) throw new Error("room has no bot");
+    const [, underZ] = rampPoint(platform, 1);
+    bot.x = platform.x - platform.rampWidth / 2 - PLAYER_BODY_RADIUS - 0.25;
+    bot.z = underZ;
+    bot.y = BODY_CENTER_Y;
+    const brains = (room as unknown as { brains: Map<string, {
+      targetX: number; targetZ: number; retargetAt: number; nextFireAt: number; seed: number;
+    }> }).brains;
+    brains.set(bot.sessionId, {
+      targetX: platform.x + 2,
+      targetZ: underZ,
+      retargetAt: 1e15,
+      nextFireAt: 1e15,
+      seed: 1,
+    });
+    for (let i = 0; i < 20; i += 1) {
+      tick50(room);
+      expect(bot.y).toBeCloseTo(BODY_CENTER_Y, 9);
+    }
+    expect(bot.x).toBeGreaterThan(platform.x);
+    brains.set(bot.sessionId, {
+      targetX: bot.x,
+      targetZ: underZ + 4,
+      retargetAt: 1e15,
+      nextFireAt: 1e15,
+      seed: 1,
+    });
+    const beforeZ = bot.z;
+    for (let i = 0; i < 10; i += 1) {
+      tick50(room);
+      expect(bot.y).toBeCloseTo(BODY_CENTER_Y, 9);
+    }
+    expect(bot.z).toBeGreaterThan(beforeZ + 0.7);
   });
 
   it("AC-A control: a real ramp climb works end-to-end (no per-tick jumps)", async () => {
-    // From the platform-4 ramp foot (-5.0, 13.5) straight up the ramp band:
-    // feet track the slope (~0.06m/tick), the open face admits at height,
-    // and the walk ends on top — with no teleport on any single tick.
+    const platform = SERVER_PLATFORMS.find((entry) => entry.rampSide === "-x");
+    if (platform === undefined) throw new Error("missing -x platform");
+    const [footX, footZ] = rampPoint(platform, rampRunForTop(platform.topY) + 0.4);
     const room = await playingRoom();
     const { shooter } = isolateDuel(room);
-    shooter.x = -5.0;
-    shooter.z = 13.5;
+    shooter.x = footX;
+    shooter.z = footZ;
     shooter.y = 1.1;
     shooter.invulnUntil = 1e15;
     sendMove(room, shooter.sessionId, 1, 0);
     let prevY = 1.1;
-    for (let i = 0; i < 43; i += 1) {
+    for (let i = 0; i < 90 && shooter.x < platform.x - 0.2; i += 1) {
       tick50(room);
       const p = getPlayer(room, shooter.sessionId);
       if (p === undefined) {
@@ -1573,9 +1709,9 @@ describe("server elevation (tower tops walkable, ground impenetrable)", () => {
     if (top === undefined) {
       throw new Error("missing shooter");
     }
-    expect(top.x).toBeCloseTo(4.675, 1);
-    expect(top.z).toBeCloseTo(13.5, 9);
-    expect(top.y).toBeCloseTo(3.1, 2);
+    expect(top.x).toBeCloseTo(platform.x, 0);
+    expect(top.z).toBeCloseTo(platform.z, 9);
+    expect(top.y).toBeCloseTo(platform.topY + BODY_CENTER_Y, 2);
   });
 
   it("AC3: a ball at tower-top height damages the tower-top victim", async () => {
@@ -1678,21 +1814,25 @@ describe("server elevation (tower tops walkable, ground impenetrable)", () => {
 
   it("groundTopAt reads obstacle tops and ramp slopes", () => {
     expect(groundTopAt(4.8, 4.8)).toBeCloseTo(2.0, 10);
-    expect(groundTopAt(10.8, 0)).toBeCloseTo(0.8, 10);
+    const outer = SERVER_OBSTACLES.find((block) => Math.abs(block.x) !== 4.8 || Math.abs(block.z) !== 4.8);
+    if (outer === undefined) throw new Error("no outer block defined");
+    expect(groundTopAt(outer.x, outer.z)).toBeCloseTo(outer.topY, 10);
     expect(groundTopAt(0, 0)).toBe(0);
-    // Platform 0 (+z ramp, edge z = -7.3, run = topY / tan14).
     const platform = SERVER_PLATFORMS[0];
     if (platform === undefined) {
       throw new Error("no server platform defined");
     }
     const run = rampRunForTop(platform.topY);
-    expect(run).toBeGreaterThan(9);
-    expect(run).toBeLessThan(12);
-    expect(rampHeightAt(platform, platform.x, -7.3)).toBeCloseTo(platform.topY, 6);
-    expect(rampHeightAt(platform, platform.x, -7.3 + run / 2)).toBeCloseTo(platform.topY / 2, 6);
-    expect(rampHeightAt(platform, platform.x, -7.3 + run + 1)).toBe(0);
-    expect(rampHeightAt(platform, platform.x + 99, -4)).toBe(0);
-    expect(groundTopAt(platform.x, -7.3 + run / 2)).toBeCloseTo(platform.topY / 2, 6);
+    expect(run).toBeGreaterThan(platform.topY * 3);
+    expect(run).toBeLessThan(platform.topY * 5);
+    const [edgeX, edgeZ] = rampPoint(platform, 0);
+    const [middleX, middleZ] = rampPoint(platform, run / 2);
+    const [pastX, pastZ] = rampPoint(platform, run + 1);
+    expect(rampHeightAt(platform, edgeX, edgeZ)).toBeCloseTo(platform.topY, 6);
+    expect(rampHeightAt(platform, middleX, middleZ)).toBeCloseTo(platform.topY / 2, 6);
+    expect(rampHeightAt(platform, pastX, pastZ)).toBe(0);
+    expect(rampHeightAt(platform, platform.x + 99, platform.z)).toBe(0);
+    expect(groundTopAt(middleX, middleZ)).toBeCloseTo(platform.topY / 2, 6);
   });
 
   it("trampolineArcY launches at 1.1, apexes ~4.16, lands ~1.75s", () => {
@@ -1711,9 +1851,12 @@ describe("server elevation (tower tops walkable, ground impenetrable)", () => {
   });
 
   it("isOnTrampolinePad matches the two client pads", () => {
-    expect(isOnTrampolinePad(0, 4.2)).toBe(true);
-    expect(isOnTrampolinePad(0, -4.2)).toBe(true);
-    expect(isOnTrampolinePad(1.0, 4.2)).toBe(true);
+    expect(ARENA_LAYOUT.trampolines).toHaveLength(2);
+    for (const pad of ARENA_LAYOUT.trampolines) {
+      expect(isOnTrampolinePad(pad.x, pad.z)).toBe(true);
+      expect(isOnTrampolinePad(pad.x + pad.radius * 0.5, pad.z)).toBe(true);
+      expect(isOnTrampolinePad(pad.x + pad.radius + 0.1, pad.z)).toBe(false);
+    }
     expect(isOnTrampolinePad(5, 5)).toBe(false);
     expect(isOnTrampolinePad(Number.NaN, 0)).toBe(false);
   });
@@ -1939,79 +2082,52 @@ describe("bug round 4: ramp-foot re-entry, lane capture, recoil walk-back", () =
     return maxJump;
   }
 
-  it("P0 (+z ramp): walk-around, foot climb, platform center", async () => {
-    const room = await playingRoom();
-    const { s1 } = parkDuel(room);
-    s1.x = 13.8;
-    s1.z = -11.2;
-    s1.y = BODY_CENTER_Y;
-    const maxJump = drivePath(room, "s1", [
-      [16.6, -11.2],
-      [16.6, 4.3],
-      [13.8, 4.3],
-      [13.8, -8.5],
-    ]);
-    expect(maxJump).toBeLessThan(0.3);
-    const after = getPlayer(room, "s1");
-    expect(Math.hypot((after?.x ?? 99) - 13.8, (after?.z ?? 99) + 8.5)).toBeLessThan(0.6);
-    expect(after?.y ?? 0).toBeCloseTo(2.6 + BODY_CENTER_Y, 1);
-  });
+  function aroundToFoot(platform: TestPlatform): {
+    start: readonly [number, number];
+    waypoints: ReadonlyArray<readonly [number, number]>;
+  } {
+    const run = rampRunForTop(platform.topY);
+    const foot = rampPoint(platform, run + 0.7);
+    const sideGap = PLAYER_BODY_RADIUS + 1.5;
+    switch (platform.rampSide) {
+      case "+z": {
+        const rear = platform.z - platform.hz - PLAYER_BODY_RADIUS - 0.2;
+        const side = platform.x + platform.hx + sideGap;
+        return { start: [platform.x, rear], waypoints: [[side, rear], [side, foot[1]], foot, [platform.x, platform.z]] };
+      }
+      case "-z": {
+        const rear = platform.z + platform.hz + PLAYER_BODY_RADIUS + 0.2;
+        const side = platform.x - platform.hx - sideGap;
+        return { start: [platform.x, rear], waypoints: [[side, rear], [side, foot[1]], foot, [platform.x, platform.z]] };
+      }
+      case "+x": {
+        const rear = platform.x - platform.hx - PLAYER_BODY_RADIUS - 0.2;
+        const side = platform.z + platform.hz + sideGap;
+        return { start: [rear, platform.z], waypoints: [[rear, side], [foot[0], side], foot, [platform.x, platform.z]] };
+      }
+      case "-x": {
+        const rear = platform.x + platform.hx + PLAYER_BODY_RADIUS + 0.2;
+        const side = platform.z - platform.hz - sideGap;
+        return { start: [rear, platform.z], waypoints: [[rear, side], [foot[0], side], foot, [platform.x, platform.z]] };
+      }
+    }
+  }
 
-  it("P1 (-z ramp): walk-around past the outer block, foot climb, center", async () => {
-    const room = await playingRoom();
-    const { s1 } = parkDuel(room);
-    s1.x = -13.5;
-    s1.z = 12.6;
-    s1.y = BODY_CENTER_Y;
-    const maxJump = drivePath(room, "s1", [
-      [-8.0, 12.6],
-      [-8.0, 1.5],
-      [-13.5, 1.5],
-      [-13.5, 10.0],
-    ]);
-    expect(maxJump).toBeLessThan(0.3);
-    const after = getPlayer(room, "s1");
-    expect(Math.hypot((after?.x ?? 99) + 13.5, (after?.z ?? 99) - 10.0)).toBeLessThan(0.6);
-    expect(after?.y ?? 0).toBeCloseTo(1.8 + BODY_CENTER_Y, 1);
-  });
-
-  it("P2 (+x ramp): walk-around threading the outer block, foot climb, center", async () => {
-    const room = await playingRoom();
-    const { s1 } = parkDuel(room);
-    s1.x = -14.5;
-    s1.z = -9.5;
-    s1.y = BODY_CENTER_Y;
-    const maxJump = drivePath(room, "s1", [
-      [-14.5, -6.4],
-      [0, -6.4],
-      [0, -8.2],
-      [-2.0, -8.2],
-      [-2.0, -9.5],
-      [-11.5, -9.5],
-    ]);
-    expect(maxJump).toBeLessThan(0.3);
-    const after = getPlayer(room, "s1");
-    expect(Math.hypot((after?.x ?? 99) + 11.5, (after?.z ?? 99) + 9.5)).toBeLessThan(0.6);
-    expect(after?.y ?? 0).toBeCloseTo(2.2 + BODY_CENTER_Y, 1);
-  });
-
-  it("P3 (-x ramp): walk-around south of the outer block, foot climb, center", async () => {
-    const room = await playingRoom();
-    const { s1 } = parkDuel(room);
-    s1.x = 7.6;
-    s1.z = 13.5;
-    s1.y = BODY_CENTER_Y;
-    const maxJump = drivePath(room, "s1", [
-      [7.6, 8.2],
-      [-5.2, 8.2],
-      [-5.2, 13.5],
-      [5.0, 13.5],
-    ]);
-    expect(maxJump).toBeLessThan(0.3);
-    const after = getPlayer(room, "s1");
-    expect(Math.hypot((after?.x ?? 99) - 5.0, (after?.z ?? 99) - 13.5)).toBeLessThan(0.6);
-    expect(after?.y ?? 0).toBeCloseTo(2.0 + BODY_CENTER_Y, 1);
-  });
+  for (const platform of SERVER_PLATFORMS) {
+    it(`${platform.rampSide} ramp: walk around the sheer face, climb from the foot, reach the center`, async () => {
+      const room = await playingRoom();
+      const { s1 } = parkDuel(room);
+      const route = aroundToFoot(platform);
+      s1.x = route.start[0];
+      s1.z = route.start[1];
+      s1.y = BODY_CENTER_Y;
+      const maxJump = drivePath(room, "s1", route.waypoints);
+      expect(maxJump).toBeLessThan(0.3);
+      const after = getPlayer(room, "s1");
+      expect(Math.hypot((after?.x ?? 99) - platform.x, (after?.z ?? 99) - platform.z)).toBeLessThan(0.6);
+      expect(after?.y ?? 0).toBeCloseTo(platform.topY + BODY_CENTER_Y, 1);
+    });
+  }
 
   it("a recoil-shoved off-lane drifter is re-laned at the face, climbs to top", async () => {
     // P0 centerline near the face at slope height. Recoil/knockback shoves
@@ -2019,26 +2135,30 @@ describe("bug round 4: ramp-foot re-entry, lane capture, recoil walk-back", () =
     // stale climb height — exactly the state the lane capture admits.
     const room = await playingRoom();
     const { s1 } = parkDuel(room);
-    s1.x = 14.5;
-    s1.z = -6.6;
-    s1.y = 3.48;
+    const platform = SERVER_PLATFORMS.find((entry) => entry.rampSide === "+z");
+    if (platform === undefined) throw new Error("missing +z platform");
+    const face = platform.z + platform.hz;
+    s1.x = platform.x + platform.rampWidth / 2 - 0.3;
+    s1.z = face + 0.7;
+    s1.y = rampHeightAt(platform, s1.x, s1.z) + BODY_CENTER_Y;
+    const climbY = s1.y;
     // Shove 1: fire WEST (full) -> recoil EAST 0.8m, off the band, y kept.
-    fireAs(room, "s1", { power01: 1, yaw: Math.PI / 2, pitch: 0.1, super: false, throwerY: 3.48 });
-    expect(s1.x).toBeCloseTo(15.3, 2);
-    expect(s1.z).toBeCloseTo(-6.6, 9);
-    expect(s1.y).toBeCloseTo(3.48, 9);
+    fireAs(room, "s1", { power01: 1, yaw: Math.PI / 2, pitch: 0.1, super: false, throwerY: climbY });
+    expect(s1.x).toBeCloseTo(platform.x + platform.rampWidth / 2 + PLAYER_BODY_RADIUS, 2);
+    expect(s1.z).toBeCloseTo(face + 0.7, 9);
+    expect(s1.y).toBeCloseTo(climbY, 9);
     // Shove 2: fire SOUTH (weak) -> recoil NORTH 0.4m toward the face. The
     // off-corridor crossing is re-laned (x -> 14.8) instead of clamped.
     s1.reloadUntil = 0;
-    fireAs(room, "s1", { power01: 0.5, yaw: Math.PI, pitch: 0.1, super: false, throwerY: 3.48 });
-    expect(s1.x).toBeCloseTo(14.8, 1);
-    expect(s1.z).toBeCloseTo(-7.0, 1);
+    fireAs(room, "s1", { power01: 0.5, yaw: Math.PI, pitch: 0.1, super: false, throwerY: climbY });
+    expect(s1.x).toBeCloseTo(platform.x + platform.rampWidth / 2, 1);
+    expect(s1.z).toBeCloseTo(face + 0.3, 1);
     // Home to the platform center from the lane edge: no clamp, no drop.
-    const maxJump = drivePath(room, "s1", [[13.8, -8.5]]);
+    const maxJump = drivePath(room, "s1", [[platform.x, platform.z]]);
     expect(maxJump).toBeLessThan(0.3);
     const after = getPlayer(room, "s1");
-    expect(Math.hypot((after?.x ?? 99) - 13.8, (after?.z ?? 99) + 8.5)).toBeLessThan(0.6);
-    expect(after?.y ?? 0).toBeCloseTo(2.6 + BODY_CENTER_Y, 1);
+    expect(Math.hypot((after?.x ?? 99) - platform.x, (after?.z ?? 99) - platform.z)).toBeLessThan(0.6);
+    expect(after?.y ?? 0).toBeCloseTo(platform.topY + BODY_CENTER_Y, 1);
   });
 
   it("recoil off the sheer edge grounds the fighter, foot walk-back reaches the top", async () => {
@@ -2047,28 +2167,32 @@ describe("bug round 4: ramp-foot re-entry, lane capture, recoil walk-back", () =
     // ramp foot like a player would.
     const room = await playingRoom();
     const { s1 } = parkDuel(room);
-    s1.x = 15.0;
-    s1.z = -8.5;
-    s1.y = 2.6 + BODY_CENTER_Y;
+    const platform = SERVER_PLATFORMS.find((entry) => entry.rampSide === "+z");
+    if (platform === undefined) throw new Error("missing +z platform");
+    s1.x = platform.x + platform.hx - 0.1;
+    s1.z = platform.z;
+    s1.y = platform.topY + BODY_CENTER_Y;
     // Fire WEST (full) -> recoil EAST 0.8m off the edge (y preserved).
-    fireAs(room, "s1", { power01: 1, yaw: Math.PI / 2, pitch: 0.1, super: false, throwerY: 3.7 });
-    expect(s1.x).toBeCloseTo(15.8, 2);
-    expect(s1.y).toBeCloseTo(3.7, 9);
+    fireAs(room, "s1", { power01: 1, yaw: Math.PI / 2, pitch: 0.1, super: false, throwerY: s1.y });
+    expect(s1.x).toBeCloseTo(platform.x + platform.hx + 0.7, 2);
+    expect(s1.y).toBeCloseTo(platform.topY + BODY_CENTER_Y, 9);
     // Next tick the support drops them to the ground beside the platform.
     sendDrive(room, "s1", 0, 0);
     tickDrive(room);
     expect(s1.y).toBeCloseTo(BODY_CENTER_Y, 9);
     // Walk back: clear the corner, north past the foot, climb the centerline.
+    const side = platform.x + platform.hx + PLAYER_BODY_RADIUS + 1.5;
+    const foot = rampPoint(platform, rampRunForTop(platform.topY) + 0.7);
     const maxJump = drivePath(room, "s1", [
-      [16.6, -8.5],
-      [16.6, 4.3],
-      [13.8, 4.3],
-      [13.8, -8.5],
+      [side, platform.z],
+      [side, foot[1]],
+      foot,
+      [platform.x, platform.z],
     ]);
     expect(maxJump).toBeLessThan(0.3);
     const after = getPlayer(room, "s1");
-    expect(Math.hypot((after?.x ?? 99) - 13.8, (after?.z ?? 99) + 8.5)).toBeLessThan(0.6);
-    expect(after?.y ?? 0).toBeCloseTo(2.6 + BODY_CENTER_Y, 1);
+    expect(Math.hypot((after?.x ?? 99) - platform.x, (after?.z ?? 99) - platform.z)).toBeLessThan(0.6);
+    expect(after?.y ?? 0).toBeCloseTo(platform.topY + BODY_CENTER_Y, 1);
   });
 });
 
@@ -2359,46 +2483,21 @@ describe("bug round 6 BUG1: ramp-edge climb steps onto the top, all platforms", 
     topY: number;
   }
 
-  // Edge laterals sit inside the strict band (halfW - 0.15..0.25) so the
-  // S->A climb is in-lane; the A->B diagonal exits the strict band while the
-  // feet are still slope-high at outward ~0.3 (pre-fix drop + eject corner).
-  // B laterals sit inside band + body radius but outside the strict band, and
-  // inside the expanded footprint (no snap-up path, no teleport).
+  // Climb near the edge of each configured slab, then leave the lane
+  // diagonally into the platform's radius-expanded edge ring.
   function edgeClimbs(): EdgeClimb[] {
-    return [
-      {
-        name: "P0",
-        start: [14.65, 2.5],
-        nearTop: [14.65, -6.9],
-        across: [15.25, -7.35],
-        center: [13.8, -8.5],
-        topY: 2.6,
-      },
-      {
-        name: "P1",
-        start: [-12.85, 2.3],
-        nearTop: [-12.85, 8.6],
-        across: [-12.3, 9.05],
-        center: [-13.5, 10.0],
-        topY: 1.8,
-      },
-      {
-        name: "P2",
-        start: [-2.0, -8.75],
-        nearTop: [-9.7, -8.75],
-        across: [-10.15, -8.15],
-        center: [-11.5, -9.5],
-        topY: 2.2,
-      },
-      {
-        name: "P3",
-        start: [-3.3, 14.15],
-        nearTop: [3.6, 14.15],
-        across: [3.98, 14.7],
-        center: [5.0, 13.5],
-        topY: 2.0,
-      },
-    ];
+    return SERVER_PLATFORMS.map((platform, index) => {
+      const lateral = platform.rampWidth / 2 - 0.15;
+      const crossHalf = platform.rampSide.endsWith("z") ? platform.hx : platform.hz;
+      return {
+        name: `P${index}`,
+        start: rampPoint(platform, rampRunForTop(platform.topY) + 0.5, lateral),
+        nearTop: rampPoint(platform, 0.16, lateral),
+        across: rampPoint(platform, -0.1, crossHalf + 0.25),
+        center: [platform.x, platform.z] as const,
+        topY: platform.topY,
+      };
+    });
   }
 
   it("ramp-edge climb + diagonal top transition reaches the center with no drop", async () => {
@@ -2480,12 +2579,18 @@ describe("bug round 6 BUG2: walked on-top edge excursion + return stays free", (
   // footprint, inside the expanded ring) for platforms; the west ring for the
   // central towers. Starts are on top (feet = topY), the live steady state.
   function excursions(): Excursion[] {
-    const out: Excursion[] = [
-      { name: "P0", centerX: 13.8, centerZ: -8.5, topY: 2.6, edgeX: 15.1, edgeZ: -7.0 },
-      { name: "P1", centerX: -13.5, centerZ: 10.0, topY: 1.8, edgeX: -12.4, edgeZ: 8.7 },
-      { name: "P2", centerX: -11.5, centerZ: -9.5, topY: 2.2, edgeX: -10.0, edgeZ: -8.3 },
-      { name: "P3", centerX: 5.0, centerZ: 13.5, topY: 2.0, edgeX: 3.7, edgeZ: 14.6 },
-    ];
+    const out: Excursion[] = SERVER_PLATFORMS.map((platform, index) => {
+      const crossHalf = platform.rampSide.endsWith("z") ? platform.hx : platform.hz;
+      const [edgeX, edgeZ] = rampPoint(platform, 0.25, crossHalf + 0.25);
+      return {
+        name: `P${index}`,
+        centerX: platform.x,
+        centerZ: platform.z,
+        topY: platform.topY,
+        edgeX,
+        edgeZ,
+      };
+    });
     for (const block of SERVER_OBSTACLES) {
       if (Math.abs(block.x) === 4.8 && Math.abs(block.z) === 4.8) {
         out.push({

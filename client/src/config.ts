@@ -18,6 +18,11 @@ import {
   IDENTITY_REMOTES,
   NEUTRAL_WHITE_CSS,
 } from "./palette";
+import { ARENA_LAYOUT } from "./layout";
+import {
+  ARENA_HALF_SIZE as LAYOUT_ARENA_HALF_SIZE,
+  RAMP_SLOPE_DEG as LAYOUT_RAMP_SLOPE_DEG,
+} from "../../shared/arena-layout.mjs";
 
 // Third-person follow camera (Q9-A confirmed 2026-09-11; distance 4m since
 // Stage 4d.2, charge zoom ~3.2m held until the actual shot).
@@ -75,18 +80,21 @@ export const JOYSTICK_KNOB_OPACITY = 0.55;
 // Test-scene avatar movement. Map +20% (28m -> ~33.6m): half 14 -> 16.8,
 // spawn inset scaled proportionally (2 -> 2.4).
 export const MOVE_SPEED = 4.5;
-export const ARENA_HALF_SIZE = 16.8;
+export const ARENA_HALF_SIZE = LAYOUT_ARENA_HALF_SIZE;
 // Movement blending (ice/impulse fix): horizontal velocity is steered toward
 // the input target by at most ACCEL m/s per second instead of being hard-set
 // every frame, so ice sliding and knockback impulses survive and decay via
 // damping/friction. Ground stays snappy, ice redirects slowly (slippery).
 export const PLAYER_GROUND_ACCEL = 24;
-// Sticky ice (owner 1A): weak controllable slide — on ice the target speed
-// is cut to ICE_SPEED_MULT (~67% cut since Stage 4d.2: 0.5 -> 0.33, 1.5x
-// stronger slow) and steering is slow (ICE_ACCEL) but strong enough to
-// escape, so ice feels sticky, never a trap.
-export const PLAYER_ICE_ACCEL = 3.0;
-export const ICE_SPEED_MULT = 0.33;
+// Ice starts moving promptly under input, but releases/turns retain low-grip
+// momentum. Swamp keeps direct control and never uses either ice rate.
+export const PLAYER_ICE_ACCEL = 10.0;
+export const PLAYER_ICE_COAST_ACCEL = 2.0;
+// Small touch-stick noise counts as release for both ice target and braking.
+// Compared against normalized input magnitude before charge/speed scaling.
+export const ICE_INPUT_THRESHOLD = 0.06;
+export const ICE_SPEED_MULT = 0.65;
+export const SWAMP_SPEED_MULT = 0.22;
 
 // HUD placeholder round (QD3 hybrid; real loop lands in Stage 4).
 export const MAX_HEARTS = 4;
@@ -118,9 +126,8 @@ export const PHYSICS_MAX_ACCUMULATOR = 0.1;
 export const PLAYER_FRICTION = 0.7;
 export const PLAYER_RESTITUTION = 0.1;
 export const PLAYER_LINEAR_DAMPING = 2.5;
-// Ice/puddle friction inside the QT3-A 0.05-0.1 band; damping raised for
-// sticky ice (owner 1A) so the capsule slows to the halved target speed
-// instead of gliding forever — escapable via ICE_ACCEL steering.
+// Ice friction inside the QT3-A 0.05-0.1 band. Swamp uses ordinary grip and
+// clears planar velocity without input; it never opts into this ice setting.
 export const ICE_FRICTION = 0.07;
 export const ICE_LINEAR_DAMPING = 1.0;
 // Stage 4d.3 feedback (owner: impulse 10 cannot land the 2.0m towers —
@@ -156,17 +163,22 @@ export const TRAMPOLINE_TRIGGER_Y = 1.7;
 export const KNOCKBACK_IMPULSE = 9;
 
 // Stage 3 arena (QD2-A neon-warehouse, QD5-A 6-8 low symmetric blocks).
-export const OBSTACLE_COUNT = 8;
+export const OBSTACLE_COUNT = ARENA_LAYOUT.obstacles.length;
 // Playtest round (owner: sense of open space): perimeter walls halved 3 -> 1.5
 // so the wall top ends up roughly at the banner edge. All wall readers
 // (Arena buildWalls/buildColliders/neon strips, SceneManager lowBehindWall,
 // bannerSpot) derive from this constant, so they follow automatically.
 export const WALL_HEIGHT = 1.5;
 export const WALL_THICKNESS = 0.5;
-export const TRAMPOLINE_RADIUS = 1.2;
-export const SLIPPERY_RADIUS = 2.64;
-export const SPAWN_COUNT = 4;
-export const SPAWN_INSET = 2.4;
+// Legacy single-radius aliases remain for existing tuning/tests. The actual
+// collision queries use each editable zone's own radius from ARENA_LAYOUT.
+export const TRAMPOLINE_RADIUS = ARENA_LAYOUT.trampolines[0]?.radius ?? 0;
+export const ICE_RADIUS = ARENA_LAYOUT.iceZones[0]?.radius ?? 0;
+export const SWAMP_RADIUS = ARENA_LAYOUT.swampZones[0]?.radius ?? 0;
+// Ground decals affect movement only close to floor height; raised platforms,
+// ramp tops, and airborne fighters above a puddle keep ordinary handling.
+export const SURFACE_MAX_BODY_Y = 1.2;
+export const SPAWN_COUNT = ARENA_LAYOUT.spawns.length;
 
 // Power-up set A1 (speed x1.3 timed, shield 1 hit, impulse knockback).
 export const SPEED_MULTIPLIER = 1.3;
@@ -183,12 +195,14 @@ export const SHAKE_MAX_OFFSET = 0.25;
 export const SHAKE_DECAY = 3;
 export const HIT_FLASH_DURATION_S = 0.18;
 
-// Ads dressing (QA1-5A confirmed): 6 fence slots 512x256 + 1 banner 4x1m.
-// Owner drops fence-*.png/jpg + banner.png/jpg into client/assets/ads/
-// (synced to public/ads by scripts/sync-ads.mjs); placeholders are SVGs.
-export const FENCE_SLOT_COUNT = 6;
-export const FENCE_TEXTURE_WIDTH = 512;
-export const FENCE_TEXTURE_HEIGHT = 256;
+// Four small shop signs on the ramp platforms. The original owner
+// pictures keep their fence-1..3 names; no pictures remain on perimeter walls.
+export const SHOPFRONT_COUNT = 4;
+export const SHOP_SIGN_WIDTH_M = 1.55;
+export const SHOP_SIGN_HEIGHT_M = 0.82;
+export const SHOP_SIGN_OPACITY = 0.78;
+export const SHOP_SIGN_TEXTURE_WIDTH = 512;
+export const SHOP_SIGN_TEXTURE_HEIGHT = 256;
 export const BANNER_WIDTH_M = 4;
 export const BANNER_HEIGHT_M = 1;
 export const BANNER_TEXTURE_WIDTH = 512;
@@ -410,7 +424,7 @@ export const RECOIL_FULL_M = 0.8;
 // ramp on EXACTLY ONE side (rampSide); the other 3 sides are sheer walls the
 // capsule cannot climb. Ramp slope is RAMP_SLOPE_DEG (run = topY/tan) so the
 // capsule walks up with no jumping. rampWidth is the full slab width (m).
-export const RAMP_SLOPE_DEG = 14;
+export const RAMP_SLOPE_DEG = LAYOUT_RAMP_SLOPE_DEG;
 export interface PlatformFigureDef {
   x: number;
   z: number;
@@ -420,12 +434,7 @@ export interface PlatformFigureDef {
   rampSide: "+x" | "-x" | "+z" | "-z";
   rampWidth: number;
 }
-export const PLATFORM_FIGURES: readonly PlatformFigureDef[] = [
-  { x: 13.8, z: -8.5, hx: 1.2, hz: 1.2, topY: 2.6, rampSide: "+z", rampWidth: 2.0 },
-  { x: -13.5, z: 10.0, hx: 2.4, hz: 1.0, topY: 1.8, rampSide: "-z", rampWidth: 1.6 },
-  { x: -11.5, z: -9.5, hx: 1.4, hz: 1.4, topY: 2.2, rampSide: "+x", rampWidth: 1.8 },
-  { x: 5.0, z: 13.5, hx: 1.0, hz: 1.0, topY: 2.0, rampSide: "-x", rampWidth: 1.6 },
-] as const;
+export const PLATFORM_FIGURES: readonly PlatformFigureDef[] = ARENA_LAYOUT.platforms;
 export const RAMP_SLAB_THICKNESS = 0.2;
 // Platform cap plates sit this far below the figure top (Stage 4d.2
 // z-fighting fix): the cap top face must never be coplanar with the body

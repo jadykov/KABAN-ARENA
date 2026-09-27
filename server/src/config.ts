@@ -1,3 +1,18 @@
+import { readFileSync } from "node:fs";
+import {
+  ARENA_HALF_SIZE as LAYOUT_ARENA_HALF_SIZE,
+  RAMP_SLOPE_DEG as LAYOUT_RAMP_SLOPE_DEG,
+  validateArenaLayout,
+  type LayoutObstacle,
+  type LayoutPlatform,
+} from "../../shared/arena-layout.mjs";
+
+// The relative URL resolves to the same shared file from both src/config.ts
+// (tsx dev) and dist/config.js (compiled Node). Validate before room startup.
+export const ARENA_LAYOUT = validateArenaLayout(JSON.parse(
+  readFileSync(new URL("../../shared/arena-layout.json", import.meta.url), "utf8"),
+) as unknown);
+
 // Stage 4 authoritative-server tuning (single source of truth for the
 // server room; the client mirrors display-only copies in its config).
 // C2 round loop timings 3/3/2 confirmed 2026-09-11 (see MAP.md Stage 4).
@@ -13,8 +28,39 @@ export const MIN_TOTAL_PLAYERS = 3;
 export const PATCH_RATE_MS = 50; // 20 ticks/s (inputs-only 20-30/s band)
 export const SIM_TICK_MS = 50; // fixed server simulation step
 export const PLAYER_SPEED = 4.5; // mirrors client MOVE_SPEED
-export const ARENA_HALF_SIZE = 16.8; // mirrors client ARENA_HALF_SIZE (+20%)
-export const SPAWN_INSET = 2.4; // mirrors client SPAWN_INSET (scaled)
+// Ground-surface positions and radii come from the saved shared map. Swamp
+// cancels momentum immediately; ice keeps low-grip steering and coasting.
+export const SWAMP_SPEED_MULT = 0.22;
+export const SWAMP_RADIUS = ARENA_LAYOUT.swampZones[0]?.radius ?? 0;
+export const SWAMP_ZONES = ARENA_LAYOUT.swampZones;
+export const ICE_SPEED_MULT = 0.65;
+export const ICE_ACCEL = 10.0;
+export const ICE_COAST_ACCEL = 2.0;
+export const ICE_INPUT_THRESHOLD = 0.06; // mirrors client normalized input gate
+export const ICE_LINEAR_DAMPING = 1.0;
+export const ICE_RADIUS = ARENA_LAYOUT.iceZones[0]?.radius ?? 0;
+export const SURFACE_MAX_BODY_Y = 1.2; // mirrors client floor-surface gate
+export const ICE_ZONES = ARENA_LAYOUT.iceZones;
+
+function isInZones(x: number, z: number, zones: readonly { x: number; z: number; radius: number }[]): boolean {
+  for (let i = 0; i < zones.length; i += 1) {
+    const zone = zones[i];
+    if (zone === undefined) continue;
+    const dx = x - zone.x;
+    const dz = z - zone.z;
+    if (dx * dx + dz * dz <= zone.radius * zone.radius) {
+      return true;
+    }
+  }
+  return false;
+}
+export function isOnIce(x: number, z: number): boolean {
+  return isInZones(x, z, ICE_ZONES);
+}
+export function isOnSwamp(x: number, z: number): boolean {
+  return isInZones(x, z, SWAMP_ZONES);
+}
+export const ARENA_HALF_SIZE = LAYOUT_ARENA_HALF_SIZE;
 // Player body radius for server-side movement collision (mirrors the client
 // Rapier capsule radius 0.5 in World.ts): the authoritative XZ position is
 // the body CENTER, so solid faces stop it one radius out.
@@ -145,22 +191,9 @@ export const RECOIL_FULL_M = 0.8;
 // stays blocked like the client's solid platform box. rampWidth is also the
 // lateral extent of the server ramp-slope band (see hits.rampHeightAt).
 // RAMP_SLOPE_DEG mirrors client RAMP_SLOPE_DEG (run = topY / tan).
-export const RAMP_SLOPE_DEG = 14;
-export interface ServerPlatformDef {
-  x: number;
-  z: number;
-  hx: number;
-  hz: number;
-  topY: number;
-  rampSide: "+x" | "-x" | "+z" | "-z";
-  rampWidth: number;
-}
-export const SERVER_PLATFORMS: ReadonlyArray<ServerPlatformDef> = [
-  { x: 13.8, z: -8.5, hx: 1.2, hz: 1.2, topY: 2.6, rampSide: "+z", rampWidth: 2.0 },
-  { x: -13.5, z: 10.0, hx: 2.4, hz: 1.0, topY: 1.8, rampSide: "-z", rampWidth: 1.6 },
-  { x: -11.5, z: -9.5, hx: 1.4, hz: 1.4, topY: 2.2, rampSide: "+x", rampWidth: 1.8 },
-  { x: 5.0, z: 13.5, hx: 1.0, hz: 1.0, topY: 2.0, rampSide: "-x", rampWidth: 1.6 },
-];
+export const RAMP_SLOPE_DEG = LAYOUT_RAMP_SLOPE_DEG;
+export type ServerPlatformDef = LayoutPlatform;
+export const SERVER_PLATFORMS: ReadonlyArray<ServerPlatformDef> = ARENA_LAYOUT.platforms;
 // Super-core: center spawn every 45s, 15s life, blink last 3s, 1.7m pickup
 // (matches the bigger 0.8/0.4 visual), buffs NEXT shot only (consumed on
 // fire even on miss).
@@ -186,23 +219,8 @@ export const CENTER_ITEM_NAMES: Record<CenterItemKind, string> = {
 // client hy 1.0) — trampoline-only high ground. Balls arcing over at
 // y 1.0-2.0 now impact instead of flying through (intended gameplay change
 // — flag for playtest). The 4 OUTER blocks stay at topY 0.8.
-export interface ServerObstacleDef {
-  x: number;
-  z: number;
-  hx: number;
-  hz: number;
-  topY: number;
-}
-export const SERVER_OBSTACLES: ReadonlyArray<ServerObstacleDef> = [
-  { x: 4.8, z: 4.8, hx: 1, hz: 1, topY: 2.0 },
-  { x: -4.8, z: 4.8, hx: 1, hz: 1, topY: 2.0 },
-  { x: 4.8, z: -4.8, hx: 1, hz: 1, topY: 2.0 },
-  { x: -4.8, z: -4.8, hx: 1, hz: 1, topY: 2.0 },
-  { x: 10.8, z: 0, hx: 1.5, hz: 0.75, topY: 0.8 },
-  { x: -10.8, z: 0, hx: 1.5, hz: 0.75, topY: 0.8 },
-  { x: 0, z: 10.8, hx: 0.75, hz: 1.5, topY: 0.8 },
-  { x: 0, z: -10.8, hx: 0.75, hz: 1.5, topY: 0.8 },
-];
+export type ServerObstacleDef = LayoutObstacle;
+export const SERVER_OBSTACLES: ReadonlyArray<ServerObstacleDef> = ARENA_LAYOUT.obstacles;
 // R2 fire-pitch acceptance band (mirrors client CAMERA_PITCH_MIN/MAX):
 // down-aim from elevation (down to -0.41) must reach the ball spawn
 // unflattened — the old [-0.15, 0.9] literals clipped every downhill shot
@@ -220,11 +238,8 @@ export const FIRE_PITCH_MAX = 0.36;
 // BALL_GRAVITY 3.5). Full ground-to-ground flight lasts ~1.75s (tower-top
 // landing ~1.17s); TRAMPOLINE_MAX_AIR_S force-lands a stuck arc (the real
 // arc lands well inside the cap; the cap never fires in practice).
-export const TRAMPOLINE_SPOTS: ReadonlyArray<{ x: number; z: number }> = [
-  { x: 0, z: 4.2 },
-  { x: 0, z: -4.2 },
-];
-export const TRAMPOLINE_RADIUS = 1.2;
+export const TRAMPOLINE_SPOTS = ARENA_LAYOUT.trampolines;
+export const TRAMPOLINE_RADIUS = ARENA_LAYOUT.trampolines[0]?.radius ?? 0;
 export const TRAMPOLINE_IMPULSE = 13.5;
 export const TRAMPOLINE_AIR_DAMPING = 2.5;
 export const TRAMPOLINE_GRAVITY = 9.81;

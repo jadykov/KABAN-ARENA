@@ -191,7 +191,7 @@ async function boot(): Promise<void> {
   const hud = createHud(document.body);
   hud.setTimer(ROUND_SECONDS);
   hud.setScore(START_SCORE);
-  hud.setStatus("Watching live arena — pick a nick and press Play");
+  hud.setStatus("Spectating");
 
   // Stage 5 audio: procedural SFX engine (zero asset files) + DOM mute
   // toggle. Created in code like the FIRE button so index.html stays
@@ -201,11 +201,17 @@ async function boot(): Promise<void> {
   const sfx = createSfx();
   const muteButton = document.createElement("button");
   muteButton.id = "mute-button";
+  muteButton.type = "button";
   muteButton.title = "Toggle sound";
   muteButton.textContent = sfx.isMuted() ? "🔇" : "🔊";
+  muteButton.setAttribute("aria-label", sfx.isMuted() ? "Unmute sound" : "Mute sound");
+  muteButton.setAttribute("aria-pressed", String(sfx.isMuted()));
   muteButton.addEventListener("click", (): void => {
     sfx.unlock();
-    muteButton.textContent = sfx.toggleMuted() ? "🔇" : "🔊";
+    const muted = sfx.toggleMuted();
+    muteButton.textContent = muted ? "🔇" : "🔊";
+    muteButton.setAttribute("aria-label", muted ? "Unmute sound" : "Mute sound");
+    muteButton.setAttribute("aria-pressed", String(muted));
     // A focused button would re-trigger on Space (the charge key) — drop
     // focus immediately so gameplay keys stay gameplay keys.
     muteButton.blur();
@@ -221,14 +227,18 @@ async function boot(): Promise<void> {
   let fullscreenButton: HTMLButtonElement | null = null;
   const handleFullscreenChange = (): void => {
     if (fullscreenButton !== null) {
-      fullscreenButton.textContent = isFullscreenActive() ? "⤡" : "⛶";
+      const active = isFullscreenActive();
+      fullscreenButton.textContent = active ? "⤡" : "⛶";
+      fullscreenButton.setAttribute("aria-label", active ? "Exit fullscreen" : "Enter fullscreen");
     }
   };
   if (isFullscreenAvailable()) {
     fullscreenButton = document.createElement("button");
     fullscreenButton.id = "fullscreen-button";
+    fullscreenButton.type = "button";
     fullscreenButton.title = "Toggle fullscreen";
     fullscreenButton.textContent = isFullscreenActive() ? "⤡" : "⛶";
+    fullscreenButton.setAttribute("aria-label", isFullscreenActive() ? "Exit fullscreen" : "Enter fullscreen");
     fullscreenButton.addEventListener("click", (): void => {
       const el = document.documentElement as unknown as HTMLElement & WebkitFullscreenElement;
       const doc = document as unknown as Document & WebkitFullscreenDocument;
@@ -399,6 +409,32 @@ async function boot(): Promise<void> {
   // spectating, hides on welcome, reappears on disconnect for late join.
   const overlay = document.createElement("div");
   overlay.id = "join-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-labelledby", "join-title");
+
+  const brand = document.createElement("div");
+  brand.id = "join-brand";
+  const emblem = document.createElement("span");
+  emblem.id = "join-emblem";
+  emblem.textContent = "✦";
+  emblem.setAttribute("aria-hidden", "true");
+  const kicker = document.createElement("span");
+  kicker.id = "join-kicker";
+  kicker.textContent = "LIVE NIGHT MATCH";
+  brand.appendChild(emblem);
+  brand.appendChild(kicker);
+
+  const title = document.createElement("h1");
+  title.id = "join-title";
+  title.textContent = "KABAN ARENA";
+  const subtitle = document.createElement("p");
+  subtitle.id = "join-subtitle";
+  subtitle.textContent = "A little chaos under the stars.";
+
+  const nickLabel = document.createElement("label");
+  nickLabel.id = "join-nick-label";
+  nickLabel.htmlFor = "join-nick";
+  nickLabel.textContent = "YOUR NICKNAME";
   const nickInput = document.createElement("input");
   nickInput.id = "join-nick";
   nickInput.maxLength = 16;
@@ -406,16 +442,39 @@ async function boot(): Promise<void> {
   nickInput.autocomplete = "off";
   const playButton = document.createElement("button");
   playButton.id = "join-play";
+  playButton.type = "button";
   playButton.textContent = "Play";
+  const controls = document.createElement("div");
+  controls.id = "join-controls";
+  const controlsLabel = document.createElement("div");
+  controlsLabel.id = "join-controls-label";
+  controlsLabel.textContent = "HOW TO PLAY";
+  const desktopHint = document.createElement("p");
+  desktopHint.className = "join-control join-control--desktop";
+  desktopHint.textContent = "WASD to move · right drag to look. Hold click or Space to charge, release to throw.";
+  const touchHint = document.createElement("p");
+  touchHint.className = "join-control join-control--touch";
+  touchHint.textContent = "Left stick to move · drag right to look. Hold FIRE to aim and charge, release to throw.";
+  controls.appendChild(controlsLabel);
+  controls.appendChild(desktopHint);
+  controls.appendChild(touchHint);
+  overlay.appendChild(brand);
+  overlay.appendChild(title);
+  overlay.appendChild(subtitle);
+  overlay.appendChild(nickLabel);
   overlay.appendChild(nickInput);
   overlay.appendChild(playButton);
+  overlay.appendChild(controls);
   document.body.appendChild(overlay);
 
   // FIRE button (mobile) + Space (desktop): hitscan A trigger.
   // Hidden until the local player joins the fight (welcome).
   const fireButton = document.createElement("button");
   fireButton.id = "fire-button";
+  fireButton.type = "button";
   fireButton.textContent = "FIRE";
+  fireButton.title = "Hold to charge, release to throw";
+  fireButton.setAttribute("aria-label", "Hold to charge, release to throw");
   fireButton.style.display = "none";
   document.body.appendChild(fireButton);
 
@@ -479,6 +538,8 @@ async function boot(): Promise<void> {
       aimOverlay.setReload01(1);
       aimOverlay.hide();
       hideJoinOverlay();
+      nickInput.blur();
+      playButton.blur();
     },
     onSpectator: (sessionId): void => {
       void sessionId;

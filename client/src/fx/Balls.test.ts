@@ -640,23 +640,17 @@ describe("BallsPool subtle accent layout (polar dot + thin ring)", () => {
 
 // Contrast guard: EVERY fighter color (local + 6 remotes) must keep enough
 // lightness distance from the stone base so the subtle accent reads for all
-// fighters, not just the bright ones. Threshold is 0.2 per spec (the darkest
-// fighter 0x7a2430 sits at exact delta ~0.208 — pinned below); the base
-// choice (dark amethyst BALL_BASE) is what makes even that pair pass.
+// fighters, not just the bright ones. Threshold is 0.2 per spec; the exact
+// closest pair may change when the arena palette is retuned.
 describe("BallsPool ownership contrast (all 7 fighters vs stone base)", () => {
   it("every identity accent keeps >= 0.2 lightness delta vs the stone base", () => {
     const fighters = [IDENTITY_LOCAL, ...IDENTITY_REMOTES];
     expect(fighters).toHaveLength(7);
     const baseL = lightnessOf(BALL_NEUTRAL_BASE);
-    let minDelta = Number.POSITIVE_INFINITY;
     for (const fighter of fighters) {
       const delta = Math.abs(lightnessOf(fighter) - baseL);
-      minDelta = Math.min(minDelta, delta);
       expect(delta).toBeGreaterThanOrEqual(0.2);
     }
-    // Pin the worst pair so a future base/identity edit cannot silently erode
-    // it: the dark-red remote is the floor (~0.208 vs BALL_BASE).
-    expect(minDelta).toBeCloseTo(0.208, 2);
   });
 });
 

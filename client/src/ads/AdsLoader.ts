@@ -1,59 +1,102 @@
 import * as THREE from "three";
 import {
   ADS_PUBLIC_BASE_PATH,
-  ARENA_HALF_SIZE,
   BANNER_HEIGHT_M,
   BANNER_TEXTURE_HEIGHT,
   BANNER_TEXTURE_WIDTH,
   BANNER_WIDTH_M,
-  FENCE_SLOT_COUNT,
-  FENCE_TEXTURE_HEIGHT,
-  FENCE_TEXTURE_WIDTH,
+  PLATFORM_FIGURES,
+  SHOPFRONT_COUNT,
+  SHOP_SIGN_HEIGHT_M,
+  SHOP_SIGN_OPACITY,
+  SHOP_SIGN_TEXTURE_HEIGHT,
+  SHOP_SIGN_TEXTURE_WIDTH,
+  SHOP_SIGN_WIDTH_M,
   WALL_HEIGHT,
+  type PlatformFigureDef,
 } from "../config";
 import {
   ACCENT_AD_BANNER,
   ACCENT_AD_FENCE,
+  ACCENT_STRIP,
   BASE_AD_CANVAS,
   BASE_AD_FRAME,
+  BASE_CAP,
+  BASE_PLATFORM,
+  BASE_RAMP,
   NEUTRAL_WHITE,
 } from "../palette";
 
-// Re-exported for playtest checklists: fence slot count must match QA1-A.
-export const EXPECTED_FENCE_SLOTS = FENCE_SLOT_COUNT;
+type ShopBrand = "magnit" | "pyaterochka" | "krasnoe-beloe";
 
-export interface FenceSlotTransform {
+const SHOP_BRANDS: ReadonlyArray<{ id: ShopBrand; label: string; assetSlot: number; imageAspect: number }> = [
+  { id: "krasnoe-beloe", label: "Красное & Белое", assetSlot: 2, imageAspect: 600 / 337 },
+  { id: "krasnoe-beloe", label: "Красное & Белое", assetSlot: 2, imageAspect: 600 / 337 },
+  { id: "magnit", label: "Магнит", assetSlot: 3, imageAspect: 1200 / 630 },
+  { id: "pyaterochka", label: "Пятёрочка", assetSlot: 1, imageAspect: 1754 / 557 },
+];
+
+export interface ShopfrontTransform {
+  brand: ShopBrand;
+  label: string;
+  assetSlot: number;
+  platformIndex: number;
   x: number;
-  y: number;
   z: number;
   rotationY: number;
+  topY: number;
+  facadeWidth: number;
+  signWidth: number;
+  signHeight: number;
 }
 
-// Six fence slots (QA1-A), football-championship style on the inner walls:
-// two on north, two on south, one east, one west. 2x1m pictures (512x256).
-export function getFenceSlotTransforms(): FenceSlotTransform[] {
-  const half = ARENA_HALF_SIZE;
-  const face = half - 0.06;
-  const y = 1.2;
-  return [
-    { x: -5, y, z: -face, rotationY: 0 },
-    { x: 5, y, z: -face, rotationY: 0 },
-    { x: -5, y, z: face, rotationY: Math.PI },
-    { x: 5, y, z: face, rotationY: Math.PI },
-    { x: face, y, z: 0, rotationY: -Math.PI / 2 },
-    { x: -face, y, z: 0, rotationY: Math.PI / 2 },
-  ];
+function signDimensions(facadeWidth: number, topY: number, imageAspect: number): { width: number; height: number } {
+  const maxWidth = Math.min(SHOP_SIGN_WIDTH_M, facadeWidth * 0.72);
+  const maxHeight = SHOP_SIGN_HEIGHT_M * (topY / 3);
+  const width = Math.min(maxWidth, maxHeight * imageAspect);
+  return { width, height: width / imageAspect };
 }
 
-// Candidate static URLs per slot, in preference order: owner files first
-// (png/jpg dropped into client/assets/ads, synced to public/ads + restart),
-// committed SVG placeholder last (QA2-A/QA4-A, static per slot QA5-A).
-export function resolveFenceUrls(slotIndex: number, basePath: string = ADS_PUBLIC_BASE_PATH): string[] {
-  const slot = slotIndex + 1;
+// Brands belong to the four existing platform records. Moving a platform in
+// the editor moves its shop with it. A ramp runs along one axis; the shop uses
+// the inward-facing side on the other axis, leaving the ramp and landing clear.
+export function getShopfrontTransforms(
+  platforms: readonly PlatformFigureDef[] = PLATFORM_FIGURES,
+): ShopfrontTransform[] {
+  return platforms
+    .slice(0, SHOPFRONT_COUNT)
+    .map((platform, platformIndex) => {
+      const brand = SHOP_BRANDS[platformIndex];
+      if (brand === undefined) throw new Error("Missing shop brand");
+      const rampAlongZ = platform.rampSide.endsWith("z");
+      const inward = rampAlongZ
+        ? (platform.x > 0 ? -1 : 1)
+        : (platform.z > 0 ? -1 : 1);
+      const faceWidth = rampAlongZ ? platform.hz * 2 : platform.hx * 2;
+      const facadeWidth = Math.min(2.45, faceWidth * 0.8);
+      const sign = signDimensions(facadeWidth, platform.topY, brand.imageAspect);
+      return {
+        brand: brand.id,
+        label: brand.label,
+        assetSlot: brand.assetSlot,
+        platformIndex,
+        x: rampAlongZ ? platform.x + inward * (platform.hx + 0.015) : platform.x,
+        z: rampAlongZ ? platform.z : platform.z + inward * (platform.hz + 0.015),
+        rotationY: rampAlongZ ? inward * Math.PI / 2 : (inward > 0 ? 0 : Math.PI),
+        topY: platform.topY,
+        facadeWidth,
+        signWidth: sign.width,
+        signHeight: sign.height,
+      };
+    });
+}
+
+// A replacement PNG takes priority over the owner's softened JPEG. If both
+// are absent, draw a brand-specific canvas sign; generic fence SVGs are gone.
+export function resolveShopSignUrls(assetSlot: number, basePath: string = ADS_PUBLIC_BASE_PATH): string[] {
   return [
-    `${basePath}/fence-${slot}.png`,
-    `${basePath}/fence-${slot}.jpg`,
-    `${basePath}/fence-${slot}.svg`,
+    `${basePath}/fence-${assetSlot}.png`,
+    `${basePath}/fence-${assetSlot}.jpg`,
   ];
 }
 
@@ -65,8 +108,6 @@ export function resolveBannerUrls(basePath: string = ADS_PUBLIC_BASE_PATH): stri
   ];
 }
 
-// Canvas-generated fallback so fence + banner always render a picture even
-// when the owner has not dropped files yet (repo stays free of binaries).
 export function createPlaceholderTexture(
   label: string,
   width: number,
@@ -98,73 +139,166 @@ export function createPlaceholderTexture(
   return texture;
 }
 
-// Loads fence + banner pictures into the arena without breaking the perf
-// budget: 6 small planes + 1 banner plane, shared loader, textures capped
-// at 512px wide (QT1-A). load() never throws — every slot ends with either
-// the owner file or a generated placeholder.
+// Visual dressing only: four shopfronts on platform sides and the existing
+// center banner. No perimeter ad meshes and no added physics colliders.
 export class AdsManager {
   private readonly disposables: Array<{ dispose(): void }> = [];
   private readonly actors: THREE.Object3D[] = [];
-  private readonly fenceMaterials: THREE.MeshBasicMaterial[] = [];
+  private readonly shopSigns: Array<{
+    material: THREE.MeshBasicMaterial;
+    transform: ShopfrontTransform;
+    sign: THREE.Mesh;
+    frame: THREE.Mesh;
+  }> = [];
   private bannerMaterial: THREE.MeshBasicMaterial | null = null;
+  private generation = 0;
   private loaded = false;
 
-  public buildFrames(scene: THREE.Scene): void {
-    // Dark back frames for all fence slots in one InstancedMesh.
-    const frameGeometry = new THREE.BoxGeometry(2.2, 1.2, 0.06);
-    const frameMaterial = new THREE.MeshStandardMaterial({ color: BASE_AD_FRAME, roughness: 0.9 });
-    this.disposables.push(frameGeometry, frameMaterial);
-    const slots = getFenceSlotTransforms();
-    const frames = new THREE.InstancedMesh(frameGeometry, frameMaterial, slots.length);
-    const matrix = new THREE.Matrix4();
-    const quaternion = new THREE.Quaternion();
-    const up = new THREE.Vector3(0, 1, 0);
-    slots.forEach((slot, index) => {
-      quaternion.setFromAxisAngle(up, slot.rotationY);
-      matrix.compose(
-        new THREE.Vector3(slot.x, slot.y, slot.z),
-        quaternion,
-        new THREE.Vector3(1, 1, 1),
-      );
-      frames.setMatrixAt(index, matrix);
+  public buildVisuals(scene: THREE.Scene): void {
+    const plane = new THREE.PlaneGeometry(1, 1);
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    const facade = new THREE.MeshStandardMaterial({ color: BASE_PLATFORM, roughness: 0.94 });
+    const glazing = new THREE.MeshStandardMaterial({
+      color: BASE_AD_FRAME,
+      emissive: ACCENT_STRIP,
+      emissiveIntensity: 0.12,
+      roughness: 0.34,
+      metalness: 0.08,
     });
-    frames.instanceMatrix.needsUpdate = true;
-    scene.add(frames);
-    this.actors.push(frames);
+    const trim = new THREE.MeshStandardMaterial({ color: BASE_CAP, roughness: 0.72 });
+    const canopy = new THREE.MeshStandardMaterial({ color: BASE_RAMP, roughness: 0.82 });
+    const accent = new THREE.MeshStandardMaterial({ color: ACCENT_STRIP, roughness: 0.82 });
+    this.disposables.push(plane, box, facade, glazing, trim, canopy, accent);
 
-    // Picture planes (unlit MeshBasicMaterial: readable on phones in
-    // sunlight without spending lights; 6 draw calls, inside budget).
-    const pictureGeometry = new THREE.PlaneGeometry(2, 1);
-    this.disposables.push(pictureGeometry);
-    for (const slot of slots) {
-      const material = new THREE.MeshBasicMaterial({ color: NEUTRAL_WHITE });
-      this.disposables.push(material);
-      this.fenceMaterials.push(material);
-      const picture = new THREE.Mesh(pictureGeometry, material);
-      picture.position.set(slot.x, slot.y, slot.z);
-      picture.rotation.y = slot.rotationY;
-      // Nudge off the frame face to avoid z-fighting.
-      picture.translateZ(0.035);
-      scene.add(picture);
-      this.actors.push(picture);
+    // The four shops share five static materials. Store their world matrices
+    // once, then render each material in one batch; the live sign and its
+    // frame stay as individual meshes so image aspect changes still apply.
+    const staticMatrices = {
+      facade: [] as THREE.Matrix4[],
+      glazing: [] as THREE.Matrix4[],
+      trim: [] as THREE.Matrix4[],
+      canopy: [] as THREE.Matrix4[],
+      accent: [] as THREE.Matrix4[],
+    };
+    type StaticKind = keyof typeof staticMatrices;
+    const localPosition = new THREE.Vector3();
+    const localScale = new THREE.Vector3();
+    const localMatrix = new THREE.Matrix4();
+    const noRotation = new THREE.Quaternion();
+    const addStatic = (
+      kind: StaticKind, root: THREE.Group,
+      x: number, y: number, z: number, width: number, height: number, depth: number,
+    ): void => {
+      root.updateMatrix();
+      localPosition.set(x, y, z);
+      localScale.set(width, height, depth);
+      localMatrix.compose(localPosition, noRotation, localScale);
+      staticMatrices[kind].push(new THREE.Matrix4().multiplyMatrices(root.matrix, localMatrix));
+    };
+
+    const panel = (
+      root: THREE.Group, name: string, material: THREE.Material,
+      x: number, y: number, z: number, width: number, height: number,
+    ): THREE.Mesh => {
+      const mesh = new THREE.Mesh(plane, material);
+      mesh.name = name;
+      mesh.position.set(x, y, z);
+      mesh.scale.set(width, height, 1);
+      root.add(mesh);
+      return mesh;
+    };
+    const detail = (
+      root: THREE.Group, name: string, material: THREE.Material,
+      x: number, y: number, z: number, width: number, height: number, depth: number,
+    ): THREE.Mesh => {
+      const mesh = new THREE.Mesh(box, material);
+      mesh.name = name;
+      mesh.position.set(x, y, z);
+      mesh.scale.set(width, height, depth);
+      root.add(mesh);
+      return mesh;
+    };
+
+    for (const transform of getShopfrontTransforms()) {
+      const shop = new THREE.Group();
+      shop.name = `shopfront:${transform.platformIndex}:${transform.brand}`;
+      shop.position.set(transform.x, 0, transform.z);
+      shop.rotation.y = transform.rotationY;
+      const w = transform.facadeWidth;
+      const sy = transform.topY / 3;
+      const doorWidth = w * 0.34;
+      const windowWidth = w * 0.25;
+      const windowX = w * 0.31;
+
+      // Flush facade panel; the existing platform remains the solid wall.
+      addStatic("facade", shop, 0, 1.45 * sy, 0.025, w, 2.72 * sy, 1);
+      addStatic("glazing", shop, 0, 0.87 * sy, 0.045, doorWidth, 1.48 * sy, 1);
+      addStatic("glazing", shop, -windowX, 0.93 * sy, 0.047, windowWidth, 1.22 * sy, 1);
+      addStatic("glazing", shop, windowX, 0.93 * sy, 0.047, windowWidth, 1.22 * sy, 1);
+      addStatic("trim", shop, -doorWidth / 2, 0.87 * sy, 0.06, 0.035, 1.5 * sy, 0.025);
+      addStatic("trim", shop, doorWidth / 2, 0.87 * sy, 0.06, 0.035, 1.5 * sy, 0.025);
+      addStatic("trim", shop, doorWidth * 0.32, 0.82 * sy, 0.07, 0.035, 0.12 * sy, 0.025);
+      addStatic("trim", shop, 0, 0.10 * sy, 0.07, w * 0.92, 0.045 * sy, 0.10);
+
+      // Compact projecting canopy with a muted red front edge. It ends well
+      // before the adjacent ramp face; every piece remains visual-only.
+      addStatic("canopy", shop, 0, 1.99 * sy, 0.21, w * 1.03, 0.10 * sy, 0.42);
+      addStatic("accent", shop, 0, 1.93 * sy, 0.425, w * 1.03, 0.045 * sy, 0.035);
+
+      const signMaterial = new THREE.MeshBasicMaterial({
+        color: NEUTRAL_WHITE,
+        transparent: true,
+        opacity: SHOP_SIGN_OPACITY,
+        depthWrite: false,
+      });
+      this.disposables.push(signMaterial);
+      const frame = detail(shop, "sign-frame", trim, 0, 2.50 * sy, 0.075,
+        transform.signWidth + 0.10, transform.signHeight + 0.08 * sy, 0.045);
+      const sign = panel(shop, "sign", signMaterial, 0, 2.50 * sy, 0.105,
+        transform.signWidth, transform.signHeight);
+      this.shopSigns.push({ material: signMaterial, transform, sign, frame });
+
+      scene.add(shop);
+      this.actors.push(shop);
     }
 
-    // Hanging banner 4x1m at the arena center (QA3-A), double-sided.
+    const batches: ReadonlyArray<{
+      kind: StaticKind; geometry: THREE.BufferGeometry; material: THREE.Material;
+    }> = [
+      { kind: "facade", geometry: plane, material: facade },
+      { kind: "glazing", geometry: plane, material: glazing },
+      { kind: "trim", geometry: box, material: trim },
+      { kind: "canopy", geometry: box, material: canopy },
+      { kind: "accent", geometry: box, material: accent },
+    ];
+    for (const { kind, geometry, material } of batches) {
+      const matrices = staticMatrices[kind];
+      const batch = new THREE.InstancedMesh(geometry, material, matrices.length);
+      batch.name = `shop-static:${kind}`;
+      matrices.forEach((matrix, index) => batch.setMatrixAt(index, matrix));
+      batch.instanceMatrix.needsUpdate = true;
+      batch.computeBoundingSphere();
+      scene.add(batch);
+      this.actors.push(batch);
+      this.disposables.push(batch);
+    }
+
+    // Keep the central KABAN ARENA banner and slim hanging rig.
     const bannerGeometry = new THREE.PlaneGeometry(BANNER_WIDTH_M, BANNER_HEIGHT_M);
-    this.disposables.push(bannerGeometry);
     const bannerMat = new THREE.MeshBasicMaterial({ color: NEUTRAL_WHITE, side: THREE.DoubleSide });
-    this.disposables.push(bannerMat);
+    this.disposables.push(bannerGeometry, bannerMat);
     this.bannerMaterial = bannerMat;
     const banner = new THREE.Mesh(bannerGeometry, bannerMat);
+    banner.name = "arena-banner";
     banner.position.set(0, WALL_HEIGHT + 1.2, 0);
     scene.add(banner);
     this.actors.push(banner);
 
-    // Slim rig bar above the banner suggesting the hang.
     const barGeometry = new THREE.BoxGeometry(BANNER_WIDTH_M + 0.3, 0.08, 0.08);
     const barMaterial = new THREE.MeshStandardMaterial({ color: BASE_AD_FRAME, roughness: 0.9 });
     this.disposables.push(barGeometry, barMaterial);
     const bar = new THREE.Mesh(barGeometry, barMaterial);
+    bar.name = "arena-banner-rig";
     bar.position.set(0, WALL_HEIGHT + 1.75, 0);
     scene.add(bar);
     this.actors.push(bar);
@@ -174,30 +308,44 @@ export class AdsManager {
     return this.loaded;
   }
 
-  public get fenceCount(): number {
-    return this.fenceMaterials.length;
+  public get shopfrontCount(): number {
+    return this.shopSigns.length;
   }
 
   public async load(basePath: string = ADS_PUBLIC_BASE_PATH): Promise<void> {
     const loader = new THREE.TextureLoader();
-    const slots = getFenceSlotTransforms();
-    for (let i = 0; i < slots.length && i < this.fenceMaterials.length; i += 1) {
-      const material = this.fenceMaterials[i];
-      if (material === undefined) {
-        continue;
+    const generation = this.generation;
+    const shopTextures = new Map<number, THREE.Texture | null>();
+    for (const { material, transform, sign, frame } of this.shopSigns) {
+      let texture = shopTextures.get(transform.assetSlot) ?? null;
+      if (!shopTextures.has(transform.assetSlot)) {
+        texture = await AdsManager.loadFirstAvailable(
+          loader,
+          resolveShopSignUrls(transform.assetSlot, basePath),
+          transform.label,
+          SHOP_SIGN_TEXTURE_WIDTH,
+          SHOP_SIGN_TEXTURE_HEIGHT,
+          ACCENT_AD_FENCE,
+        );
+        if (generation !== this.generation) {
+          texture?.dispose();
+          return;
+        }
+        shopTextures.set(transform.assetSlot, texture);
+        if (texture !== null) this.disposables.push(texture);
       }
-      const texture = await AdsManager.loadFirstAvailable(
-        loader,
-        resolveFenceUrls(i, basePath),
-        `AD ${i + 1}`,
-        FENCE_TEXTURE_WIDTH,
-        FENCE_TEXTURE_HEIGHT,
-        ACCENT_AD_FENCE,
-      );
       if (texture !== null) {
-        this.disposables.push(texture);
         material.map = texture;
         material.needsUpdate = true;
+        const image = texture.image as { width?: unknown; height?: unknown } | undefined;
+        const width = image?.width;
+        const height = image?.height;
+        if (typeof width === "number" && Number.isFinite(width) && width > 0
+          && typeof height === "number" && Number.isFinite(height) && height > 0) {
+          const size = signDimensions(transform.facadeWidth, transform.topY, width / height);
+          sign.scale.set(size.width, size.height, 1);
+          frame.scale.set(size.width + 0.10, size.height + 0.08 * (transform.topY / 3), 0.045);
+        }
       }
     }
     if (this.bannerMaterial !== null) {
@@ -209,6 +357,10 @@ export class AdsManager {
         BANNER_TEXTURE_HEIGHT,
         ACCENT_AD_BANNER,
       );
+      if (generation !== this.generation) {
+        bannerTexture?.dispose();
+        return;
+      }
       if (bannerTexture !== null) {
         this.disposables.push(bannerTexture);
         this.bannerMaterial.map = bannerTexture;
@@ -243,11 +395,12 @@ export class AdsManager {
   }
 
   public dispose(scene: THREE.Scene): void {
+    this.generation += 1;
     for (const actor of this.actors) {
       scene.remove(actor);
     }
     this.actors.length = 0;
-    this.fenceMaterials.length = 0;
+    this.shopSigns.length = 0;
     this.bannerMaterial = null;
     for (const tracked of this.disposables) {
       tracked.dispose();

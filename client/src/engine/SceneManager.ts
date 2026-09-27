@@ -1,8 +1,9 @@
 import * as THREE from "three";
-import { AdsManager, getFenceSlotTransforms } from "../ads/AdsLoader";
+import { AdsManager, getShopfrontTransforms } from "../ads/AdsLoader";
 import { FOOTSTEP_MIN_SPEED01 } from "../audio/Sfx";
 import {
   ARENA_HALF_SIZE,
+  AIRBORNE_VY_THRESHOLD,
   AVATAR_BODY_RADIUS,
   AVATAR_CHARGE_OPACITY,
   CAMERA_CHARGE_DISTANCE,
@@ -29,6 +30,7 @@ import {
   DEATH_BURST_UP,
   DEATH_BURST_YELLOW,
   ICE_SPEED_MULT,
+  ICE_INPUT_THRESHOLD,
   IDLE_RECENTER_MOVE_MAX,
   KNOCKBACK_IMPULSE,
   LOCAL_AVATAR_COLOR,
@@ -37,6 +39,7 @@ import {
   PARTICLE_BURST_COUNT,
   PLAYER_GROUND_ACCEL,
   PLAYER_ICE_ACCEL,
+  PLAYER_ICE_COAST_ACCEL,
   RECOIL_FULL_M,
   RECOIL_RECONCILE_GRACE_S,
   RECOIL_WEAK_M,
@@ -60,6 +63,8 @@ import {
   SELF_RECONCILE_REST_OFFSET,
   SELF_SPAWN_Y,
   SHADOW_MAP_SIZE,
+  SWAMP_SPEED_MULT,
+  SURFACE_MAX_BODY_Y,
   SPECTATOR_BOB_AMPLITUDE,
   SPECTATOR_BOB_SPEED,
   SPECTATOR_CAM_X,
@@ -72,7 +77,7 @@ import {
   WALL_GLASS_OPACITY,
   WALL_HEIGHT,
 } from "../config";
-import { ArenaBuilder, getObstacleLayout, getPlatforms, getTrampolineAt, isOnSlippery } from "../arena/Arena";
+import { ArenaBuilder, getObstacleLayout, getPlatforms, getTrampolineAt, isOnIce, isOnSwamp } from "../arena/Arena";
 import { KIND_COLORS, PowerUpPickups, PowerUpState, type PowerUpKind } from "../arena/PowerUps";
 import { BallsPool, SuperCore } from "../fx/Balls";
 import { CameraShake, HitFlash } from "../fx/CameraShake";
@@ -110,6 +115,8 @@ import {
   HL_TRAMP_BURST,
   NEUTRAL_MOON,
   NEUTRAL_WHITE,
+  SCENE_COOL_FILL,
+  SCENE_WARM_LIGHT,
 } from "../palette";
 
 // Planar movement input: x = strafe right (+1) / left (-1),
@@ -251,7 +258,7 @@ export interface ReconcileTelemetry {
   note: string;
 }
 
-// Stage 3 scene (QD1-A capsule + QD2-A neon warehouse + QD5-A blocks):
+// Stylized night scene:
 // exactly 1 directional light (shadow <= 1024) + 1 ambient light + ONE
 // no-shadow SpotLight aimed at the center banner (explicit MAP exception:
 // banner dressing light, castShadow false, cheap fixed cost). No
@@ -462,17 +469,19 @@ export class SceneManager {
     this.built = true;
 
     this.scene.background = new THREE.Color(BASE_BG);
-    this.scene.fog = new THREE.Fog(BASE_BG, 22, 72);
+    this.scene.fog = new THREE.Fog(BASE_BG, 30, 85);
 
-    // Visual-round lift (option A): ambient 0.78 with the same white tone and
-    // the same 1.0 directional key — no new lights, budget intact.
-    const ambient = new THREE.AmbientLight(NEUTRAL_WHITE, SCENE_AMBIENT_INTENSITY);
+    // Warm key / cool fill supplies a clear face hierarchy with the existing
+    // one directional + one ambient budget. Light intensities stay tuned by
+    // config, and the fixed shadow map stays within 1024px.
+    const ambient = new THREE.AmbientLight(SCENE_COOL_FILL, SCENE_AMBIENT_INTENSITY);
     this.scene.add(ambient);
 
-    const directional = new THREE.DirectionalLight(NEUTRAL_WHITE, SCENE_DIRECTIONAL_INTENSITY);
+    const directional = new THREE.DirectionalLight(SCENE_WARM_LIGHT, SCENE_DIRECTIONAL_INTENSITY);
     directional.position.set(5, 10, 5);
     directional.castShadow = true;
     directional.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+    directional.shadow.normalBias = 0.025;
     directional.shadow.camera.left = -ARENA_HALF_SIZE;
     directional.shadow.camera.right = ARENA_HALF_SIZE;
     directional.shadow.camera.top = ARENA_HALF_SIZE;
@@ -490,7 +499,7 @@ export class SceneManager {
 
     this.arena.buildVisuals(this.scene);
     this.buildSky(this.scene);
-    this.ads.buildFrames(this.scene);
+    this.ads.buildVisuals(this.scene);
     void this.ads.load().catch(() => {
       // Ads always fall back to generated placeholders; never fatal.
     });
@@ -986,6 +995,7 @@ export class SceneManager {
   // snapshot.super (null hides). PixelRatio clamp, follow cam and spectator
   // hover live elsewhere and are intentionally untouched here.
   private updateCombat(deltaSeconds: number): void {
+    this.arena.update(deltaSeconds);
     if (this.avatarVisuals !== null) {
       this.avatarVisuals.ball.setCharge01(this.charge01);
       this.avatarVisuals.update(deltaSeconds);
@@ -1027,33 +1037,39 @@ export class SceneManager {
     if (physics === null || avatar === null) {
       return;
     }
-    // Blend toward the input target instead of hard-setting absolute
-    // velocity: steer by at most ACCEL*dt per frame (zero target when there
-    // is no input, so the body coasts to a stop — slowly on ice). Ice
-    // sliding and knockback impulses therefore survive and decay via
-    // damping/friction instead of being zeroed every frame.
+    // Swamp uses direct low-speed control without momentum. Ice uses a
+    // reduced target with low-grip steering, so it keeps a short glide.
     const preStep = physics.getPlayerPosition();
-    const onIce = isOnSlippery(preStep.x, preStep.z);
+    const current = physics.getPlayerVelocity();
+    const touchingFloor = preStep.y <= SURFACE_MAX_BODY_Y && Math.abs(current.y) < AIRBORNE_VY_THRESHOLD;
+    const onSwamp = touchingFloor && isOnSwamp(preStep.x, preStep.z);
+    const onIce = touchingFloor && isOnIce(preStep.x, preStep.z);
     physics.setSlippery(onIce);
     // Charging halves the move target (CHARGE_MOVE_MULT, server mirror): the
     // server simulates charging fighters at half speed, so unscaled client
     // prediction diverged ~2.25 m/s during charge+walk and reconcile tugged
     // the preview origin every frame (bug C jitter source).
     const chargeMult = this.charging ? CHARGE_MOVE_MULT : 1;
-    const speed = MOVE_SPEED * chargeMult * this.powerState.getSpeedMultiplier() * (onIce ? ICE_SPEED_MULT : 1);
-    const current = physics.getPlayerVelocity();
-    const targetX = worldMove.x * speed;
-    const targetZ = worldMove.z * speed;
-    let deltaX = targetX - current.x;
-    let deltaZ = targetZ - current.z;
-    const maxDelta = (onIce ? PLAYER_ICE_ACCEL : PLAYER_GROUND_ACCEL) * deltaSeconds;
-    const deltaLength = Math.hypot(deltaX, deltaZ);
-    if (deltaLength > maxDelta && deltaLength > 0) {
-      const scale = maxDelta / deltaLength;
-      deltaX *= scale;
-      deltaZ *= scale;
+    const surfaceMult = onSwamp ? SWAMP_SPEED_MULT : onIce ? ICE_SPEED_MULT : 1;
+    const speed = MOVE_SPEED * chargeMult * this.powerState.getSpeedMultiplier() * surfaceMult;
+    const iceInputActive = worldMove.lengthSq() >= ICE_INPUT_THRESHOLD * ICE_INPUT_THRESHOLD;
+    const targetX = onIce && !iceInputActive ? 0 : worldMove.x * speed;
+    const targetZ = onIce && !iceInputActive ? 0 : worldMove.z * speed;
+    if (onSwamp) {
+      physics.setPlayerVelocity(targetX, current.y, targetZ);
+    } else {
+      let deltaX = targetX - current.x;
+      let deltaZ = targetZ - current.z;
+      const iceAccel = iceInputActive ? PLAYER_ICE_ACCEL : PLAYER_ICE_COAST_ACCEL;
+      const maxDelta = (onIce ? iceAccel : PLAYER_GROUND_ACCEL) * deltaSeconds;
+      const deltaLength = Math.hypot(deltaX, deltaZ);
+      if (deltaLength > maxDelta && deltaLength > 0) {
+        const scale = maxDelta / deltaLength;
+        deltaX *= scale;
+        deltaZ *= scale;
+      }
+      physics.setPlayerVelocity(current.x + deltaX, current.y, current.z + deltaZ);
     }
-    physics.setPlayerVelocity(current.x + deltaX, current.y, current.z + deltaZ);
     physics.step(deltaSeconds);
     const position = physics.getPlayerPosition();
     avatar.position.set(position.x, position.y, position.z);
@@ -1761,8 +1777,8 @@ export class SceneManager {
     this.pitch = THREE.MathUtils.clamp(pitch, Math.min(lo, hi), Math.max(lo, hi));
   }
 
-  public getFenceSlotCount(): number {
-    return getFenceSlotTransforms().length;
+  public getShopfrontCount(): number {
+    return getShopfrontTransforms().length;
   }
 
   public reset(): void {

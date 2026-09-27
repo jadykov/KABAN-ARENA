@@ -6,6 +6,7 @@ import {
   SPEED_DURATION_S,
   SPEED_MULTIPLIER,
 } from "../config";
+import { ARENA_LAYOUT, PICKUP_VISUAL_Y, type ArenaLayout } from "../layout";
 import {
   BASE_PICKUP,
   HL_CHARTREUSE,
@@ -13,7 +14,7 @@ import {
   HL_CHARTREUSE_DEEP,
 } from "../palette";
 
-export type PowerUpKind = "speed" | "shield" | "impulse";
+export type PowerUpKind = ArenaLayout["pickups"][number]["kind"];
 
 export const POWERUP_KINDS: readonly PowerUpKind[] = ["speed", "shield", "impulse"];
 
@@ -82,13 +83,10 @@ export interface PickupSlot {
   z: number;
 }
 
-// Fixed pedestal positions, clear of obstacles/zones (see Arena layout).
-export function getPickupSlots(): PickupSlot[] {
-  return [
-    { kind: "speed", x: 0, z: 11 },
-    { kind: "shield", x: -11, z: 0 },
-    { kind: "impulse", x: 11, z: 0 },
-  ];
+// Editable pedestal positions from the shared arena layout.
+const PICKUP_SLOTS: readonly PickupSlot[] = ARENA_LAYOUT.pickups;
+export function getPickupSlots(): readonly PickupSlot[] {
+  return PICKUP_SLOTS;
 }
 
 // Highlight-bucket pickup colors (chartreuse family, slight per-kind
@@ -121,7 +119,7 @@ export class PowerUpPickups {
         roughness: 0.4,
       });
       const mesh = new THREE.Mesh(geometry, material);
-      mesh.position.set(slot.x, 1.1, slot.z);
+      mesh.position.set(slot.x, PICKUP_VISUAL_Y, slot.z);
       this.group.add(mesh);
       this.meshes.set(slot.kind, mesh);
       this.available.set(slot.kind, true);
@@ -159,7 +157,7 @@ export class PowerUpPickups {
       }
       if (this.available.get(slot.kind) === true) {
         mesh.rotation.y += deltaSeconds * 2.2;
-        mesh.position.y = 1.1 + Math.sin(this.elapsed * 2.5 + slot.x) * 0.15;
+        mesh.position.y = PICKUP_VISUAL_Y + Math.sin(this.elapsed * 2.5 + slot.x) * 0.15;
         const dx = playerX - slot.x;
         const dz = playerZ - slot.z;
         if (dx * dx + dz * dz <= POWERUP_PICKUP_RADIUS * POWERUP_PICKUP_RADIUS) {

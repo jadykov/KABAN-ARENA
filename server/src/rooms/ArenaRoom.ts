@@ -25,7 +25,14 @@ import {
   FIRE_PITCH_MIN,
   GUEST_NICK_PREFIX,
   HIT_KNOCKBACK_M,
+  ICE_ACCEL,
+  ICE_COAST_ACCEL,
+  ICE_INPUT_THRESHOLD,
+  ICE_LINEAR_DAMPING,
+  ICE_SPEED_MULT,
   INVULN_MS,
+  isOnIce,
+  isOnSwamp,
   LOBBY_COUNTDOWN_MS,
   MAX_BOTS,
   MAX_HP,
@@ -49,7 +56,8 @@ import {
   SERVER_OBSTACLES,
   SERVER_PLATFORMS,
   SIM_TICK_MS,
-  SPAWN_INSET,
+  SWAMP_SPEED_MULT,
+  SURFACE_MAX_BODY_Y,
   SUPER_LIFE_S,
   SUPER_PICKUP_RADIUS,
   SUPER_SPAWN_S,
@@ -62,15 +70,19 @@ import {
   applyHit,
   bodyCenterYAt,
   bodyCenterYAtExpanded,
+  bodyCenterYForFighterAt,
   canDamage,
   damageForPower,
   describeBallSurface,
   groundTopAt,
+  getSpawnForIndex,
   isOnTrampolinePad,
   muzzleForShot,
   powerToSpeed,
   rampBandHeightAt,
   rampBandHeightAtExpanded,
+  rampClearsCapsuleAt,
+  rampHeightAt,
   recoilDistanceForPower,
   resolveThrowerY,
   respawnPlayer,
@@ -89,6 +101,11 @@ interface MoveInput {
   rotY: number;
   seq: number;
   charging: boolean;
+}
+
+interface PlanarMotion {
+  vx: number;
+  vz: number;
 }
 
 export interface FirePayload {
@@ -430,27 +447,37 @@ export function resolvePlayerMove(
   return { x, z };
 }
 
-// Wedge-side entry block (bug A leak 2): a mover may not step INTO a ramp
-// band below its surface — the client wedge is a wall from the side, and
-// the server must not materialize fighters onto the slope in one tick.
-// Legit climbing always satisfies surface(target) - feet <= climb rate
-// (~0.06m/tick), so RAMP_ENTRY_TOL never trips it. Axis-separated fallback
-// preserves sliding along the wedge. Flying movers (feet above every ramp)
-// pass untouched. Zero per-tick allocation (scalar math only).
+// A slab blocks side entry while it intersects the capsule. Its upper
+// surface remains climbable, and its raised lower face leaves a true
+// underpass when the capsule fits. The extra lateral radius matches Rapier's
+// capsule contact with the visual slab's side.
+function rampBlocksCapsuleAt(x: number, z: number, feet: number, radius: number): boolean {
+  for (const platform of SERVER_PLATFORMS) {
+    if (rampHeightAt(platform, x, z, radius) > feet + RAMP_ENTRY_TOL &&
+        !rampClearsCapsuleAt(platform, x, z, feet, radius)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Axis-separated fallback preserves sliding along a blocked slab. Legitimate
+// climbing changes slope height by ~0.06m per tick, below RAMP_ENTRY_TOL.
 function resolveWedgeEntry(
   fromX: number,
   fromZ: number,
   toX: number,
   toZ: number,
   feet: number,
+  radius: number,
 ): { x: number; z: number } {
-  if (rampBandHeightAt(toX, toZ) <= feet + RAMP_ENTRY_TOL) {
+  if (!rampBlocksCapsuleAt(toX, toZ, feet, radius)) {
     return { x: toX, z: toZ };
   }
-  if (rampBandHeightAt(toX, fromZ) <= feet + RAMP_ENTRY_TOL) {
+  if (!rampBlocksCapsuleAt(toX, fromZ, feet, radius)) {
     return { x: toX, z: fromZ };
   }
-  if (rampBandHeightAt(fromX, toZ) <= feet + RAMP_ENTRY_TOL) {
+  if (!rampBlocksCapsuleAt(fromX, toZ, feet, radius)) {
     return { x: fromX, z: toZ };
   }
   return { x: fromX, z: fromZ };
@@ -476,7 +503,7 @@ export function resolveGroundMove(
     return { x: fromX, z: fromZ };
   }
   const feet = Number.isFinite(feetY) ? feetY : 0;
-  const wedged = resolveWedgeEntry(fromX, fromZ, toX, toZ, feet);
+  const wedged = resolveWedgeEntry(fromX, fromZ, toX, toZ, feet, radius);
   return resolvePlayerMove(fromX, fromZ, wedged.x, wedged.z, radius, feet);
 }
 
@@ -487,6 +514,9 @@ export class ArenaRoom extends Room<ArenaState> {
   public testNow: number | null = null;
 
   private readonly inputs = new Map<string, MoveInput>();
+  // Reused for each fighter's last resolved planar speed. On ice this becomes
+  // sliding velocity; on ordinary ground the direct input path stays intact.
+  private readonly planarMotion = new Map<string, PlanarMotion>();
   private readonly respawnAt = new Map<string, number>();
   private readonly brains = new Map<string, BotBrain>();
   // Trampoline-flight launch timestamps (ms, currentTime clock): present =
@@ -577,6 +607,7 @@ export class ArenaRoom extends Room<ArenaState> {
     player.spectator = true;
     this.state.players.set(client.sessionId, player);
     this.inputs.delete(client.sessionId);
+    this.planarMotion.delete(client.sessionId);
     this.airSince.delete(client.sessionId);
     // No ensureBots here: spectators alone must never spawn bots or start
     // a countdown. Bots fill only once a ready human exists (see play).
@@ -627,6 +658,7 @@ export class ArenaRoom extends Room<ArenaState> {
     // are not farmed on the spawn marker before their first frame renders.
     player.invulnUntil = this.state.phase === "playing" || this.state.phase === "countdown" ? now + INVULN_MS : 0;
     this.inputs.delete(client.sessionId);
+    this.planarMotion.delete(client.sessionId);
     this.airSince.delete(client.sessionId);
     this.ensureBots();
     client.send("welcome", { sessionId: client.sessionId, nick, x: player.x, z: player.z });
@@ -640,6 +672,7 @@ export class ArenaRoom extends Room<ArenaState> {
       this.state.players.delete(client.sessionId);
     }
     this.inputs.delete(client.sessionId);
+    this.planarMotion.delete(client.sessionId);
     this.respawnAt.delete(client.sessionId);
     this.airSince.delete(client.sessionId);
     // Bots persist for the next joiner; with no humans left the room idles
@@ -730,6 +763,7 @@ export class ArenaRoom extends Room<ArenaState> {
       index += 1;
     });
     this.respawnAt.clear();
+    this.planarMotion.clear();
     this.airSince.clear();
     // Fresh round: all balls go, including ricocheted/settling/resting ones —
     // rest state lives on BallState itself, so clear() leaks nothing.
@@ -769,6 +803,7 @@ export class ArenaRoom extends Room<ArenaState> {
     this.state.remainingMs = 0;
     this.state.countdownMs = 0;
     this.respawnAt.clear();
+    this.planarMotion.clear();
     this.airSince.clear();
     // Rematch reset: same full clear as round start — no resting ball or
     // settle timer leaks across rounds.
@@ -783,6 +818,7 @@ export class ArenaRoom extends Room<ArenaState> {
     this.state.phase = "lobby";
     this.state.countdownMs = 0;
     this.state.remainingMs = 0;
+    this.planarMotion.clear();
   }
 
   private handleInput(sessionId: string, payload: unknown): void {
@@ -1316,6 +1352,7 @@ export class ArenaRoom extends Room<ArenaState> {
       this.applyKnockback(victim, ball);
       if (result.killed) {
         victim.superBuff = false;
+        this.planarMotion.delete(victim.sessionId);
         this.respawnAt.set(victim.sessionId, now + RESPAWN_DELAY_MS);
         this.broadcast("killfeed", { message: `${shooter.nick} fragged ${victim.nick}` });
       }
@@ -1327,6 +1364,7 @@ export class ArenaRoom extends Room<ArenaState> {
         victim.alive = false;
         victim.hp = 0;
         victim.superBuff = false;
+        this.planarMotion.delete(victim.sessionId);
         this.respawnAt.set(victim.sessionId, now + RESPAWN_DELAY_MS);
       }
     }
@@ -1477,8 +1515,8 @@ export class ArenaRoom extends Room<ArenaState> {
   // family as the wedge block and the lane capture) so entries never jump in
   // y. Scalar math only, zero per-tick allocation.
   private groundSupport(x: number, z: number, feet: number): number {
-    const strict = bodyCenterYAt(x, z);
-    const wide = bodyCenterYAtExpanded(x, z, PLAYER_BODY_RADIUS);
+    const strict = bodyCenterYForFighterAt(x, z, feet, PLAYER_BODY_RADIUS);
+    const wide = bodyCenterYForFighterAt(x, z, feet, PLAYER_BODY_RADIUS, PLAYER_BODY_RADIUS);
     if (wide > strict + COLLISION_Y_EPS && feet >= wide - BODY_CENTER_Y - SUPPORT_STICK_TOL) {
       return wide;
     }
@@ -1489,6 +1527,66 @@ export class ArenaRoom extends Room<ArenaState> {
       }
     }
     return strict;
+  }
+
+  private motionFor(player: PlayerState): PlanarMotion {
+    let motion = this.planarMotion.get(player.sessionId);
+    if (motion === undefined) {
+      // One allocation per life, then only scalar updates in the tick path.
+      motion = { vx: 0, vz: 0 };
+      this.planarMotion.set(player.sessionId, motion);
+    }
+    return motion;
+  }
+
+  private steerPlanarVelocity(
+    motion: PlanarMotion,
+    desiredX: number,
+    desiredZ: number,
+    maxSpeed: number,
+    iceInputActive: boolean,
+    touchingFloor: boolean,
+    x: number,
+    z: number,
+    dt: number,
+  ): void {
+    if (touchingFloor && isOnSwamp(x, z)) {
+      // Mud cancels inherited planar momentum each tick, including for bots.
+      motion.vx = desiredX * SWAMP_SPEED_MULT;
+      motion.vz = desiredZ * SWAMP_SPEED_MULT;
+      return;
+    }
+    if (!touchingFloor || !isOnIce(x, z)) {
+      // Preserve existing direct control off ice, for humans and bots alike.
+      motion.vx = desiredX;
+      motion.vz = desiredZ;
+      return;
+    }
+    // Mirror the client's low-grip steering at floor level: reduced speed
+    // is a target and last velocity carries the slide. Positive bounded
+    // acceleration always escapes from rest.
+    const targetX = iceInputActive ? desiredX * ICE_SPEED_MULT : 0;
+    const targetZ = iceInputActive ? desiredZ * ICE_SPEED_MULT : 0;
+    let deltaX = targetX - motion.vx;
+    let deltaZ = targetZ - motion.vz;
+    const deltaLength = Math.hypot(deltaX, deltaZ);
+    const maxDelta = (iceInputActive ? ICE_ACCEL : ICE_COAST_ACCEL) * dt;
+    if (deltaLength > maxDelta) {
+      const scale = maxDelta / deltaLength;
+      deltaX *= scale;
+      deltaZ *= scale;
+    }
+    const damping = Math.exp(-ICE_LINEAR_DAMPING * dt);
+    motion.vx = (motion.vx + deltaX) * damping;
+    motion.vz = (motion.vz + deltaZ) * damping;
+    // An old normal-ground step or unusual clock jump cannot produce
+    // unbounded glide; the target remains the much lower ice speed.
+    const velocityLength = Math.hypot(motion.vx, motion.vz);
+    if (velocityLength > maxSpeed) {
+      const scale = maxSpeed / velocityLength;
+      motion.vx *= scale;
+      motion.vz *= scale;
+    }
   }
 
   private moveHumans(dt: number): void {
@@ -1503,8 +1601,20 @@ export class ArenaRoom extends Room<ArenaState> {
       const speed =
         input !== undefined && input.charging ? PLAYER_SPEED * CHARGE_MOVE_MULT : PLAYER_SPEED;
       const airStart = this.airSince.get(player.sessionId);
+      const motion = this.motionFor(player);
+      this.steerPlanarVelocity(
+        motion,
+        input !== undefined ? input.x * speed : 0,
+        input !== undefined ? input.y * speed : 0,
+        PLAYER_SPEED,
+        input !== undefined && input.x * input.x + input.y * input.y >= ICE_INPUT_THRESHOLD * ICE_INPUT_THRESHOLD,
+        airStart === undefined && player.y <= SURFACE_MAX_BODY_Y,
+        player.x,
+        player.z,
+        dt,
+      );
       if (airStart !== undefined) {
-        this.stepAirborneHuman(player, input, speed, dt, now, airStart);
+        this.stepAirborneHuman(player, input, motion, dt, now, airStart);
         return;
       }
       // Grounded: wedge-side block + Y-gated XZ move (slide along faces)
@@ -1513,16 +1623,22 @@ export class ArenaRoom extends Room<ArenaState> {
       // under the new XZ (ramps read smoothly via the slope band, tops stick
       // through the 0.5m ring, ground beside solids never snaps up).
       const feet = feetYOf(player.y);
+      const fromX = player.x;
+      const fromZ = player.z;
       const moved = resolveGroundMove(
-        player.x,
-        player.z,
-        input !== undefined ? player.x + input.x * speed * dt : player.x,
-        input !== undefined ? player.z + input.y * speed * dt : player.z,
+        fromX,
+        fromZ,
+        fromX + motion.vx * dt,
+        fromZ + motion.vz * dt,
         PLAYER_BODY_RADIUS,
         feet,
       );
       player.x = clampPosition(moved.x);
       player.z = clampPosition(moved.z);
+      // Read back collision-resolved speed so a wall never stores a ghost
+      // velocity that resumes after a later turn on ice.
+      motion.vx = (player.x - fromX) / dt;
+      motion.vz = (player.z - fromZ) / dt;
       if (input !== undefined) {
         player.rotY = input.rotY;
       }
@@ -1545,7 +1661,7 @@ export class ArenaRoom extends Room<ArenaState> {
   private stepAirborneHuman(
     player: PlayerState,
     input: MoveInput | undefined,
-    speed: number,
+    motion: PlanarMotion,
     dt: number,
     now: number,
     airStart: number,
@@ -1554,20 +1670,26 @@ export class ArenaRoom extends Room<ArenaState> {
     if (!(airTimeS >= 0) || airTimeS > TRAMPOLINE_MAX_AIR_S) {
       // Stuck arc (clock jump, NaN): force-land on the support below.
       this.airSince.delete(player.sessionId);
+      motion.vx = 0;
+      motion.vz = 0;
       player.y = bodyCenterYAt(player.x, player.z);
       return;
     }
     const arcY = trampolineArcY(airTimeS);
+    const fromX = player.x;
+    const fromZ = player.z;
     const moved = resolvePlayerMove(
       player.x,
       player.z,
-      input !== undefined ? player.x + input.x * speed * dt : player.x,
-      input !== undefined ? player.z + input.y * speed * dt : player.z,
+      player.x + motion.vx * dt,
+      player.z + motion.vz * dt,
       PLAYER_BODY_RADIUS,
       feetYOf(player.y),
     );
     player.x = clampPosition(moved.x);
     player.z = clampPosition(moved.z);
+    motion.vx = (player.x - fromX) / dt;
+    motion.vz = (player.z - fromZ) / dt;
     if (input !== undefined) {
       player.rotY = input.rotY;
     }
@@ -1591,22 +1713,38 @@ export class ArenaRoom extends Room<ArenaState> {
         this.brains.set(player.sessionId, brain);
       }
       const step = stepBot(player, brain, now);
+      const motion = this.motionFor(player);
+      this.steerPlanarVelocity(
+        motion,
+        step.moveX * BOT_SPEED,
+        step.moveZ * BOT_SPEED,
+        BOT_SPEED,
+        step.moveX * step.moveX + step.moveZ * step.moveZ >= ICE_INPUT_THRESHOLD * ICE_INPUT_THRESHOLD,
+        player.y <= SURFACE_MAX_BODY_Y,
+        player.x,
+        player.z,
+        dt,
+      );
       // Same grounded path as humans (wedge block + gated collision +
       // hysteretic support): bots stop/slide at geometry instead of walking
       // through it. Bots stay grounded (no pad launches — weak ground game
       // by design) and derive y from XZ, so a bot wandering up a ramp reads
       // at slope height for remotes and balls.
       const feet = feetYOf(player.y);
+      const fromX = player.x;
+      const fromZ = player.z;
       const moved = resolveGroundMove(
-        player.x,
-        player.z,
-        player.x + step.moveX * BOT_SPEED * dt,
-        player.z + step.moveZ * BOT_SPEED * dt,
+        fromX,
+        fromZ,
+        fromX + motion.vx * dt,
+        fromZ + motion.vz * dt,
         PLAYER_BODY_RADIUS,
         feet,
       );
       player.x = clampPosition(moved.x);
       player.z = clampPosition(moved.z);
+      motion.vx = (player.x - fromX) / dt;
+      motion.vz = (player.z - fromZ) / dt;
       player.y = this.groundSupport(player.x, player.z, feet);
       player.rotY = step.rotY;
     });
@@ -1658,11 +1796,14 @@ export class ArenaRoom extends Room<ArenaState> {
       if (player === undefined || player.alive || !player.ready || player.spectator) {
         continue;
       }
-      respawnPlayer(player, this.spawnCursor % MAX_PLAYERS, now);
+      // getSpawnForIndex wraps by the editable spawn list length. Room
+      // capacity is separate: a map may contain more than six spawn markers.
+      respawnPlayer(player, this.spawnCursor, now);
       // Fresh life: no carried SUPER buff, no pending reload gate, grounded.
       player.superBuff = false;
       player.reloadUntil = 0;
       this.airSince.delete(sessionId);
+      this.planarMotion.delete(sessionId);
       this.spawnCursor += 1;
     }
   }
@@ -1808,23 +1949,7 @@ export class ArenaRoom extends Room<ArenaState> {
   }
 
   private pickSpawn(index: number): { x: number; z: number } {
-    // Corner cycle with the same inset the client arena uses
-    // (ARENA_HALF_SIZE - SPAWN_INSET).
-    const inset = ARENA_HALF_SIZE - SPAWN_INSET;
-    const spots = [
-      { x: -inset, z: -inset },
-      { x: inset, z: -inset },
-      { x: -inset, z: inset },
-      { x: inset, z: inset },
-      { x: 0, z: -inset },
-      { x: 0, z: inset },
-    ];
-    const slot = ((index % spots.length) + spots.length) % spots.length;
-    const picked = spots[slot];
-    if (picked === undefined) {
-      return { x: 0, z: 0 };
-    }
-    return { x: picked.x, z: picked.z };
+    return getSpawnForIndex(index);
   }
 }
 
