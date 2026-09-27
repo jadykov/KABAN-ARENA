@@ -19,15 +19,11 @@ const META: Record<Category, { label: string; singular: string; color: string; s
   iceZones: { label: "Лёд", singular: "Лёд", color: "#77d9ed", symbol: "◉", hint: "Скользкая зона. Радиус указан в метрах." },
   trampolines: { label: "Батуты", singular: "Батут", color: "#b58aff", symbol: "◎", hint: "Зона запуска игрока вверх." },
   spawns: { label: "Точки появления", singular: "Точка появления", color: "#a9e789", symbol: "●", hint: "Сервер выбирает эти точки по очереди." },
-  pickups: { label: "Бонусы", singular: "Бонус", color: "#e6e46a", symbol: "◆", hint: "Одна точка для каждого вида бонуса." },
+  pickups: { label: "Бонусные точки", singular: "Бонусная точка", color: "#e6e46a", symbol: "◆", hint: "При подборе сервер случайно выдаёт щит или ускорение. Точка появится снова через 8 секунд." },
 };
-const KINDS = ["speed", "shield", "impulse"] as const;
 const localApiUrl = import.meta.env.DEV
   ? `${window.location.protocol}//${window.location.hostname}:5174/__arena-layout`
   : null;
-const KIND_LABELS: Record<(typeof KINDS)[number], string> = {
-  speed: "Скорость", shield: "Щит", impulse: "Импульс",
-};
 function getRoot(): HTMLDivElement {
   const node = document.querySelector<HTMLDivElement>("#editor-root");
   if (node === null) throw new Error("Editor root is missing");
@@ -291,17 +287,17 @@ function drawMap(): void {
     const { x, z } = pickup;
     parts.push(`<g ${attrs("pickups", index)}><path d="M ${x} ${z - .65} L ${x + .65} ${z} L ${x} ${z + .65} L ${x - .65} ${z} Z" fill="#8b8f3d" stroke="#f0ee8a" stroke-width=".12"/>`);
     if (selected?.category === "pickups" && selected.index === index) parts.push(`<circle class="selection-ring" cx="${x}" cy="${z}" r=".82"/>`);
-    parts.push(`<text class="map-label" x="${x}" y="${z}">${pickup.kind === "speed" ? "С" : pickup.kind === "shield" ? "Щ" : "И"}</text></g>`);
+    parts.push(`<text class="map-label" x="${x}" y="${z}">${index + 1}</text></g>`);
   });
 
-  parts.push(`<circle class="fixed-core" cx="0" cy="0" r=".29"/><text class="fixed-core-label" x="0" y="1.05">SUPER</text>`);
+  parts.push(`<circle class="fixed-core" cx="0" cy="0" r=".29"/><text class="fixed-core-label" x="0" y="1.05">СУПЕР</text>`);
   svg.innerHTML = parts.join("");
 }
 
 function drawTools(): void {
   toolList.innerHTML = CATEGORIES.map((category) => {
     const meta = META[category];
-    const cannotAddPickup = category === "pickups" && items("pickups").length >= KINDS.length;
+    const cannotAddPickup = category === "pickups" && items("pickups").length >= 3;
     return `<button type="button" class="tool" data-add="${category}" ${cannotAddPickup ? "disabled" : ""} title="${safe(meta.hint)}"><span class="tool-icon" style="color:${meta.color};background:${meta.color}24">${meta.symbol}</span><span><span class="tool-name">${meta.label}</span><span class="tool-count">${items(category).length} на карте</span></span><span class="add-mark">+</span></button>`;
   }).join("");
 }
@@ -319,10 +315,9 @@ function drawInspector(): void {
   if (item === undefined) { selected = null; drawInspector(); return; }
   const category = selected.category;
   const meta = META[category];
-  const options = CATEGORIES.flatMap((type) => items(type).map((entry, index) => {
-    const suffix = type === "pickups" ? ` · ${KIND_LABELS[(entry as ArenaLayout["pickups"][number]).kind]}` : "";
+  const options = CATEGORIES.flatMap((type) => items(type).map((_, index) => {
     const value = `${type}:${index}`;
-    return `<option value="${value}" ${selected?.category === type && selected.index === index ? "selected" : ""}>${META[type].singular} ${index + 1}${suffix}</option>`;
+    return `<option value="${value}" ${selected?.category === type && selected.index === index ? "selected" : ""}>${META[type].singular} ${index + 1}</option>`;
   })).join("");
   let extra = "";
   if (category === "obstacles" || category === "platforms") {
@@ -341,8 +336,7 @@ function drawInspector(): void {
     extra += field("radius", "Радиус, м", (item as ArenaLayout["iceZones"][number]).radius, 'min="0.4" max="8"');
   }
   if (category === "pickups") {
-    const pickup = item as ArenaLayout["pickups"][number];
-    extra += `<div class="field wide"><label for="field-kind">Тип бонуса</label><select id="field-kind" data-field="kind">${KINDS.map((kind) => `<option value="${kind}" ${pickup.kind === kind ? "selected" : ""}>${KIND_LABELS[kind]}</option>`).join("")}</select></div>`;
+    extra += `<div class="field-help">Нейтральная точка: щит или ускорение выбирается случайно при подборе.</div>`;
   }
   inspector.innerHTML = `
     <h2 class="inspector-title" style="color:${meta.color}">${meta.singular} ${selected.index + 1}</h2>
@@ -385,10 +379,8 @@ function add(category: Category): void {
   else if (category === "platforms") item = { x: 0, z: 0, hx: 1.5, hz: 1.5, topY: 1.8, rampSide: "+z", rampWidth: 1.5 };
   else if (category === "spawns") item = { x: 0, z: 0 };
   else if (category === "pickups") {
-    const used = new Set(items("pickups").map((entry) => (entry as ArenaLayout["pickups"][number]).kind));
-    const kind = KINDS.find((candidate) => !used.has(candidate));
-    if (kind === undefined) { setStatus("Все три бонуса уже расставлены.", true); return; }
-    item = { kind, x: 0, z: 0 };
+    if (items("pickups").length >= 3) { setStatus("Все три бонусные точки уже расставлены.", true); return; }
+    item = { x: 0, z: 0 };
   } else item = { x: 0, z: 0, radius: category === "trampolines" ? 1.2 : 2 };
   items(category).push(item);
   selected = { category, index: items(category).length - 1 };
@@ -411,10 +403,7 @@ function duplicateSelected(): void {
   if (original === undefined) return;
   const copy = structuredClone(original);
   if (selected.category === "pickups") {
-    const used = new Set(items("pickups").map((entry) => (entry as ArenaLayout["pickups"][number]).kind));
-    const free = KINDS.find((kind) => !used.has(kind));
-    if (free === undefined) { setStatus("Уже есть по одному бонусу каждого типа.", true); return; }
-    (copy as ArenaLayout["pickups"][number]).kind = free;
+    if (items("pickups").length >= 3) { setStatus("Все три бонусные точки уже расставлены.", true); return; }
   }
   copy.x += 1;
   copy.z += 1;
@@ -561,7 +550,7 @@ inspector.addEventListener("change", (event) => {
   if (item === undefined) return;
   const key = target.dataset.field;
   const mutable = item as unknown as Record<string, number | string>;
-  if (key === "rampSide" || key === "kind") mutable[key] = target.value;
+  if (key === "rampSide") mutable[key] = target.value;
   else {
     const value = Number(target.value);
     if (!Number.isFinite(value)) { render(); return; }

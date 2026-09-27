@@ -1,5 +1,7 @@
 import { Room, type Client } from "colyseus";
+import { PICKUP_VISUAL_Y } from "../../../shared/arena-layout.mjs";
 import {
+  ARENA_LAYOUT,
   ARENA_HALF_SIZE,
   BALL_GRAVITY,
   BALL_GROUND_Y,
@@ -43,6 +45,8 @@ import {
   PATCH_RATE_MS,
   PLAYER_BODY_RADIUS,
   PLAYER_SPEED,
+  POWERUP_PICKUP_RADIUS,
+  POWERUP_RESPAWN_MS,
   RAMP_ADMIT_MIN_FEET,
   RAMP_ENTRY_TOL,
   RAMP_LANE_CAPTURE_TOL,
@@ -50,12 +54,15 @@ import {
   REMATCH_DELAY_MS,
   RESPAWN_DELAY_MS,
   ROUND_DURATION_MS,
-  ROUND_HARD_CAP_MS,
+  SHIELD_CAPACITY,
+  SHIELD_DURATION_MS,
   SELF_ARMING_DIST_M,
   SELF_ARMING_TIME_S,
   SERVER_OBSTACLES,
   SERVER_PLATFORMS,
   SIM_TICK_MS,
+  SPEED_DURATION_MS,
+  SPEED_MULTIPLIER,
   SWAMP_SPEED_MULT,
   SURFACE_MAX_BODY_Y,
   SUPER_LIFE_S,
@@ -63,11 +70,11 @@ import {
   SUPER_SPAWN_S,
   SUPPORT_STICK_TOL,
   TRAMPOLINE_MAX_AIR_S,
-  WIN_SCORE,
 } from "../config.js";
 import { createBrain, planBotFire, stepBot, type BotBrain } from "../bots.js";
 import {
   applyHit,
+  absorbShieldDamage,
   bodyCenterYAt,
   bodyCenterYAtExpanded,
   bodyCenterYForFighterAt,
@@ -91,7 +98,7 @@ import {
   trampolineArcY,
   type BallContact,
 } from "../hits.js";
-import { ArenaState, BallState, PlayerState, type RoundPhase } from "../state.js";
+import { ArenaState, BallState, PickupState, PlayerState, type RoundPhase } from "../state.js";
 // Re-exported for unit-test compat (layout data now lives in config).
 export { SERVER_OBSTACLES };
 
@@ -530,9 +537,10 @@ export class ArenaRoom extends Room<ArenaState> {
   private readonly scratchContact: BallContact = { kind: "none", axis: null, face: 0, restY: 0 };
   private countdownEndsAt = 0;
   private roundEndsAt = 0;
-  private playingStartedAt = 0;
   private endedAt = 0;
   private spawnCursor = 0;
+  // Overridable for deterministic pickup tests; production uses Math.random.
+  public pickupRandom: () => number = Math.random;
 
   private currentTime(): number {
     return this.testNow ?? Date.now();
@@ -541,6 +549,13 @@ export class ArenaRoom extends Room<ArenaState> {
   public async onCreate(): Promise<void> {
     this.maxClients = MAX_PLAYERS;
     this.setState(new ArenaState());
+    this.state.serverNow = this.currentTime();
+    ARENA_LAYOUT.pickups.forEach((slot, index) => {
+      const pickup = new PickupState();
+      pickup.x = slot.x;
+      pickup.z = slot.z;
+      this.state.pickups.set(String(index), pickup);
+    });
     this.setPatchRate(PATCH_RATE_MS);
     this.onMessage("ping", (client: Client): void => {
       client.send("pong", { tick: this.state.tick });
@@ -583,7 +598,7 @@ export class ArenaRoom extends Room<ArenaState> {
   public async onJoin(client: Client, options?: Record<string, unknown>): Promise<void> {
     if (this.humanEntryCount() >= MAX_PLAYERS) {
       // Colyseus maxClients normally rejects first; guard direct calls too.
-      client.send("room-full", { reason: "Room is full" });
+      client.send("room-full", { reason: "Комната заполнена" });
       return;
     }
     const taken = new Set<string>();
@@ -629,7 +644,7 @@ export class ArenaRoom extends Room<ArenaState> {
       return;
     }
     if (this.humanCount() >= MAX_PLAYERS) {
-      client.send("room-full", { reason: "Room is full" });
+      client.send("room-full", { reason: "Комната заполнена" });
       return;
     }
     const taken = new Set<string>();
@@ -664,7 +679,7 @@ export class ArenaRoom extends Room<ArenaState> {
     client.send("welcome", { sessionId: client.sessionId, nick, x: player.x, z: player.z });
     // Event feed (owner 4d.4): everyone sees who entered the fight, in the
     // same killfeed channel as kills and pickups (brief one-liner).
-    this.broadcast("killfeed", { message: `${nick} joined the fight` });
+    this.broadcast("killfeed", { message: `${nick} вступил в бой` });
   }
 
   public async onLeave(client: Client): Promise<void> {
@@ -687,6 +702,7 @@ export class ArenaRoom extends Room<ArenaState> {
   public tickRoom(stepMs: number = SIM_TICK_MS): void {
     const now = this.currentTime();
     this.state.tick += 1;
+    this.state.serverNow = now;
     const phase = this.state.phase as RoundPhase;
     if (phase === "lobby") {
       this.tickLobby(now);
@@ -721,22 +737,21 @@ export class ArenaRoom extends Room<ArenaState> {
   }
 
   private tickPlaying(now: number, stepMs: number): void {
+    const left = this.roundEndsAt - now;
+    this.state.remainingMs = Math.max(0, left);
+    if (left <= 0) {
+      this.endRound(this.leaderSessionId());
+      return;
+    }
     const dt = Math.max(1, stepMs) / 1000;
+    this.expireBonuses(now);
     this.moveHumans(dt);
     this.moveBots(now, dt);
+    this.tickPickups(now);
     this.fireBots(now);
     this.stepBalls(now, dt);
     this.tickCenterItems(now);
     this.tickRespawns(now);
-    const left = this.roundEndsAt - now;
-    this.state.remainingMs = Math.max(0, left);
-    const scoreWinner = this.findScoreWinner();
-    const hardCap = now - this.playingStartedAt >= ROUND_HARD_CAP_MS;
-    if (scoreWinner !== null) {
-      this.endRound(scoreWinner);
-    } else if (left <= 0 || hardCap) {
-      this.endRound(this.leaderSessionId());
-    }
   }
 
   private tickEnded(now: number): void {
@@ -750,7 +765,6 @@ export class ArenaRoom extends Room<ArenaState> {
     this.state.countdownMs = 0;
     this.state.remainingMs = ROUND_DURATION_MS;
     this.roundEndsAt = now + ROUND_DURATION_MS;
-    this.playingStartedAt = now;
     // Fresh spawn for every ready entrant; spectators stay out of the round.
     let index = 0;
     this.state.players.forEach((player: PlayerState): void => {
@@ -759,6 +773,7 @@ export class ArenaRoom extends Room<ArenaState> {
       }
       respawnPlayer(player, index, now);
       player.superBuff = false;
+      this.clearBonuses(player);
       player.reloadUntil = 0;
       index += 1;
     });
@@ -772,6 +787,7 @@ export class ArenaRoom extends Room<ArenaState> {
     this.state.superActive = false;
     this.state.superNextAt = now + SUPER_SPAWN_S * 1000;
     this.state.superExpiresAt = 0;
+    this.resetPickups();
     // Event feed (owner 4d.4): join/kill/pickup one-liners ONLY — round
     // start/end stay silent so the 2-line feed never fills with non-events.
   }
@@ -789,6 +805,7 @@ export class ArenaRoom extends Room<ArenaState> {
     this.state.players.forEach((player: PlayerState): void => {
       player.score = 0;
       player.superBuff = false;
+      this.clearBonuses(player);
       player.reloadUntil = 0;
       if (!player.ready || player.spectator) {
         return;
@@ -811,6 +828,7 @@ export class ArenaRoom extends Room<ArenaState> {
     this.state.superActive = false;
     this.state.superNextAt = 0;
     this.state.superExpiresAt = 0;
+    this.resetPickups();
     this.toLobby();
   }
 
@@ -1347,23 +1365,26 @@ export class ArenaRoom extends Room<ArenaState> {
   private damageVictim(ball: BallState, victim: PlayerState, ballId: string, now: number): void {
     const shooter = this.state.players.get(ball.ownerId);
     const damage = damageForPower(ball.power01, ball.super);
+    const { healthDamage } = absorbShieldDamage(victim, damage, now);
     if (shooter !== undefined) {
-      const result = applyHit(shooter, victim, now, damage);
+      const result = applyHit(shooter, victim, now, healthDamage);
       this.applyKnockback(victim, ball);
       if (result.killed) {
         victim.superBuff = false;
+        this.clearBonuses(victim);
         this.planarMotion.delete(victim.sessionId);
         this.respawnAt.set(victim.sessionId, now + RESPAWN_DELAY_MS);
-        this.broadcast("killfeed", { message: `${shooter.nick} fragged ${victim.nick}` });
+        this.broadcast("killfeed", { message: `${shooter.nick} победил ${victim.nick}` });
       }
     } else {
       // Owner left mid-flight: still damage the victim, no scorer.
-      victim.hp = Math.max(0, victim.hp - damage);
+      victim.hp = Math.max(0, victim.hp - healthDamage);
       this.applyKnockback(victim, ball);
       if (victim.hp <= 0) {
         victim.alive = false;
         victim.hp = 0;
         victim.superBuff = false;
+        this.clearBonuses(victim);
         this.planarMotion.delete(victim.sessionId);
         this.respawnAt.set(victim.sessionId, now + RESPAWN_DELAY_MS);
       }
@@ -1373,14 +1394,16 @@ export class ArenaRoom extends Room<ArenaState> {
     // block, settle, pool overflow) and victim bounces broadcast nothing.
     // Position is the ball spot at hit (post-integration); payload stays
     // minimal (ids + position).
-    this.broadcast(BALL_HIT_PLAYER_MESSAGE, {
-      ballId,
-      victimId: victim.sessionId,
-      x: ball.x,
-      y: ball.y,
-      z: ball.z,
-      super: ball.super,
-    });
+    if (healthDamage > 0) {
+      this.broadcast(BALL_HIT_PLAYER_MESSAGE, {
+        ballId,
+        victimId: victim.sessionId,
+        x: ball.x,
+        y: ball.y,
+        z: ball.z,
+        super: ball.super,
+      });
+    }
   }
 
   private findBallVictim(ball: BallState): PlayerState | null {
@@ -1451,6 +1474,65 @@ export class ArenaRoom extends Room<ArenaState> {
     // TODO(heal): this.tickHealItem(now);
   }
 
+  private clearBonuses(player: PlayerState): void {
+    player.shieldHp = 0;
+    player.shieldUntil = 0;
+    player.speedUntil = 0;
+    player.pickupKind = "";
+    player.pickupAt = 0;
+  }
+
+  private expireBonuses(now: number): void {
+    this.state.players.forEach((player: PlayerState): void => {
+      if (player.shieldHp > 0 && now >= player.shieldUntil) {
+        player.shieldHp = 0;
+        player.shieldUntil = 0;
+      }
+      if (player.speedUntil > 0 && now >= player.speedUntil) {
+        player.speedUntil = 0;
+      }
+    });
+  }
+
+  private resetPickups(): void {
+    this.state.pickups.forEach((pickup: PickupState): void => {
+      pickup.active = true;
+      pickup.nextAt = 0;
+    });
+  }
+
+  private tickPickups(now: number): void {
+    this.state.pickups.forEach((pickup: PickupState, key: string): void => {
+      if (!pickup.active && now >= pickup.nextAt) {
+        pickup.active = true;
+        pickup.nextAt = 0;
+      }
+      if (!pickup.active) return;
+      this.state.players.forEach((player: PlayerState): void => {
+        if (!pickup.active || !player.alive || !player.ready || player.spectator) return;
+        // Pickups sit on the floor; an airborne fighter crossing the marker
+        // well above it cannot collect it through the air.
+        if (player.y > PICKUP_VISUAL_Y + POWERUP_PICKUP_RADIUS) return;
+        const dx = player.x - pickup.x;
+        const dz = player.z - pickup.z;
+        if (dx * dx + dz * dz > POWERUP_PICKUP_RADIUS * POWERUP_PICKUP_RADIUS) return;
+        const kind = this.pickupRandom() < 0.5 ? "shield" : "speed";
+        if (kind === "shield") {
+          player.shieldHp = SHIELD_CAPACITY;
+          player.shieldUntil = now + SHIELD_DURATION_MS;
+        } else {
+          player.speedUntil = now + SPEED_DURATION_MS;
+        }
+        player.pickupKind = kind;
+        player.pickupAt = now;
+        player.pickupSeq += 1;
+        pickup.active = false;
+        pickup.nextAt = now + POWERUP_RESPAWN_MS;
+        this.broadcast("pickup-granted", { playerId: player.sessionId, slotId: Number(key), kind, seq: player.pickupSeq });
+      });
+    });
+  }
+
   // Super-core lifecycle: spawn center every 45s, 15s life, body pickup
   // radius 1.7m grants x2 NEXT shot. Buff consumed on fire even on miss.
   private tickSuperItem(now: number): void {
@@ -1471,7 +1553,7 @@ export class ArenaRoom extends Room<ArenaState> {
             this.state.superNextAt = now + SUPER_SPAWN_S * 1000;
             // Event feed: who picked WHICH item — the display name comes from
             // CENTER_ITEM_NAMES so future items plug in with one map line.
-            this.broadcast("killfeed", { message: `${player.nick} grabbed ${CENTER_ITEM_NAMES.super} (x2 next shot)` });
+            this.broadcast("killfeed", { message: `${player.nick} подобрал ${CENTER_ITEM_NAMES.super} (следующий бросок ×2)` });
           }
         });
       }
@@ -1598,15 +1680,16 @@ export class ArenaRoom extends Room<ArenaState> {
       const input = this.inputs.get(player.sessionId);
       // R2: aiming/charging runs slower (CHARGE_MOVE_MULT mirror); reloading
       // runs at normal speed.
-      const speed =
-        input !== undefined && input.charging ? PLAYER_SPEED * CHARGE_MOVE_MULT : PLAYER_SPEED;
+      const bonusMultiplier = now < player.speedUntil ? SPEED_MULTIPLIER : 1;
+      const maxSpeed = PLAYER_SPEED * bonusMultiplier;
+      const speed = input !== undefined && input.charging ? maxSpeed * CHARGE_MOVE_MULT : maxSpeed;
       const airStart = this.airSince.get(player.sessionId);
       const motion = this.motionFor(player);
       this.steerPlanarVelocity(
         motion,
         input !== undefined ? input.x * speed : 0,
         input !== undefined ? input.y * speed : 0,
-        PLAYER_SPEED,
+        maxSpeed,
         input !== undefined && input.x * input.x + input.y * input.y >= ICE_INPUT_THRESHOLD * ICE_INPUT_THRESHOLD,
         airStart === undefined && player.y <= SURFACE_MAX_BODY_Y,
         player.x,
@@ -1714,11 +1797,12 @@ export class ArenaRoom extends Room<ArenaState> {
       }
       const step = stepBot(player, brain, now);
       const motion = this.motionFor(player);
+      const speed = BOT_SPEED * (now < player.speedUntil ? SPEED_MULTIPLIER : 1);
       this.steerPlanarVelocity(
         motion,
-        step.moveX * BOT_SPEED,
-        step.moveZ * BOT_SPEED,
-        BOT_SPEED,
+        step.moveX * speed,
+        step.moveZ * speed,
+        speed,
         step.moveX * step.moveX + step.moveZ * step.moveZ >= ICE_INPUT_THRESHOLD * ICE_INPUT_THRESHOLD,
         player.y <= SURFACE_MAX_BODY_Y,
         player.x,
@@ -1801,24 +1885,12 @@ export class ArenaRoom extends Room<ArenaState> {
       respawnPlayer(player, this.spawnCursor, now);
       // Fresh life: no carried SUPER buff, no pending reload gate, grounded.
       player.superBuff = false;
+      this.clearBonuses(player);
       player.reloadUntil = 0;
       this.airSince.delete(sessionId);
       this.planarMotion.delete(sessionId);
       this.spawnCursor += 1;
     }
-  }
-
-  private findScoreWinner(): string | null {
-    let winner: string | null = null;
-    this.state.players.forEach((player: PlayerState): void => {
-      if (!player.ready || player.spectator) {
-        return;
-      }
-      if (player.score >= WIN_SCORE && winner === null) {
-        winner = player.sessionId;
-      }
-    });
-    return winner;
   }
 
   private leaderSessionId(): string {
@@ -1941,7 +2013,7 @@ export class ArenaRoom extends Room<ArenaState> {
       taken.add(player.nick);
     });
     const index = (this.botCounter - 1) % BOT_NAMES.length;
-    const base = BOT_NAMES[index] ?? "Bot";
+    const base = BOT_NAMES[index] ?? "Бот";
     if (!taken.has(base)) {
       return base;
     }

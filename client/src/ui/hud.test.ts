@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { KILLFEED_MAX_LINES, KILLFEED_OPACITY } from "../config";
-import { createHud } from "./hud";
+import { createHud, localizeKillfeed, localizePowerUp } from "./hud";
 
 // Minimal DOM stub (same pattern as ui/aim.test.ts: vitest runs in node with
 // no jsdom, and createHud only needs createElement/style/textContent +
@@ -189,17 +189,17 @@ describe("createHud top-left info list", () => {
     const handle = createHud(asHtml(parent));
     try {
       expect(byId(handle, "hud-info-timer").textContent).toBe("3:00");
-      expect(byId(handle, "hud-info-players").textContent).toBe("Players: 0");
-      expect(byId(handle, "hud-info-watching").textContent).toBe("Watching: 0");
+      expect(byId(handle, "hud-info-players").textContent).toBe("Игроки: 0");
+      expect(byId(handle, "hud-info-watching").textContent).toBe("Зрители: 0");
       handle.setTimer(65);
       expect(byId(handle, "hud-info-timer").textContent).toBe("1:05");
       handle.setPlayers(3);
-      expect(byId(handle, "hud-info-players").textContent).toBe("Players: 3");
+      expect(byId(handle, "hud-info-players").textContent).toBe("Игроки: 3");
       handle.setWatching(2);
-      expect(byId(handle, "hud-info-watching").textContent).toBe("Watching: 2");
+      expect(byId(handle, "hud-info-watching").textContent).toBe("Зрители: 2");
       handle.setCounters(5, 1);
-      expect(byId(handle, "hud-info-players").textContent).toBe("Players: 5");
-      expect(byId(handle, "hud-info-watching").textContent).toBe("Watching: 1");
+      expect(byId(handle, "hud-info-players").textContent).toBe("Игроки: 5");
+      expect(byId(handle, "hud-info-watching").textContent).toBe("Зрители: 1");
     } finally {
       handle.dispose();
     }
@@ -222,9 +222,10 @@ describe("createHud top-left info list", () => {
       expect(root.querySelector("#hud-topbar")).toBe(null);
       handle.setScore(7);
       expect(byId(handle, "hud-score").textContent).toBe("7");
-      expect(byId(handle, "hud-score").attributes["aria-label"]).toBe("Score: 7");
-      handle.setStatus("Fragged — respawning…");
-      expect(byId(handle, "hud-status").textContent).toBe("Fragged — respawning…");
+      expect(byId(handle, "hud-score-label").textContent).toBe("СЧЁТ");
+      expect(byId(handle, "hud-score").attributes["aria-label"]).toBe("Счёт: 7");
+      handle.setStatus("Возрождение…");
+      expect(byId(handle, "hud-status").textContent).toBe("Возрождение…");
       // Hearts container still a direct centered child of the root, untouched.
       expect(root.querySelector("#hud-hearts")).not.toBe(null);
       expect(byId(handle, "hud-hearts").textContent).toBeDefined();
@@ -240,10 +241,30 @@ describe("createHud top-left info list", () => {
       handle.setHearts(5);
       const hearts = byId(handle, "hud-hearts");
       expect(hearts.attributes.role).toBe("img");
-      expect(hearts.attributes["aria-label"]).toBe("Health: 5 of 8 half hearts");
+      expect(hearts.attributes["aria-label"]).toBe("Здоровье: 5 из 8 половинок сердца");
       expect(hearts.children.find((heart) => heart.className === "heart heart-half")?.textContent).toBe("♥");
     } finally {
       handle.dispose();
     }
+  });
+});
+
+describe("Russian player-facing event messages", () => {
+  it("translates known server events without changing player names", () => {
+    expect(localizeKillfeed("Alice joined the fight")).toBe("Alice вступает в бой");
+    expect(localizeKillfeed("Alice fragged Борис")).toBe("Alice выбивает Борис");
+    expect(localizeKillfeed("Alice grabbed SUPER core (x2 next shot)"))
+      .toBe("Суперзаряд у Alice: ×2 к броску");
+  });
+
+  it("accepts already localized server events and hides unknown English text", () => {
+    expect(localizeKillfeed("Alice получает щит")).toBe("Alice получает щит");
+    expect(localizeKillfeed("internal server error")).toBe("Событие на арене");
+  });
+
+  it("names local pickup effects in Russian", () => {
+    expect(localizePowerUp("shield")).toBe("Подобран щит");
+    expect(localizePowerUp("speed")).toBe("Подобрано ускорение");
+    expect(localizePowerUp("future-kind")).toBe("Подобран бонус");
   });
 });

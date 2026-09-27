@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { afterEach, describe, expect, it } from "vitest";
 import { getIceZones, getSpawnPoints, getSwampZones, isOnIce, isOnSwamp } from "../arena/Arena";
-import { CHARGE_MOVE_MULT, ICE_INPUT_THRESHOLD, ICE_SPEED_MULT, MOVE_SPEED, SWAMP_SPEED_MULT } from "../config";
+import { CHARGE_MOVE_MULT, ICE_INPUT_THRESHOLD, ICE_SPEED_MULT, KNOCKBACK_IMPULSE, MOVE_SPEED, SWAMP_SPEED_MULT } from "../config";
 import { SceneManager } from "./SceneManager";
 
 const FRAME = 1 / 60;
@@ -212,19 +212,16 @@ describe("SceneManager surface movement and impulse", () => {
     }
   });
 
-  it("lets an impulse power-up carry the player >0.5m within 0.5s", async () => {
+  it("preserves hit knockback momentum through the local steering blend", async () => {
     const manager = await createSceneManager();
-    manager.debugSetPlayerState({ x: 0, y: 1.1, z: 0 }, { x: 0, y: 0, z: 0 });
+    manager.debugSetPlayerState({ x: 0, y: 1.1, z: 0 }, { x: KNOCKBACK_IMPULSE, y: 0, z: 0 });
     const start = manager.getAvatarPosition();
-    manager.grantPowerUp("impulse");
-    for (let i = 0; i < 30; i += 1) {
+    for (let i = 0; i < 12; i += 1) {
       manager.update(FRAME, NO_MOVE, NO_LOOK);
     }
     const end = manager.getAvatarPosition();
     const displacement = Math.hypot(end.x - start.x, end.z - start.z);
-    // Old code: the next update() wiped the horizontal kick (only the hop
-    // remained), so displacement stayed ~0.
-    expect(displacement).toBeGreaterThan(0.5);
+    expect(displacement).toBeGreaterThan(0.25);
   });
 
   it("halves local move speed while charging (server mirror, bug C)", async () => {

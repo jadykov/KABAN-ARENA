@@ -14,7 +14,9 @@ describe("shared arena layout", () => {
     })));
     expect(getTrampolines()).toEqual(ARENA_LAYOUT.trampolines);
     expect(getSpawnPoints()).toEqual(ARENA_LAYOUT.spawns);
-    expect(getPickupSlots()).toEqual(ARENA_LAYOUT.pickups);
+    expect(getPickupSlots()).toEqual(ARENA_LAYOUT.pickups.map((point, id) => ({
+      id, x: point.x, z: point.z,
+    })));
   });
 
   it("rejects edits that cannot produce a valid six-player arena", () => {

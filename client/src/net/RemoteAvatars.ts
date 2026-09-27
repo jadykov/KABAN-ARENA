@@ -22,6 +22,7 @@ import {
   type HopState,
 } from "../fx/AvatarVisuals";
 import { HitFlash } from "../fx/CameraShake";
+import { PowerEffectVisuals, type PowerEffectKind } from "../fx/PowerEffectVisuals";
 import { RemoteTrack, type RemoteTarget } from "./interpolation";
 import { paletteForSession, type NetPlayerSnapshot } from "./protocol";
 import { ACCENT_HIT_FLASH, NEUTRAL_WHITE, NEUTRAL_WHITE_CSS } from "../palette";
@@ -62,6 +63,7 @@ interface RemoteEntry {
   body: THREE.Mesh;
   label: THREE.Sprite;
   visuals: AvatarVisualsHandle;
+  effects: PowerEffectVisuals;
   track: RemoteTrack;
   hop: HopState;
   // Per-remote victim hit-flash (Stage 4d.4): own HitFlash timer ticked in
@@ -100,6 +102,7 @@ export class RemoteAvatars {
   // colors (shared geometry can't carry per-player clothing).
   private readonly templateGeometry = new THREE.CapsuleGeometry(0.5, 1.0, 6, 12);
   private readonly entries = new Map<string, RemoteEntry>();
+  private readonly pendingPickups = new Map<string, { kind: PowerEffectKind; at: number }>();
 
   public constructor(scene: THREE.Scene, onRemoteDeath: RemoteDeathHandler | null = null) {
     this.scene = scene;
@@ -118,6 +121,7 @@ export class RemoteAvatars {
     snapshots: readonly NetPlayerSnapshot[],
     selfId: string | null,
     deltaSeconds: number,
+    serverNow: number = Date.now(),
   ): void {
     const seen = new Set<string>();
     for (const snapshot of snapshots) {
@@ -142,6 +146,11 @@ export class RemoteAvatars {
       // Idle hold bob on the remote hand-ball (no charge data replicates, so
       // remotes never swell/flick — local-only anims stay in SceneManager).
       entry.visuals.update(deltaSeconds);
+      entry.effects.setActive(
+        snapshot.alive && snapshot.shieldHp > 0 && snapshot.shieldUntil > serverNow,
+        snapshot.alive && snapshot.speedUntil > serverNow,
+      );
+      entry.effects.update(deltaSeconds);
       // Victim hit-flash tick (Stage 4d.4): fades a triggered flash back to
       // emissiveIntensity 0 over 0.18s; idle entries rewrite 0 (scalar, no
       // alloc). Runs for dead entries too so a lethal hit still fades out.
@@ -226,6 +235,7 @@ export class RemoteAvatars {
     // with the same per-session palette color as the shirt; face variant
     // picked from the snapshot session id (stable identity).
     const visuals = attachAvatarVisuals(rig, shirt, snapshot.sessionId);
+    const effects = new PowerEffectVisuals(rig);
     rig.visible = snapshot.alive;
     group.add(rig);
     group.add(label);
@@ -237,6 +247,7 @@ export class RemoteAvatars {
       body,
       label,
       visuals,
+      effects,
       track: new RemoteTrack(snapshot.x, snapshot.y, snapshot.z, snapshot.rotY),
       hop: createHopState(snapshot.sessionId),
       flash: new HitFlash(),
@@ -247,7 +258,21 @@ export class RemoteAvatars {
       color: shirt,
       wasAlive: snapshot.alive,
     };
+    const pending = this.pendingPickups.get(snapshot.sessionId);
+    if (pending !== undefined) {
+      if (Date.now() - pending.at < 1000) effects.showPickup(pending.kind);
+      this.pendingPickups.delete(snapshot.sessionId);
+    }
     return entry;
+  }
+
+  public showBonusPickup(sessionId: string, kind: PowerEffectKind): void {
+    const entry = this.entries.get(sessionId);
+    if (entry !== undefined) {
+      entry.effects.showPickup(kind);
+    } else {
+      this.pendingPickups.set(sessionId, { kind, at: Date.now() });
+    }
   }
 
   // Remote victim hit-flash (Stage 4d.4): spikes THAT remote's body emissive
@@ -265,6 +290,7 @@ export class RemoteAvatars {
     this.entries.delete(sessionId);
     this.scene.remove(entry.group);
     entry.visuals.dispose();
+    entry.effects.dispose();
     const bodyGeometry = entry.body.geometry as THREE.BufferGeometry;
     bodyGeometry.dispose();
     const bodyMaterial = entry.body.material as THREE.Material;
@@ -280,5 +306,6 @@ export class RemoteAvatars {
       this.removeEntry(sessionId, entry);
     }
     this.templateGeometry.dispose();
+    this.pendingPickups.clear();
   }
 }

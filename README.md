@@ -5,9 +5,9 @@
 - KABAN ARENA: browser-based 3D multiplayer mobile-first arena game.
 - FFA (every-man-for-himself), 2-6 players per room; solo players get up to 4 weak bots (`server/src/config.ts:6-10`).
 - Guest flow, no auth: pick nick + press Play; empty nick falls back to `Guest-XXXX`; late join mid-match till round end.
-- Short rounds: first to 100 points OR 3 min timer, hard cap under 5 min (`server/src/config.ts:23-28`).
+- Every round lasts 3 minutes; the highest score at the end wins (`server/src/config.ts`, `server/src/rooms/ArenaRoom.ts`).
 - Performance priority over graphics: stable ~60fps target on mid phones (mid Android 2021, iPhones 14/15/16).
-- Art: stylized low-poly neon-warehouse arena (dark floor + neon accents, readable in sunlight), four small platform shopfronts, and a central banner.
+- Art: stylized low-poly arena with worn floor tiles, smooth bog pools, and four small platform shopfronts. The floating center banner has been removed.
 
 ## Stack
 
@@ -33,15 +33,15 @@
 - Local URLs after compose up: client `http://localhost:5173/`, server health `http://localhost:2567/health`.
 - After any change: `npm run typecheck` + `lint` + `test` + `build`, then `docker compose up --build -d` and confirm client HTTP 200 + `/health {"ok":true}` (established session cadence, see `LOG.md`).
 - Server URL resolution: `VITE_SERVER_URL` env wins, else derived from the page URL — proxied pages (no port / :80 / :443) use the same origin with no port (`wss://` on https, `ws://` on http), pages on `:2567` keep `:2567`, dev `:5173` targets `ws://<page-host>:2567` (`client/src/config.ts` `getServerUrl`); server port from `PORT` env, default 2567 (`server/src/index.ts` `getPort`).
-- Shop signs: `fence-2` is used on the two diagonally opposite «Красное & Белое» platforms, `fence-3` for «Магнит», and `fence-1` for «Пятёрочка». The source files stay in `client/assets/ads/`; `npm run sync-ads` copies them to `public/ads`. A replacement PNG takes priority over JPG. The six perimeter-wall ad frames are gone; the central `banner.png/jpg/svg` remains.
+- Shop signs: `fence-2` is used on the two diagonally opposite «Красное & Белое» platforms, `fence-3` for «Магнит», and `fence-1` for «Пятёрочка». The source files stay in `client/assets/ads/`; `npm run sync-ads` copies them to `public/ads`. A replacement PNG takes priority over JPG. No perimeter or floating center ad is rendered.
 
 ## Map editor
 
 - Open `http://localhost:5173/editor.html` while the development containers are running. The editor shows a 2D top-down plan; drag blocks, platforms with ramps, swamp/ice zones, trampolines, six spawn points, and power-up points. Select an object to edit exact coordinates, size, height, radius, or ramp side. The fixed center SUPER core and boundary walls are shown for context.
 - **Save map** validates and writes `shared/arena-layout.json` directly when the local editor is opened at `localhost:5173`. The separate save service is bound to host loopback on `127.0.0.1:5174`; the game port has no write endpoint. **Download JSON** always exports the same file; in the production/static editor, Save downloads it because a public web page cannot write server source files. To apply a downloaded map, replace `shared/arena-layout.json` in the project.
-- This JSON is the common source for client visuals and Rapier colliders, server collision/surface/spawn calculations, and editor coordinates. The validator rejects out-of-bounds objects, invalid ramps, blocked spawns/trampolines, and pickup markers buried in tall solids or ramps. It requires at least six distinct spawn points for a full room. Test access to each object manually: the validator cannot prove that every route is playable.
+- This JSON is the common source for client visuals and Rapier colliders, server collision/surface/spawn calculations, and editor coordinates. The validator rejects out-of-bounds objects, invalid ramps, blocked spawns/trampolines, and pickup markers buried in tall solids or ramps. It allows at most three pickup markers with distinct coordinates and requires at least six distinct spawn points for a full room. Test access to each object manually: the validator cannot prove that every route is playable.
 - The four shopfronts follow the first four platform entries in the map. They are decorative and add no colliders. Fighters can run under the raised part of a ramp where their capsule fits; the low part of the ramp and the platform block remain solid.
-- Pickup positions are shared, but their effects still run on the client. The pre-existing speed bonus can therefore cause position correction in multiplayer; verify it during playtest.
+- The three neutral pickup positions are shared. The server picks shield or speed at random on collection, applies damage and movement effects, and replicates pickup availability and effect timing to all clients. The separate timed center SUPER core keeps its x2 next-shot effect.
 - After saving in development, run `docker compose restart server` and reload the game page. Running rooms do not change their map in place. For production, rebuild the client/server image from the updated JSON and redeploy it before the new map appears online.
 
 ## Production deploy (VPS)
@@ -71,13 +71,13 @@
 - `client/src/net/RemoteAvatars.ts` — remote bodies (shared capsule geometry, per-player color/face/hop via `AvatarVisuals`).
 - `client/src/net/aimAssist.ts` — subtle deterministic aim pull (18m, 12-degree cone, 0.5 blend; server hit radius unchanged).
 - `client/src/physics/World.ts` — Rapier world wrapper (fixed-step accumulator, colliders mirror `Arena` visuals, slippery/trampoline hooks).
-- `client/src/arena/PowerUps.ts` — pickup visuals/respawn client-side mirror of server state.
+- `client/src/arena/PowerUps.ts` — neutral pickup visuals and client prediction mirror of server-selected effects.
 - `client/src/fx/Particles.ts`, `client/src/fx/CameraShake.ts` — pooled hit particles (pool 128, burst 24) + hit flash (0.18s) + light camera shake.
 - `client/src/ui/aim.ts`, `client/src/ui/hud.ts` — dotted trajectory preview + Worms-style power bar; DOM HUD (timer, score, 4 hearts as 0-8 halves, killfeed, super badge, reload bar).
 - `server/src/rooms/ArenaRoom.ts` — authoritative movement, ball ballistics, damage, round FSM (lobby/countdown/playing/ended), respawns, rematch, super-core lifecycle.
 - `server/src/bots.ts` — server-side weak-bot AI (charge 0.3-1.0s, 2.5s cooldown, zero spray).
 - `server/src/hits.ts` — muzzle/damage math: `muzzleForShot`, `chargeToPower01`, `powerToSpeed`, `damageForPower`, thrower-Y derive/clamp, hitscan validation.
-- `server/src/state.ts` — `@type` schema: `PlayerState` (pos/rot/hp/score/alive/bot/ready/spectator/superBuff/reloadUntil), `BallState`, `ArenaState` (phase, balls map, super-core fields).
+- `server/src/state.ts` — `@type` schema: `PlayerState` (pos/rot/hp/score/alive/bot/ready/spectator/superBuff/reloadUntil/shield/speed), `BallState`, `PickupState`, `ArenaState` (phase, balls/pickups maps, super-core fields, server clock).
 - `client/src/main.ts` — wiring: Engine + SceneManager + InputController + NetworkManager + joystick/HUD/aim; nick focus guard, Play/spectator flow, charge/fire/reload loop.
 - Tuning lives in `client/src/config.ts` (display mirrors) and `server/src/config.ts` (authoritative); charge/speed/gravity/muzzle numbers must stay identical on both sides.
 - Tests live next to sources (`*.test.ts`, vitest): client 17 files / server 5 files; perf-critical invariants are pinned (pixelRatio clamp, charge/damage mapping, muzzle sync, ice friction band).
@@ -94,7 +94,8 @@
 - Charge throw: hold to charge, `CHARGE_MAX_S 1.0` -> power01 [0.5, 1.0]; `RELOAD_MS 2500`; FULL threshold 0.8; tap <0.08s never fires (`server/src/config.ts:40,50-51`, `client/src/config.ts:234`).
 - Ballistics: speed 11-20 by power, gravity 3.5 lob, chest-exit muzzle 0.7m along aim dir, torso offset +0.3 (ground spawn y 1.4); zero spray; recoil kick 0.4-0.8m.
 - Super core: center spawn every 45s, 15s life, blink last 3s, 1.7m pickup; buffs NEXT shot x2 (consumed even on miss).
-- Power-ups (set A1): speed x1.3 (6s), shield (1 hit), impulse knockback; respawn 8s.
+- Three neutral pickup points: each awards either speed x1.25 for 5s or a shield that absorbs 25 damage for up to 10s; respawn 8s. Both effects are server authoritative. A one-second overhead SVG badge announces the effect, with subtle shield and wind visuals while it lasts.
+- Scene light follows the server's three-minute round clock from morning through day and sunset to deep night. The player-facing interface is Russian.
 - Trampolines: trigger band y 1.7, cooldown 0.5s. Swamp: 0.22 movement speed, no glide, 15% smaller radius than the old ice circles. Ice: 0.65 movement speed, low friction (0.07), quick input acceleration, gentle coast, and a 0.06 input deadzone for touch-stick drift.
 - Round loop C2: lobby countdown 3s, respawn 3s, invuln 2s; late join till round end; rematch reset 5s after end.
 - Room guards: human-entry-counted capacity (bots ignored), explicit `room-full` reject, `ensureBots` capped by `players.size < MAX_PLAYERS`.
@@ -115,17 +116,14 @@
 
 - Stage 1 done: Docker infra + monorepo skeleton + CI checks (typecheck/lint/test/build green).
 - Stage 2 done: Engine / SceneManager / InputController + transparent joystick + `e.code` WASD + right-mouse camera + DOM HUD.
-- Stage 3 done: neon-warehouse arena + Rapier physics + power-ups + beauty-perf compromise + fence/banner ads (`client/assets/ads/`).
+- Stage 3 done: neon-warehouse arena + Rapier physics + power-ups + beauty-perf compromise + shopfront ads (`client/assets/ads/`).
 - Stage 4a done (2026-09-12): pre-join spectator (hover cam, plate, Players/Watching counters, bots only for ready fighters).
 - Stage 4b done (2026-09-12): cannon combat (charge/release, halves HUD, super core, dual-stick, reload).
 - Stage 4c done (2026-09-12): throw polish (trajectory dots + Worms bar, two-tone cores, no spray, 140 tests).
 - Stage 4d.1 done (2026-09-17): avatar hand-ball + Mii faces + two-tone clothing + South-Park hop; torso-height throw (spawn y 1.4 ground), 218 tests green.
 - Note: Stage 4 boxes (rooms/round/bots/interp) in `MAP.md` stay open pending owner live-playtest sign-off (2-6 clients, late join, <5min round, rematch).
 - Perf budgets enforced in Stage 5: draws <=60, textures <=512 single atlas, build <15MB, audio <300KB, 20 ticks/s (`MAP.md` Stage 1/5).
-- Current stage (2026-09-26): smaller swamp circles on the original diagonal and milder sliding ice circles on the opposite diagonal, with lightweight pixel-style swamp bubbling, are implemented locally. Automated checks and local Docker smoke checks pass; owner playtest on phone and PC is next (`map.md`).
-- Then 4d.3: central 4 cubes x2 higher, trampoline-only access; glass walls + space (stars + 2-3 cheap nebula sprites); 8 sprite-glow fireflies in groups 1-3, no new lights.
-- Then 4d.4: ricochet visual-only after first damaging hit; one previous shot rests on ground (despawn on thrower's next shot OR timeout); victim knockback + pixel blood burst + quick red-orange flash; cores fully tinted in thrower color.
-- Then Stage 5: polish + mobile perf pass (60fps on iPhones 14/15/16 + mid Android, build <15MB, audio <300KB via `assets/audio/`) + bugfix/coverage + owner playability sign-off.
+- Current stage (2026-09-27): Stage 6 visual, bonus, language, and round-time changes are implemented locally (`plan.md`, `map.md`). Automated checks and local Docker smoke checks pass. Owner playtest on PC and phone, including two-client bonus behavior and actual FPS/draw calls, is next. No commit, push, or VPS deployment has been performed for this stage.
 
 ## Agent memory note
 

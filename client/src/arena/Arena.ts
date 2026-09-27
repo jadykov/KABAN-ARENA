@@ -714,9 +714,9 @@ export class ArenaBuilder {
       depthWrite: false,
       side: THREE.DoubleSide,
     }));
-    // 10 sparse pixel ripples per circle, all in one draw call. The instance
+    // Seven sparse circular ripples per circle, all in one draw call. The instance
     // matrix alone changes each frame; positions and phases are deterministic.
-    const bubbleCountPerZone = 10;
+    const bubbleCountPerZone = 7;
     const bubbles = this.track(new THREE.InstancedMesh(bubbleGeometry, bubbleMaterial, zones.length * bubbleCountPerZone));
     bubbles.name = "swamp-bubbles";
     bubbles.frustumCulled = false;
@@ -834,24 +834,48 @@ function makeRgbTexture(size: number, pick: (x: number, y: number) => number): T
   return texture;
 }
 
-// Two by two stone tiles repeat six times across the unchanged floor. Subtle
-// grout, value variation and a sparse four-point star borrow the references'
-// tactile paving while keeping combat silhouettes dominant.
+// Two by two stone tiles repeat across the unchanged floor. Broken, feathered
+// grout and restrained tile-to-tile variation make the paving feel worn while
+// keeping combat silhouettes dominant. This is generated once, never per frame.
+function hash2(x: number, y: number): number {
+  return (((x * 73856093) ^ (y * 19349663)) >>> 0) % 1024 / 1024;
+}
+
+function mixHex(a: number, b: number, t: number): number {
+  const amount = Math.max(0, Math.min(1, t));
+  const r = Math.round(((a >> 16) & 255) * (1 - amount) + ((b >> 16) & 255) * amount);
+  const g = Math.round(((a >> 8) & 255) * (1 - amount) + ((b >> 8) & 255) * amount);
+  const blue = Math.round((a & 255) * (1 - amount) + (b & 255) * amount);
+  return (r << 16) | (g << 8) | blue;
+}
+
 function createFloorTexture(): THREE.DataTexture {
   const texture = makeRgbTexture(256, (x, y) => {
     const tx = Math.floor(x / 128);
     const ty = Math.floor(y / 128);
     const lx = x % 128;
     const ly = y % 128;
-    if (lx < 3 || ly < 3 || lx > 124 || ly > 124) return BASE_FLOOR_GROUT;
+    const variation = 0.31 + hash2(tx + 7, ty + 13) * 0.23
+      + (Math.sin(x * 0.11 + y * 0.07) + Math.sin(x * 0.043 - y * 0.12)) * 0.025;
+    let stone = mixHex(BASE_FLOOR, BASE_FLOOR_LIGHT, variation);
     const dx = Math.abs(lx - 64);
     const dy = Math.abs(ly - 64);
     const star = tx === ty && (
       (dx < 2 && dy < 20) || (dy < 2 && dx < 20) || dx + dy < 11
     );
-    if (star) return BASE_FLOOR_STAR;
-    const fleck = ((Math.floor(x / 9) * 37 + Math.floor(y / 11) * 23) % 17) === 0;
-    return fleck || (tx + ty) % 2 === 0 ? BASE_FLOOR_LIGHT : BASE_FLOOR;
+    if (star) stone = mixHex(stone, BASE_FLOOR_STAR, 0.58);
+    const fleck = hash2(Math.floor(x / 7), Math.floor(y / 9));
+    if (fleck > 0.975) stone = mixHex(stone, BASE_FLOOR_LIGHT, 0.28);
+    const edgeX = Math.min(lx, 127 - lx);
+    const edgeY = Math.min(ly, 127 - ly);
+    const alongX = hash2(tx * 31 + Math.floor(y / 8), ty * 17 + 4);
+    const alongY = hash2(ty * 31 + Math.floor(x / 8), tx * 17 + 9);
+    const wearX = alongX > 0.79 ? 0.22 : 1;
+    const wearY = alongY > 0.79 ? 0.22 : 1;
+    const seamX = Math.max(0, (3.4 - edgeX + Math.sin(y * 0.19) * 0.5) / 3.3) * wearX;
+    const seamY = Math.max(0, (3.4 - edgeY + Math.sin(x * 0.17) * 0.5) / 3.3) * wearY;
+    const seam = Math.min(0.78, Math.max(seamX, seamY));
+    return seam > 0 ? mixHex(stone, BASE_FLOOR_GROUT, seam) : stone;
   });
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
@@ -885,58 +909,62 @@ function createPadTexture(): THREE.DataTexture {
   });
 }
 
-// A single 64px nearest-filter map gives the mud blocky edge and small value
-// shifts. It is built once, shared by both circles, and disposed by Arena.
+// Smooth 128px mud decal with broad, quiet mineral swirls and an organic soft
+// edge. One map is shared by every zone and disposed with the arena.
 function createSwampTexture(): THREE.DataTexture {
-  const size = 64;
+  const size = 128;
   const data = new Uint8Array(size * size * 4);
   for (let y = 0; y < size; y += 1) {
     for (let x = 0; x < size; x += 1) {
-      const gx = Math.floor(x / 4);
-      const gy = Math.floor(y / 4);
-      const hash = ((gx * 37 + gy * 71 + gx * gy * 19) ^ (gx * gy * 13)) & 255;
       const dx = (x + 0.5 - size / 2) / (size / 2);
       const dy = (y + 0.5 - size / 2) / (size / 2);
       const radius = Math.hypot(dx, dy);
-      const limit = 0.99 + ((hash % 5) - 2) * 0.005;
+      const angle = Math.atan2(dy, dx);
+      const edge = 0.96 + 0.018 * Math.sin(angle * 5 + 0.6)
+        + 0.011 * Math.sin(angle * 9 - 1.3);
+      const alpha = Math.max(0, Math.min(1, (edge - radius) / 0.065 + 0.35));
+      const swirl = Math.sin(angle * 3 + radius * 13 + Math.sin(angle * 2) * 0.6);
+      const depth = mixHex(ACCENT_SWAMP_MUD_EDGE, ACCENT_SWAMP_MUD, 0.22 + radius * 0.76);
+      const color = mixHex(depth, ACCENT_SWAMP_MUD_LIGHT,
+        Math.max(0, (swirl + 0.35) * 0.11) + Math.max(0, 1 - Math.abs(radius - 0.78) / 0.11) * 0.12);
       const pixel = (y * size + x) * 4;
-      const color = radius > limit - 0.075
-        ? ACCENT_SWAMP_MUD_EDGE
-        : hash % 9 < 2 ? ACCENT_SWAMP_MUD_LIGHT : ACCENT_SWAMP_MUD;
       data[pixel] = (color >> 16) & 255;
       data[pixel + 1] = (color >> 8) & 255;
       data[pixel + 2] = color & 255;
-      data[pixel + 3] = radius <= limit ? 255 : 0;
+      data[pixel + 3] = Math.round(alpha * 245);
     }
   }
   const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
   texture.colorSpace = THREE.SRGBColorSpace;
-  texture.magFilter = THREE.NearestFilter;
-  texture.minFilter = THREE.NearestFilter;
-  texture.generateMipmaps = false;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
   texture.needsUpdate = true;
   return texture;
 }
 
-// A bubble is a tiny broken square ripple made of pixels. Building these
-// quads into one geometry lets all 20 animated ripples use one instanced mesh.
+// Rounded broken rings read as gas bubbles in still mud. All 14 animated
+// ripples share this geometry and one instanced mesh.
 function createBubbleGeometry(): THREE.BufferGeometry {
   const positions: number[] = [];
   const colors: number[] = [];
   const light = new THREE.Color(ACCENT_SWAMP_BUBBLE_LIGHT);
   const dark = new THREE.Color(ACCENT_SWAMP_BUBBLE);
-  const cells = [
-    [-2, -1], [-2, 0], [-2, 1], [-1, -2], [0, -2], [1, -2],
-    [2, -1], [2, 0], [2, 1], [1, 2], [0, 2], [-1, 2],
-  ] as const;
-  for (const [cx, cy] of cells) {
-    const x = cx * 0.2;
-    const y = cy * 0.2;
-    const half = 0.095;
-    const tint = cx < 0 || cy > 0 ? light : dark;
+  const segments = 24;
+  for (let i = 0; i < segments; i += 1) {
+    if (i === 2 || i === 3 || i === 15) continue;
+    const angle0 = i * Math.PI * 2 / segments;
+    const angle1 = (i + 1) * Math.PI * 2 / segments;
+    const inner = 0.58;
+    const outer = 0.72;
+    const x0 = Math.cos(angle0);
+    const y0 = Math.sin(angle0);
+    const x1 = Math.cos(angle1);
+    const y1 = Math.sin(angle1);
+    const tint = i < 12 ? light : dark;
     positions.push(
-      x - half, y - half, 0, x + half, y - half, 0, x + half, y + half, 0,
-      x - half, y - half, 0, x + half, y + half, 0, x - half, y + half, 0,
+      x0 * inner, y0 * inner, 0, x0 * outer, y0 * outer, 0, x1 * outer, y1 * outer, 0,
+      x0 * inner, y0 * inner, 0, x1 * outer, y1 * outer, 0, x1 * inner, y1 * inner, 0,
     );
     for (let vertex = 0; vertex < 6; vertex += 1) colors.push(tint.r, tint.g, tint.b);
   }

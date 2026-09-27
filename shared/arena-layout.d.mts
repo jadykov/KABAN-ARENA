@@ -26,11 +26,7 @@ export interface LayoutZone extends LayoutPoint {
   radius: number;
 }
 
-export type PickupKind = "speed" | "shield" | "impulse";
-
-export interface LayoutPickup extends LayoutPoint {
-  kind: PickupKind;
-}
+export type LayoutPickup = LayoutPoint;
 
 export interface ArenaLayout {
   version: 1;

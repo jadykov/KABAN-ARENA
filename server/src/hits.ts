@@ -33,7 +33,6 @@ import {
   TRAMPOLINE_IMPULSE,
   TRAMPOLINE_SPOTS,
   WEAK_DAMAGE,
-  WIN_SCORE,
 } from "./config.js";
 import { rampHeightAt, rampRunForTop } from "../../shared/arena-layout.mjs";
 import type { PlayerState } from "./state.js";
@@ -551,7 +550,7 @@ export function applyHit(
   nowMs: number,
   damage: number = HIT_DAMAGE,
 ): HitResult {
-  const dealt = Number.isFinite(damage) && damage > 0 ? damage : HIT_DAMAGE;
+  const dealt = Number.isFinite(damage) && damage >= 0 ? damage : HIT_DAMAGE;
   target.hp = Math.max(0, target.hp - dealt);
   shooter.score += HIT_SCORE;
   if (target.hp <= 0) {
@@ -576,6 +575,21 @@ export function respawnPlayer(player: PlayerState, spawnIndex: number, nowMs: nu
   player.invulnUntil = nowMs + INVULN_MS;
 }
 
-export function isScoreWin(score: number): boolean {
-  return score >= WIN_SCORE;
+// Damage is subtracted from the timed shield before HP. A 50-damage super
+// shot against a fresh 25-point shield still deals 25 HP damage.
+export function absorbShieldDamage(
+  target: PlayerState,
+  damage: number,
+  nowMs: number,
+): { absorbed: number; healthDamage: number } {
+  const incoming = Number.isFinite(damage) ? Math.max(0, damage) : 0;
+  if (target.shieldHp <= 0 || nowMs >= target.shieldUntil) {
+    target.shieldHp = 0;
+    target.shieldUntil = 0;
+    return { absorbed: 0, healthDamage: incoming };
+  }
+  const absorbed = Math.min(target.shieldHp, incoming);
+  target.shieldHp = Math.max(0, target.shieldHp - absorbed);
+  if (target.shieldHp === 0) target.shieldUntil = 0;
+  return { absorbed, healthDamage: incoming - absorbed };
 }

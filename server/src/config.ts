@@ -75,12 +75,18 @@ export const PLAYER_BODY_RADIUS = 0.5;
 export const LOBBY_COUNTDOWN_MS = 3000;
 export const RESPAWN_DELAY_MS = 100;
 export const INVULN_MS = 2000;
-// First to WIN_SCORE points OR ROUND_DURATION_MS timer, whichever first.
-// Hard cap ROUND_HARD_CAP_MS stays under 5 minutes (300000ms).
-export const WIN_SCORE = 100;
+// Every round runs the full three minutes. Score determines the winner only
+// when the timer reaches zero.
 export const ROUND_DURATION_MS = 180000; // 3 min
-export const ROUND_HARD_CAP_MS = 290000; // <5min hard cap incl. countdown
 export const REMATCH_DELAY_MS = 5000; // ended -> clean reset delay
+
+// Neutral arena pickups: every pickup independently grants one random effect.
+export const POWERUP_RESPAWN_MS = 8000;
+export const POWERUP_PICKUP_RADIUS = 1.2;
+export const SHIELD_DURATION_MS = 10000;
+export const SHIELD_CAPACITY = 25;
+export const SPEED_DURATION_MS = 5000;
+export const SPEED_MULTIPLIER = 1.25;
 
 // Damage model hitscan A: 100HP / 25 dmg = 4 hits = 4 hearts (QD3).
 // R2 cannon: float HP kept, FULL=25 (1 heart), WEAK=12.5 (half heart),
@@ -207,7 +213,7 @@ export type CenterItemKind = "super"; // | "pineapple" | "heal" (future)
 // CenterItemKind — a future item plugs in as a single line here and its
 // tick*Item pickup message reads the name from this map, no template edits.
 export const CENTER_ITEM_NAMES: Record<CenterItemKind, string> = {
-  super: "SUPER core",
+  super: "СУПЕР-ядро",
 };
 // Server obstacle mirrors (client Arena.getObstacleLayout): AABB + topY for
 // cannonball impacts (a ball inside the footprint with y <= topY impacts)
@@ -290,13 +296,13 @@ export const BOT_SPRAY_DEG = 0;
 // Guest nicks (no auth): validated + deduped on join.
 export const NICK_MIN_LENGTH = 2;
 export const NICK_MAX_LENGTH = 16;
-export const DEFAULT_NICK_PREFIX = "Kaban";
-// R1 pre-join spectator: empty Play nick falls back to Guest-XXXX.
-export const GUEST_NICK_PREFIX = "Guest";
+export const DEFAULT_NICK_PREFIX = "Кабан";
+// R1 pre-join spectator: empty Play nick falls back to Гость-XXXX.
+export const GUEST_NICK_PREFIX = "Гость";
 
 // Weak-bot tuning (slow, inaccurate, solo-friendly).
 export const BOT_SPEED = 2.2;
 export const BOT_FIRE_RANGE = 12;
 export const BOT_FIRE_INTERVAL_MS = 1600;
 export const BOT_RETARGET_MS = 2500;
-export const BOT_NAMES = ["Boris", "Gosha", "Misha", "Pumba"] as const;
+export const BOT_NAMES = ["Борис", "Гоша", "Миша", "Пумба"] as const;

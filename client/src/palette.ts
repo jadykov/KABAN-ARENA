@@ -2,10 +2,18 @@
 // to linear space by THREE.Color; procedural DataTextures declare sRGB.
 // CSS mirrors are named here so HUD colors follow the world art direction.
 
-// Night backdrop and cool slate walking surface. The grout and faint floor
-// stars add scale without competing with players, pickups, or aim feedback.
+// Round sky palette: warm pale morning, clear day, muted sunset, deep night.
+// Fog tracks the sky so the arena fades into each phase without a hard seam.
 export const BASE_BG = 0x0b1829;
 export const BASE_BG_CSS = "#0b1829";
+export const SKY_DAWN_BG = 0x718f9d;
+export const SKY_DAWN_FOG = 0x849ba2;
+export const SKY_DAY_BG = 0x91b8c5;
+export const SKY_DAY_FOG = 0x9ebcbf;
+export const SKY_SUNSET_BG = 0x675f71;
+export const SKY_SUNSET_FOG = 0x807985;
+// Cool slate walking surface. The grout and faint floor stars add scale
+// without competing with players, pickups, or aim feedback.
 export const BASE_FLOOR = 0x536b7b;
 export const BASE_FLOOR_GROUT = 0x344d5e;
 export const BASE_FLOOR_LIGHT = 0x617b87;
@@ -40,6 +48,12 @@ export const BASE_AD_CANVAS = "#102b35";
 export const SCENE_WARM_LIGHT = 0xffe0ab;
 export const SCENE_WARM_LIGHT_CSS = "#ffe0ab";
 export const SCENE_COOL_FILL = 0xa6c6d7;
+export const SCENE_DAWN_KEY = 0xffdfb1;
+export const SCENE_DAWN_FILL = 0xb8d1d5;
+export const SCENE_DAY_KEY = 0xfff3d1;
+export const SCENE_DAY_FILL = 0xd0e2df;
+export const SCENE_SUNSET_KEY = 0xffbd8b;
+export const SCENE_SUNSET_FILL = 0xc6abb6;
 export const ACCENT_STRIP = 0xd9a161;
 export const ACCENT_STRIP_BASE = 0x514638;
 export const ACCENT_ICE_GLOW = 0x9bdbea;
@@ -55,11 +69,9 @@ export const ACCENT_OBSTACLE_TINT = 0xd2e2c7;
 export const ACCENT_BALL_CAP = 0xe9e5d3;
 export const ACCENT_TRAIL = 0xc5dce2;
 export const ACCENT_SPARK = 0xffe5a4;
-export const ACCENT_SPOT = 0xffe0ab;
 export const ACCENT_HEART_FULL = "#e87568";
 export const ACCENT_HEART_HALF = "#f3c5aa";
 export const ACCENT_FIRE_BUTTON = "rgba(232, 117, 104, 0.28)";
-export const ACCENT_AD_BANNER = "#d9a161";
 export const ACCENT_AD_FENCE = "#d8e2c8";
 export const ACCENT_SUPER_TEXT_CSS = "#f9e4b0";
 export const ACCENT_DEATH_WHITE = 0xfff5db;

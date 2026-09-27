@@ -40,9 +40,22 @@ import {
   ACCENT_DEATH_PALE,
   ACCENT_DEATH_RED,
   ACCENT_DEATH_WHITE,
+  BASE_BG,
   HL_CHARTREUSE,
   SCENE_COOL_FILL,
+  SCENE_DAWN_FILL,
+  SCENE_DAWN_KEY,
+  SCENE_DAY_FILL,
+  SCENE_DAY_KEY,
+  SCENE_SUNSET_FILL,
+  SCENE_SUNSET_KEY,
   SCENE_WARM_LIGHT,
+  SKY_DAWN_BG,
+  SKY_DAWN_FOG,
+  SKY_DAY_BG,
+  SKY_DAY_FOG,
+  SKY_SUNSET_BG,
+  SKY_SUNSET_FOG,
 } from "../palette";
 import {
   FIREFLY_BLINK,
@@ -124,16 +137,16 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     return { manager, scene };
   }
 
-  it("uses one warm shadow key and one cool ambient fill", async () => {
+  it("starts at dawn with one shadow key and one ambient fill", async () => {
     const { scene } = await createManagerWithScene();
     const directional = scene.children.filter((child): child is THREE.DirectionalLight => child instanceof THREE.DirectionalLight);
     const ambient = scene.children.filter((child): child is THREE.AmbientLight => child instanceof THREE.AmbientLight);
     const spots = scene.children.filter((child): child is THREE.SpotLight => child instanceof THREE.SpotLight);
     expect(directional).toHaveLength(1);
     expect(ambient).toHaveLength(1);
-    expect(spots).toHaveLength(1); // Existing banner light only.
-    expect(directional[0]!.color.getHex()).toBe(SCENE_WARM_LIGHT);
-    expect(ambient[0]!.color.getHex()).toBe(SCENE_COOL_FILL);
+    expect(spots).toHaveLength(0);
+    expect(directional[0]!.color.getHex()).toBe(SCENE_DAWN_KEY);
+    expect(ambient[0]!.color.getHex()).toBe(SCENE_DAWN_FILL);
     expect(directional[0]!.shadow.mapSize.x).toBeLessThanOrEqual(SHADOW_MAP_SIZE);
     expect(directional[0]!.shadow.mapSize.y).toBeLessThanOrEqual(SHADOW_MAP_SIZE);
   });
@@ -200,14 +213,60 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
       expect(width).toBeGreaterThan(0);
       expect(width).toBeLessThanOrEqual(256);
     }
-    // Light budget untouched: 1 dir + 1 ambient + the banner spot exception.
+    // One directional and one ambient light throughout the cycle.
     const lights: THREE.Light[] = [];
     scene.traverse((child: THREE.Object3D) => {
       if (child instanceof THREE.Light) {
         lights.push(child);
       }
     });
-    expect(lights).toHaveLength(3);
+    expect(lights).toHaveLength(2);
+  });
+
+  it("moves continuously from dawn through day and sunset to deep night", async () => {
+    const { manager, scene } = await createManagerWithScene();
+    const background = scene.background as THREE.Color;
+    const fog = scene.fog as THREE.Fog;
+    const ambient = scene.children.find((child): child is THREE.AmbientLight => child instanceof THREE.AmbientLight)!;
+    const key = scene.children.find((child): child is THREE.DirectionalLight => child instanceof THREE.DirectionalLight)!;
+    const moon = scene.getObjectByName("moon") as THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
+    const stars = scene.getObjectByName("stars") as THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
+    const lightCount = scene.children.filter((child) => child instanceof THREE.Light).length;
+    expect(background.getHex()).toBe(SKY_DAWN_BG);
+    expect(fog.color.getHex()).toBe(SKY_DAWN_FOG);
+    expect(moon.material.opacity).toBe(0);
+    expect(stars.material.opacity).toBe(0);
+
+    manager.setDayProgress(0.32);
+    expect(background.getHex()).toBe(SKY_DAY_BG);
+    expect(fog.color.getHex()).toBe(SKY_DAY_FOG);
+    expect(ambient.color.getHex()).toBe(SCENE_DAY_FILL);
+    expect(key.color.getHex()).toBe(SCENE_DAY_KEY);
+    manager.setDayProgress(0.68);
+    expect(background.getHex()).toBe(SKY_SUNSET_BG);
+    expect(fog.color.getHex()).toBe(SKY_SUNSET_FOG);
+    expect(ambient.color.getHex()).toBe(SCENE_SUNSET_FILL);
+    expect(key.color.getHex()).toBe(SCENE_SUNSET_KEY);
+    expect(stars.material.opacity).toBeGreaterThan(0);
+    expect(moon.material.opacity).toBeGreaterThan(0);
+    manager.setDayProgress(0.69);
+    const afterSunset = background.clone();
+    manager.setDayProgress(0.691);
+    expect(Math.abs(background.r - afterSunset.r)
+      + Math.abs(background.g - afterSunset.g)
+      + Math.abs(background.b - afterSunset.b)).toBeLessThan(0.01);
+
+    manager.setDayProgress(1);
+    expect(background.getHex()).toBe(BASE_BG);
+    expect(fog.color.getHex()).toBe(BASE_BG);
+    expect(ambient.color.getHex()).toBe(SCENE_COOL_FILL);
+    expect(key.color.getHex()).toBe(SCENE_WARM_LIGHT);
+    expect(stars.material.opacity).toBeCloseTo(0.9);
+    expect(moon.material.opacity).toBeCloseTo(0.92);
+    expect(scene.children.filter((child) => child instanceof THREE.Light)).toHaveLength(lightCount);
+    manager.setDayProgress(0);
+    expect(background.getHex()).toBe(SKY_DAWN_BG);
+    expect(stars.material.opacity).toBe(0);
   });
 
   it("drifts 6 dimmed fireflies as one InstancedMesh (blink subset + wander/hover)", async () => {

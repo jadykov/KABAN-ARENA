@@ -235,6 +235,12 @@ describe("swamp, ice, and trampolines", () => {
       expect(floor.material.color.getHex()).toBe(0xffffff);
       expect(floor.material.map!.repeat.toArray()).toEqual([6, 6]);
       expect(textures.every((texture) => texture.colorSpace === THREE.SRGBColorSpace)).toBe(true);
+      const floorPixels = floor.material.map!.image.data as Uint8Array;
+      const floorPixel = (x: number, y: number): string =>
+        Array.from(floorPixels.subarray((y * 256 + x) * 4, (y * 256 + x) * 4 + 3)).join(",");
+      expect(new Set([16, 24, 32, 40, 48, 56, 64, 72, 80, 88]
+        .map((y) => floorPixel(1, y))).size).toBeGreaterThan(2);
+      expect(floorPixel(60, 60)).not.toBe(floorPixel(188, 60));
       expect(edges.count).toBe(getObstacleLayout().length * 4);
       expect(marks.count).toBe(getRamps().length * 4);
       expect(slabs.count).toBe(getRamps().length);
@@ -320,9 +326,17 @@ describe("swamp, ice, and trampolines", () => {
     try {
       expect(ice.count).toBe(getIceZones().length);
       expect(swamp.count).toBe(getSwampZones().length);
-      expect(bubbles.count).toBe(getSwampZones().length * 10);
+      expect(bubbles.count).toBe(getSwampZones().length * 7);
       expect(material.map).toBeInstanceOf(THREE.DataTexture);
-      expect(material.map?.magFilter).toBe(THREE.NearestFilter);
+      expect(material.map?.magFilter).toBe(THREE.LinearFilter);
+      expect(material.map?.minFilter).toBe(THREE.LinearMipmapLinearFilter);
+      expect((material.map?.image as { width: number }).width).toBe(128);
+      const swampPixels = (material.map?.image as { data: Uint8Array }).data;
+      const alphaAt = (x: number, y: number): number => swampPixels[(y * 128 + x) * 4 + 3] ?? 0;
+      expect(alphaAt(64, 64)).toBeGreaterThan(200);
+      expect(alphaAt(0, 0)).toBe(0);
+      expect(alphaAt(125, 64)).toBeGreaterThan(0);
+      expect(alphaAt(125, 64)).toBeLessThan(alphaAt(64, 64));
       const before = new THREE.Matrix4();
       const after = new THREE.Matrix4();
       bubbles.getMatrixAt(0, before);

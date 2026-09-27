@@ -85,7 +85,7 @@ export function createAim(parent: HTMLElement): AimHandle {
 
   const powerCaption = document.createElement("div");
   powerCaption.id = "power-caption";
-  powerCaption.textContent = "CHARGING";
+  powerCaption.textContent = "ЗАРЯД";
   el.appendChild(powerCaption);
 
   const reloadBar = document.createElement("div");
@@ -163,7 +163,7 @@ export function createAim(parent: HTMLElement): AimHandle {
     // carries the fine granularity; color carries the band.
     powerFill.style.width = `${Math.round(lastCharge * 100)}%`;
     el.dataset.state = superMode ? "super" : lastCharge >= 1 ? "full" : lastCharge > 0 ? "charging" : "idle";
-    powerCaption.textContent = lastCharge >= 1 ? "FULL POWER" : superMode ? "SUPER CHARGE" : "CHARGING";
+    powerCaption.textContent = lastCharge >= 1 ? "ПОЛНЫЙ ЗАРЯД" : superMode ? "СУПЕРЗАРЯД" : "ЗАРЯД";
     if (superMode && lastCharge > 0) {
       powerFill.style.background = CROSSHAIR_SUPER_COLOR;
       return;

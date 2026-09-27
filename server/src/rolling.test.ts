@@ -387,13 +387,13 @@ describe("4d.4 event feed: join broadcast", () => {
     (room as unknown as { handlePlay(client: Client, payload: unknown): void }).handlePlay(client, { nick: "Gamma" });
     const feeds = killfeedMessages(captured);
     expect(feeds).toHaveLength(1);
-    expect(feeds[0]).toBe("Gamma joined the fight");
+    expect(feeds[0]).toBe("Gamma вступил в бой");
   });
 });
 
 describe("4d.4 event feed: super-core pickup names the item from config", () => {
   it("pickup killfeed text reads the display name from CENTER_ITEM_NAMES", async () => {
-    expect(CENTER_ITEM_NAMES.super).toBe("SUPER core");
+    expect(CENTER_ITEM_NAMES.super).toBe("СУПЕР-ядро");
     const room = await playingRoom();
     const { shooter } = isolateDuel(room);
     room.state.balls.clear();
@@ -408,6 +408,6 @@ describe("4d.4 event feed: super-core pickup names the item from config", () => 
     tick50(room);
     expect(shooter.superBuff).toBe(true);
     const feeds = killfeedMessages(captured);
-    expect(feeds).toContain(`${shooter.nick} grabbed ${CENTER_ITEM_NAMES.super} (x2 next shot)`);
+    expect(feeds).toContain(`${shooter.nick} подобрал ${CENTER_ITEM_NAMES.super} (следующий бросок ×2)`);
   });
 });

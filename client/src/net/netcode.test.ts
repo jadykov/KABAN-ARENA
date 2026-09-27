@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { BALL_FIRST_TICK_HOLD_S, BALL_HIT_PLAYER_MESSAGE, GUEST_NICK_PREFIX, HIT_DAMAGE, MAX_HEARTS, TRAJ_PREVIEW_DT_S } from "../config";
 import { expSmoothFactor, lerp, lerpAngle, RemoteTrack } from "./interpolation";
-import { decodeBallHitPlayer, decodeSnapshot } from "./NetworkManager";
+import { decodeBallHitPlayer, decodePickupGranted, decodeSnapshot } from "./NetworkManager";
 import {
   buildFirePayload,
   buildGuestNick,
@@ -32,10 +32,10 @@ describe("guest nick normalization (no auth)", () => {
   });
 
   it("falls back for blank/short/non-string input", () => {
-    expect(normalizeNick("")).toBe("Kaban");
-    expect(normalizeNick("A")).toBe("Kaban");
-    expect(normalizeNick(12345)).toBe("Kaban");
-    expect(normalizeNick(undefined)).toBe("Kaban");
+    expect(normalizeNick("")).toBe("Кабан");
+    expect(normalizeNick("A")).toBe("Кабан");
+    expect(normalizeNick(12345)).toBe("Кабан");
+    expect(normalizeNick(undefined)).toBe("Кабан");
   });
 
   it("caps at 16 chars", () => {
@@ -143,6 +143,7 @@ describe("snapshot decoding (tolerant late-join states)", () => {
     const snapshot = decodeSnapshot({
       phase: "playing",
       tick: 42,
+      serverNow: 123456,
       countdownMs: 0,
       remainingMs: 170000,
       winner: "",
@@ -150,15 +151,21 @@ describe("snapshot decoding (tolerant late-join states)", () => {
     });
     expect(snapshot.phase).toBe("playing");
     expect(snapshot.tick).toBe(42);
+    expect(snapshot.serverNow).toBe(123456);
     expect(snapshot.players).toHaveLength(1);
     expect(snapshot.players[0]?.nick).toBe("A");
     expect(snapshot.players[0]?.hp).toBe(75);
+    expect(snapshot.players[0]?.shieldHp).toBe(0);
+    expect(snapshot.players[0]?.speedUntil).toBe(0);
+    expect(snapshot.pickups).toEqual([]);
   });
 
   it("survives empty/malformed states", () => {
     expect(decodeSnapshot(null).phase).toBe("lobby");
     expect(decodeSnapshot(undefined).players).toEqual([]);
     expect(decodeSnapshot({}).remainingMs).toBe(0);
+    expect(decodeSnapshot({}).serverNow).toBe(0);
+    expect(decodeSnapshot({}).pickups).toEqual([]);
   });
 
   it("defaults missing ready/spectator to ready fighter (compat)", () => {
@@ -265,6 +272,57 @@ describe("snapshot decoding (tolerant late-join states)", () => {
     expect(snapshot.balls[0]?.vx).toBeCloseTo(2.5, 9);
     expect(snapshot.balls[0]?.vz).toBeCloseTo(-1.25, 9);
   });
+
+  it("decodes authoritative pickup slots and player effect deadlines", () => {
+    const players = new Map([
+      ["s1", {
+        sessionId: "s1", nick: "Игрок", alive: true,
+        shieldHp: 12.5, shieldUntil: 11000, speedUntil: 6000,
+        pickupKind: "shield", pickupAt: 1000, pickupSeq: 3,
+      }],
+    ]);
+    const pickups = new Map([
+      ["2", { x: -3, z: 4, active: false, nextAt: 9000 }],
+      ["0", { x: 3, z: 4, active: true, nextAt: 0 }],
+      ["1", { x: 0, z: -2, active: true, nextAt: 0 }],
+    ]);
+    const snapshot = decodeSnapshot({
+      phase: "playing", serverNow: 2000,
+      players: { forEach: (cb: (v: unknown, k: string) => void): void => players.forEach((v, k) => cb(v, k)) },
+      pickups: { forEach: (cb: (v: unknown, k: string) => void): void => pickups.forEach((v, k) => cb(v, k)) },
+    });
+    expect(snapshot.players[0]).toMatchObject({
+      shieldHp: 12.5, shieldUntil: 11000, speedUntil: 6000,
+      pickupKind: "shield", pickupAt: 1000, pickupSeq: 3,
+    });
+    expect(snapshot.pickups).toEqual([
+      { id: 0, x: 3, z: 4, active: true, nextAt: 0 },
+      { id: 1, x: 0, z: -2, active: true, nextAt: 0 },
+      { id: 2, x: -3, z: 4, active: false, nextAt: 9000 },
+    ]);
+  });
+
+  it("rejects malformed pickup keys and falls back safely for partial data", () => {
+    const players = new Map([["s1", {
+      shieldHp: Number.NaN, shieldUntil: -2, speedUntil: Number.POSITIVE_INFINITY,
+      pickupKind: "impulse", pickupAt: Number.NaN, pickupSeq: -4,
+    }]]);
+    const pickups = new Map<string, unknown>([
+      ["bad", { x: 1, z: 2, active: true }],
+      ["0", { x: Number.NaN, z: 2, active: "yes", nextAt: -1 }],
+    ]);
+    const snapshot = decodeSnapshot({
+      serverNow: Number.NaN,
+      players: { forEach: (cb: (v: unknown, k: string) => void): void => players.forEach((v, k) => cb(v, k)) },
+      pickups: { forEach: (cb: (v: unknown, k: string) => void): void => pickups.forEach((v, k) => cb(v, k)) },
+    });
+    expect(snapshot.serverNow).toBe(0);
+    expect(snapshot.players[0]).toMatchObject({
+      shieldHp: 0, shieldUntil: 0, speedUntil: 0,
+      pickupKind: "", pickupAt: 0, pickupSeq: 0,
+    });
+    expect(snapshot.pickups).toEqual([{ id: 0, x: 0, z: 2, active: false, nextAt: 0 }]);
+  });
 });
 
 describe("R1 play nick (empty -> Guest-XXXX)", () => {
@@ -300,6 +358,12 @@ describe("R1 lobby counters (Players N | Watching M)", () => {
       spectator: false,
       superBuff: false,
       reloadUntil: 0,
+      shieldHp: 0,
+      shieldUntil: 0,
+      speedUntil: 0,
+      pickupKind: "",
+      pickupAt: 0,
+      pickupSeq: 0,
       ...overrides,
       sessionId: overrides.sessionId,
     };
@@ -314,7 +378,7 @@ describe("R1 lobby counters (Players N | Watching M)", () => {
     ];
     expect(countFighters(players)).toBe(2);
     expect(countSpectators(players)).toBe(2);
-    expect(formatCounters(players)).toBe("Players: 2 | Watching: 2");
+    expect(formatCounters(players)).toBe("Игроки: 2 | Зрители: 2");
   });
 
   it("treats not-ready entries as watchers even without the spectator flag", () => {
@@ -450,5 +514,23 @@ describe("ball-hit-player decode (blood trigger)", () => {
     expect(decodeBallHitPlayer({ ballId: "", victimId: "s2", x: 1, y: 1.4, z: 2 })).toBe(null);
     expect(decodeBallHitPlayer({ ballId: "b1", victimId: "s2", x: Number.NaN, y: 1.4, z: 2 })).toBe(null);
     expect(decodeBallHitPlayer({ ballId: "b1", victimId: "s2", x: 1, y: 1.4, z: Number.POSITIVE_INFINITY })).toBe(null);
+  });
+});
+
+describe("pickup-granted event decode", () => {
+  it("accepts a server-selected shield or speed effect", () => {
+    expect(decodePickupGranted({ playerId: "s1", slotId: 2, kind: "shield", seq: 3 }))
+      .toEqual({ playerId: "s1", slotId: 2, kind: "shield", seq: 3 });
+    expect(decodePickupGranted({ playerId: "s2", slotId: 0, kind: "speed", seq: 1 }))
+      .toEqual({ playerId: "s2", slotId: 0, kind: "speed", seq: 1 });
+  });
+
+  it("rejects malformed or removed effect grants", () => {
+    expect(decodePickupGranted(null)).toBe(null);
+    expect(decodePickupGranted({ playerId: "", slotId: 0, kind: "shield", seq: 1 })).toBe(null);
+    expect(decodePickupGranted({ playerId: "s1", slotId: -1, kind: "speed", seq: 1 })).toBe(null);
+    expect(decodePickupGranted({ playerId: "s1", slotId: 1.5, kind: "speed", seq: 1 })).toBe(null);
+    expect(decodePickupGranted({ playerId: "s1", slotId: 0, kind: "impulse", seq: 1 })).toBe(null);
+    expect(decodePickupGranted({ playerId: "s1", slotId: 0, kind: "shield", seq: 0 })).toBe(null);
   });
 });

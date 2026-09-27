@@ -28,7 +28,6 @@ export function rampHeightAt(platform, x, z, extraBand = 0) {
   return platform.topY * (1 - outward / run);
 }
 const RAMP_SIDES = new Set(["+x", "-x", "+z", "-z"]);
-const PICKUP_KINDS = new Set(["speed", "shield", "impulse"]);
 
 function fail(path, reason) {
   throw new Error(`${path}: ${reason}`);
@@ -118,10 +117,7 @@ function spawnAt(value, path) {
 }
 
 function pickupAt(value, path) {
-  const point = pointAt(value, path, ["kind", "x", "z"]);
-  if (!PICKUP_KINDS.has(point.kind)) {
-    fail(`${path}.kind`, "expected speed, shield, or impulse");
-  }
+  const point = pointAt(value, path);
   insideAxis(point.x, 0, `${path}.x`);
   insideAxis(point.z, 0, `${path}.z`);
 }
@@ -186,10 +182,12 @@ export function validateArenaLayout(input) {
     rejectBlockedPoint(spawn, 0.5, `spawns[${index}]`, layout, false);
   });
   arrayAt(layout.pickups, "pickups", pickupAt);
-  const kinds = new Set();
+  if (layout.pickups.length > 3) fail("pickups", "at most three neutral pickup points are allowed");
+  const pickupPositions = new Set();
   layout.pickups.forEach((pickup, index) => {
-    if (kinds.has(pickup.kind)) fail(`pickups[${index}].kind`, "duplicate pickup kind");
-    kinds.add(pickup.kind);
+    const key = `${pickup.x},${pickup.z}`;
+    if (pickupPositions.has(key)) fail(`pickups[${index}]`, "duplicate pickup position");
+    pickupPositions.add(key);
     // Pickup meshes sit at a fixed floor height. A marker inside a taller
     // solid would render under its top surface even if XZ pickup still fires.
     for (const block of [...layout.obstacles, ...layout.platforms]) {

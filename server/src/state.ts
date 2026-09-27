@@ -33,6 +33,20 @@ export class PlayerState extends Schema {
   @type("boolean") spectator = true;
   @type("boolean") superBuff = false;
   @type("number") reloadUntil = 0;
+  // Authoritative bonuses from the three neutral layout pickup points.
+  @type("number") shieldHp = 0;
+  @type("number") shieldUntil = 0;
+  @type("number") speedUntil = 0;
+  @type("string") pickupKind = "";
+  @type("number") pickupAt = 0;
+  @type("number") pickupSeq = 0;
+}
+
+export class PickupState extends Schema {
+  @type("number") x = 0;
+  @type("number") z = 0;
+  @type("boolean") active = true;
+  @type("number") nextAt = 0;
 }
 
 // R2 cannonball: authoritative parabolic projectile (gravity arc, collides,
@@ -68,9 +82,11 @@ export type RoundPhase = "lobby" | "countdown" | "playing" | "ended";
 
 export class ArenaState extends Schema {
   @type("number") tick = 0;
+  @type("number") serverNow = 0;
   @type("string") phase: string = "lobby";
   @type({ map: PlayerState }) players = new MapSchema<PlayerState>();
   @type({ map: BallState }) balls = new MapSchema<BallState>();
+  @type({ map: PickupState }) pickups = new MapSchema<PickupState>();
   @type("number") countdownMs = 0;
   @type("number") remainingMs = 0;
   @type("string") winner = "";

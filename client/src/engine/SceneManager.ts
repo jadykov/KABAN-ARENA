@@ -32,7 +32,6 @@ import {
   ICE_SPEED_MULT,
   ICE_INPUT_THRESHOLD,
   IDLE_RECENTER_MOVE_MAX,
-  KNOCKBACK_IMPULSE,
   LOCAL_AVATAR_COLOR,
   MOVE_SPEED,
   NEBULA_COUNT,
@@ -78,7 +77,7 @@ import {
   WALL_HEIGHT,
 } from "../config";
 import { ArenaBuilder, getObstacleLayout, getPlatforms, getTrampolineAt, isOnIce, isOnSwamp } from "../arena/Arena";
-import { KIND_COLORS, PowerUpPickups, PowerUpState, type PowerUpKind } from "../arena/PowerUps";
+import { PowerUpPickups, PowerUpState } from "../arena/PowerUps";
 import { BallsPool, SuperCore } from "../fx/Balls";
 import { CameraShake, HitFlash } from "../fx/CameraShake";
 import { Fireflies } from "../fx/Fireflies";
@@ -95,8 +94,9 @@ import {
   type AvatarVisualsHandle,
 } from "../fx/AvatarVisuals";
 import { ParticlePool } from "../fx/Particles";
+import { PowerEffectVisuals, type PowerEffectKind } from "../fx/PowerEffectVisuals";
 import { PhysicsWorld, type Vector3Like } from "../physics/World";
-import type { NetBallSnapshot, NetSuperSnapshot } from "../net/protocol";
+import type { NetBallSnapshot, NetPickupSnapshot, NetPlayerSnapshot, NetSuperSnapshot } from "../net/protocol";
 import {
   bodyFacingForShotYaw,
   isShotBodyTurnDone,
@@ -109,14 +109,24 @@ import {
   ACCENT_ICE_GLOW,
   ACCENT_OBSTACLE_TINT,
   ACCENT_SPARK,
-  ACCENT_SPOT,
   BASE_BG,
-  HL_SHIELD,
   HL_TRAMP_BURST,
   NEUTRAL_MOON,
   NEUTRAL_WHITE,
   SCENE_COOL_FILL,
+  SCENE_DAWN_FILL,
+  SCENE_DAWN_KEY,
+  SCENE_DAY_FILL,
+  SCENE_DAY_KEY,
+  SCENE_SUNSET_FILL,
+  SCENE_SUNSET_KEY,
   SCENE_WARM_LIGHT,
+  SKY_DAWN_BG,
+  SKY_DAWN_FOG,
+  SKY_DAY_BG,
+  SKY_DAY_FOG,
+  SKY_SUNSET_BG,
+  SKY_SUNSET_FOG,
 } from "../palette";
 
 // Planar movement input: x = strafe right (+1) / left (-1),
@@ -132,8 +142,6 @@ export interface LookDelta {
 }
 
 export type ArenaEvent =
-  | { type: "pickup"; kind: PowerUpKind }
-  | { type: "speed-expired" }
   | { type: "trampoline" }
   // Own-avatar hop tick (Stage 5 audio): pushed on hop-boundary crossings
   // while grounded and moving — main.ts maps it to the quiet footstep SFX.
@@ -258,17 +266,44 @@ export interface ReconcileTelemetry {
   note: string;
 }
 
-// Stylized night scene:
-// exactly 1 directional light (shadow <= 1024) + 1 ambient light + ONE
-// no-shadow SpotLight aimed at the center banner (explicit MAP exception:
-// banner dressing light, castShadow false, cheap fixed cost). No
-// post-processing, fog + vertex colors + hit flash + pooled particles +
-// light camera shake (QD4-A). Rapier capsule body drives the avatar once
-// initPhysics() resolves; before that the legacy kinematic path applies.
+const DAY_PHASES = [
+  { at: 0, background: new THREE.Color(SKY_DAWN_BG), fog: new THREE.Color(SKY_DAWN_FOG),
+    ambient: new THREE.Color(SCENE_DAWN_FILL), key: new THREE.Color(SCENE_DAWN_KEY),
+    ambientIntensity: 0.88, keyIntensity: 0.98 },
+  { at: 0.32, background: new THREE.Color(SKY_DAY_BG), fog: new THREE.Color(SKY_DAY_FOG),
+    ambient: new THREE.Color(SCENE_DAY_FILL), key: new THREE.Color(SCENE_DAY_KEY),
+    ambientIntensity: 1.02, keyIntensity: 1.12 },
+  { at: 0.68, background: new THREE.Color(SKY_SUNSET_BG), fog: new THREE.Color(SKY_SUNSET_FOG),
+    ambient: new THREE.Color(SCENE_SUNSET_FILL), key: new THREE.Color(SCENE_SUNSET_KEY),
+    ambientIntensity: 0.86, keyIntensity: 0.99 },
+  { at: 1, background: new THREE.Color(BASE_BG), fog: new THREE.Color(BASE_BG),
+    ambient: new THREE.Color(SCENE_COOL_FILL), key: new THREE.Color(SCENE_WARM_LIGHT),
+    ambientIntensity: SCENE_AMBIENT_INTENSITY, keyIntensity: SCENE_DIRECTIONAL_INTENSITY },
+] as const;
+
+function smooth01(value: number): number {
+  const t = Math.max(0, Math.min(1, value));
+  return t * t * (3 - 2 * t);
+}
+
+// Stylized round sky with exactly one shadowed directional light (<= 1024)
+// and one ambient light. No additional lights or post-processing. Fog, vertex
+// colors, hit flash, pooled particles and light camera shake remain cheap.
+// Rapier capsule body drives the avatar once initPhysics() resolves; before
+// that the legacy kinematic path applies.
 export class SceneManager {
   private readonly scene: THREE.Scene;
   private readonly camera: THREE.PerspectiveCamera;
   private readonly disposables: Array<{ dispose(): void }> = [];
+  private dayProgress = 0;
+  private sceneBackground: THREE.Color | null = null;
+  private sceneFog: THREE.Fog | null = null;
+  private ambientLight: THREE.AmbientLight | null = null;
+  private directionalLight: THREE.DirectionalLight | null = null;
+  private moonMaterial: THREE.MeshBasicMaterial | null = null;
+  private starMaterial: THREE.PointsMaterial | null = null;
+  private readonly nebulaMaterials: THREE.SpriteMaterial[] = [];
+  private readonly nebulaBaseOpacities: number[] = [];
 
   // Avatar root (Group at the physics body position — the follow camera
   // tracks THIS) + hop rig child (South Park bounce writes here only, so the
@@ -288,7 +323,7 @@ export class SceneManager {
   // bouncing. Two-level gate with exit hold (no ramp trips, no apex
   // flutter); refreshed in updatePhysics every frame.
   private readonly airborneGate = new AirborneGate();
-  private shieldBubble: THREE.Mesh | null = null;
+  private powerEffects: PowerEffectVisuals | null = null;
   private yaw = 0;
   private pitch = CAMERA_REST_PITCH;
   private built = false;
@@ -305,7 +340,6 @@ export class SceneManager {
   private physics: PhysicsWorld | null = null;
   private physicsFailed = false;
   private trampolineCooldown = 0;
-  private speedWasActive = false;
 
   // R1 pre-join spectator: while spectating the local avatar stays hidden
   // (no ghost body) and the camera runs a slow hover orbit over the arena.
@@ -462,20 +496,61 @@ export class SceneManager {
     this.camera = camera;
   }
 
+  // Called with authoritative elapsed / total round time. Waiting and
+  // countdown pass 0; the ended match keeps its final value until the next
+  // round resets it. Mutates existing colors/materials only, with no frame
+  // allocations or new lights.
+  public setDayProgress(progress: number): void {
+    this.dayProgress = Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0;
+    let from: (typeof DAY_PHASES)[number] = DAY_PHASES[0];
+    let to: (typeof DAY_PHASES)[number] = DAY_PHASES[1];
+    for (let i = 1; i < DAY_PHASES.length; i += 1) {
+      const next = DAY_PHASES[i];
+      if (this.dayProgress <= next.at) {
+        to = next;
+        break;
+      }
+      from = next;
+    }
+    const blend = smooth01((this.dayProgress - from.at) / (to.at - from.at));
+    this.sceneBackground?.lerpColors(from.background, to.background, blend);
+    this.sceneFog?.color.lerpColors(from.fog, to.fog, blend);
+    if (this.ambientLight !== null) {
+      this.ambientLight.color.lerpColors(from.ambient, to.ambient, blend);
+      this.ambientLight.intensity = from.ambientIntensity
+        + (to.ambientIntensity - from.ambientIntensity) * blend;
+    }
+    if (this.directionalLight !== null) {
+      this.directionalLight.color.lerpColors(from.key, to.key, blend);
+      this.directionalLight.intensity = from.keyIntensity
+        + (to.keyIntensity - from.keyIntensity) * blend;
+    }
+    const stars = smooth01((this.dayProgress - 0.55) / 0.4);
+    if (this.starMaterial !== null) this.starMaterial.opacity = 0.9 * stars;
+    if (this.moonMaterial !== null) this.moonMaterial.opacity = 0.92 * smooth01((this.dayProgress - 0.65) / 0.35);
+    for (let i = 0; i < this.nebulaMaterials.length; i += 1) {
+      const material = this.nebulaMaterials[i];
+      if (material !== undefined) material.opacity = (this.nebulaBaseOpacities[i] ?? 0) * stars;
+    }
+  }
+
   public build(): void {
     if (this.built) {
       return;
     }
     this.built = true;
 
-    this.scene.background = new THREE.Color(BASE_BG);
-    this.scene.fog = new THREE.Fog(BASE_BG, 30, 85);
+    this.sceneBackground = new THREE.Color(SKY_DAWN_BG);
+    this.sceneFog = new THREE.Fog(SKY_DAWN_FOG, 30, 85);
+    this.scene.background = this.sceneBackground;
+    this.scene.fog = this.sceneFog;
 
-    // Warm key / cool fill supplies a clear face hierarchy with the existing
-    // one directional + one ambient budget. Light intensities stay tuned by
-    // config, and the fixed shadow map stays within 1024px.
+    // One warm key and one cool fill supply a clear face hierarchy. Their
+    // colors/intensities vary with round progress; the fixed shadow map stays
+    // within 1024px.
     const ambient = new THREE.AmbientLight(SCENE_COOL_FILL, SCENE_AMBIENT_INTENSITY);
     this.scene.add(ambient);
+    this.ambientLight = ambient;
 
     const directional = new THREE.DirectionalLight(SCENE_WARM_LIGHT, SCENE_DIRECTIONAL_INTENSITY);
     directional.position.set(5, 10, 5);
@@ -487,18 +562,11 @@ export class SceneManager {
     directional.shadow.camera.top = ARENA_HALF_SIZE;
     directional.shadow.camera.bottom = -ARENA_HALF_SIZE;
     this.scene.add(directional);
-
-    // MAP exception: a single no-shadow spotlight for the hanging banner
-    // (ads dressing QA3-A). Fixed cheap cost, no shadow map, aimed down.
-    const bannerSpot = new THREE.SpotLight(ACCENT_SPOT, 50, 14, 0.55, 0.5, 1.2);
-    bannerSpot.position.set(0, WALL_HEIGHT + 4.5, 0);
-    bannerSpot.target.position.set(0, WALL_HEIGHT + 1.2, 0);
-    bannerSpot.castShadow = false;
-    this.scene.add(bannerSpot);
-    this.scene.add(bannerSpot.target);
+    this.directionalLight = directional;
 
     this.arena.buildVisuals(this.scene);
     this.buildSky(this.scene);
+    this.setDayProgress(this.dayProgress);
     this.ads.buildVisuals(this.scene);
     void this.ads.load().catch(() => {
       // Ads always fall back to generated placeholders; never fatal.
@@ -533,21 +601,10 @@ export class SceneManager {
     this.avatarMaterial = capsuleMaterial;
     this.hopPrev.set(0, 1.1, 0);
 
-    const bubbleGeometry = new THREE.SphereGeometry(0.95, 20, 14);
-    const bubbleMaterial = new THREE.MeshBasicMaterial({
-      color: HL_SHIELD,
-      transparent: true,
-      opacity: 0.28,
-    });
-    const bubble = new THREE.Mesh(bubbleGeometry, bubbleMaterial);
-    bubble.visible = false;
-    rig.add(bubble);
-    this.disposables.push(bubbleGeometry, bubbleMaterial);
-    this.shieldBubble = bubble;
-
     // 4d.1: held ball + face ride on the rig (ball right hand chest height,
     // face front +Z) so they hop with the body. Tinted local identity red.
     this.avatarVisuals = attachAvatarVisuals(rig, LOCAL_AVATAR_COLOR);
+    this.powerEffects = new PowerEffectVisuals(rig);
     this.ballsPool = new BallsPool(this.scene);
     this.superCore = new SuperCore(this.scene);
     this.fireflies = new Fireflies(this.scene);
@@ -949,17 +1006,11 @@ export class SceneManager {
     }
 
     this.powerState.update(deltaSeconds);
-    if (this.speedWasActive && !this.powerState.isSpeedActive()) {
-      this.events.push({ type: "speed-expired" });
-    }
-    this.speedWasActive = this.powerState.isSpeedActive();
 
     if (this.avatarMaterial !== null) {
       this.flash.update(deltaSeconds, this.avatarMaterial);
     }
-    if (this.shieldBubble !== null) {
-      this.shieldBubble.visible = this.powerState.hasShield();
-    }
+    this.powerEffects?.setActive(this.powerState.hasShield(), this.powerState.isSpeedActive());
     this.particles.update(deltaSeconds);
     this.updateCombat(deltaSeconds);
     // South Park hop: displacement speed eases the rig bounce (0 standing
@@ -996,6 +1047,8 @@ export class SceneManager {
   // hover live elsewhere and are intentionally untouched here.
   private updateCombat(deltaSeconds: number): void {
     this.arena.update(deltaSeconds);
+    this.pickups.update(deltaSeconds);
+    this.powerEffects?.update(deltaSeconds);
     if (this.avatarVisuals !== null) {
       this.avatarVisuals.ball.setCharge01(this.charge01);
       this.avatarVisuals.update(deltaSeconds);
@@ -1089,40 +1142,23 @@ export class SceneManager {
       this.events.push({ type: "trampoline" });
     }
 
-    for (const kind of this.pickups.update(deltaSeconds, position.x, position.z)) {
-      this.collectPowerUp(kind, worldMove);
-    }
   }
 
-  private collectPowerUp(kind: PowerUpKind, worldMove: THREE.Vector3): void {
-    const physics = this.physics;
-    const avatar = this.avatar;
-    this.powerState.applyPickup(kind);
-    this.events.push({ type: "pickup", kind });
-    if (avatar === null) {
-      return;
+  // Server-selected pickups and effect durations are replicated to every
+  // viewer. The client predicts speed only while the mirrored effect is live;
+  // no local proximity check can grant a bonus independently of the server.
+  public syncPowerUps(
+    player: NetPlayerSnapshot | null,
+    serverNow: number,
+    pickups: readonly NetPickupSnapshot[],
+  ): void {
+    this.pickups.sync(pickups);
+    if (player === null) {
+      this.powerState.reset();
+    } else {
+      this.powerState.sync(player, serverNow);
     }
-    if (kind === "speed") {
-      this.particles.spawn(avatar.position.x, 1.2, avatar.position.z, 16, new THREE.Color(KIND_COLORS.speed));
-    } else if (kind === "shield") {
-      this.particles.spawn(avatar.position.x, 1.2, avatar.position.z, 16, new THREE.Color(KIND_COLORS.shield));
-    } else if (physics !== null) {
-      // Impulse knockback dash in the current move (or facing) direction.
-      // Same shared release threshold as the facing freeze above.
-      const direction = worldMove.lengthSq() > IDLE_RECENTER_MOVE_MAX * IDLE_RECENTER_MOVE_MAX
-        ? worldMove.clone().normalize()
-        : new THREE.Vector3(Math.sin(avatar.rotation.y), 0, Math.cos(avatar.rotation.y));
-      physics.applyPlayerImpulse(direction.x * KNOCKBACK_IMPULSE, 2.5, direction.z * KNOCKBACK_IMPULSE);
-      this.particles.spawn(avatar.position.x, 1.2, avatar.position.z, PARTICLE_BURST_COUNT, new THREE.Color(KIND_COLORS.impulse));
-      this.shake.add(0.25);
-    }
-  }
-
-  // Debug/playtest pickup grant (keys 1/2/3 in main.ts).
-  public grantPowerUp(kind: PowerUpKind): void {
-    this.pickups.grant(kind);
-    const fallbackMove = new THREE.Vector3();
-    this.collectPowerUp(kind, fallbackMove);
+    this.powerEffects?.setActive(this.powerState.hasShield(), this.powerState.isSpeedActive());
   }
 
   // Test/debug helpers (no gameplay use): seed and read the physics body
@@ -1140,14 +1176,8 @@ export class SceneManager {
     this.avatar.position.set(position.x, position.y, position.z);
   }
 
-  // Test-scene hit (H key): shield absorbs one hit, otherwise the caller
-  // applies HUD damage. Returns true when the shield absorbed the hit.
+  // Test-scene visual hit (H key); real shield absorption is server-side.
   public applyTestHit(): boolean {
-    if (this.powerState.consumeShieldHit()) {
-      this.flash.trigger();
-      this.burstAtAvatar(new THREE.Color(KIND_COLORS.shield), 12);
-      return true;
-    }
     this.flash.trigger();
     this.shake.add(0.45);
     this.burstAtAvatar(new THREE.Color(ACCENT_HIT_BURST), PARTICLE_BURST_COUNT);
@@ -1156,6 +1186,10 @@ export class SceneManager {
 
   public drainEvents(): ArenaEvent[] {
     return this.events.splice(0, this.events.length);
+  }
+
+  public showBonusPickup(kind: PowerEffectKind): void {
+    this.powerEffects?.showPickup(kind);
   }
 
   public getAvatarPosition(): THREE.Vector3 {
@@ -1785,7 +1819,6 @@ export class SceneManager {
     this.yaw = 0;
     this.pitch = CAMERA_REST_PITCH;
     this.trampolineCooldown = 0;
-    this.speedWasActive = false;
     this.events.length = 0;
     this.charge01 = 0;
     this.charging = false;
@@ -1809,6 +1842,7 @@ export class SceneManager {
     this.arena.setWallOpacity(WALL_GLASS_OPACITY);
     this.avatarVisuals?.reset();
     this.powerState.reset();
+    this.powerEffects?.reset();
     this.pickups.reset();
     this.particles.clear();
     this.shake.reset();
@@ -1849,6 +1883,8 @@ export class SceneManager {
       this.avatarVisuals.dispose();
       this.avatarVisuals = null;
     }
+    this.powerEffects?.dispose();
+    this.powerEffects = null;
     if (this.ballsPool !== null) {
       this.ballsPool.dispose();
       this.ballsPool = null;
@@ -1871,7 +1907,6 @@ export class SceneManager {
     this.avatarRig = null;
     this.avatarBody = null;
     this.avatarMaterial = null;
-    this.shieldBubble = null;
     this.scene.remove(this.pickups.object);
     this.scene.remove(this.particles.object);
     this.pickups.dispose();
@@ -1894,6 +1929,16 @@ export class SceneManager {
       }
     }
     this.scene.fog = null;
+    this.scene.background = null;
+    this.sceneBackground = null;
+    this.sceneFog = null;
+    this.ambientLight = null;
+    this.directionalLight = null;
+    this.moonMaterial = null;
+    this.starMaterial = null;
+    this.nebulaMaterials.length = 0;
+    this.nebulaBaseOpacities.length = 0;
+    this.dayProgress = 0;
     this.built = false;
   }
 
@@ -1905,17 +1950,19 @@ export class SceneManager {
 
   // Night-sky dressing (zero light cost): one moon disc (MeshBasicMaterial,
   // fog=false, no lighting) + one THREE.Points starfield (~100 points, one
-  // draw call, fog=false, no lighting). Light budget untouched (1 dir +
-  // 1 ambient + the pre-existing banner spot exception).
+  // draw call, fog=false, no lighting). Light budget stays 1 dir + 1 ambient.
   private buildSky(scene: THREE.Scene): void {
     const moonGeometry = new THREE.CircleGeometry(3, 32);
-    const moonMaterial = new THREE.MeshBasicMaterial({ color: NEUTRAL_MOON, fog: false });
+    const moonMaterial = new THREE.MeshBasicMaterial({
+      color: NEUTRAL_MOON, fog: false, transparent: true, opacity: 0, depthWrite: false,
+    });
     const moon = new THREE.Mesh(moonGeometry, moonMaterial);
     moon.name = "moon";
     moon.position.set(-30, 38, -60);
     moon.lookAt(0, 0, 0);
     scene.add(moon);
     this.disposables.push(moonGeometry, moonMaterial);
+    this.moonMaterial = moonMaterial;
 
     const starCount = 100;
     const positions = new Float32Array(starCount * 3);
@@ -1939,7 +1986,7 @@ export class SceneManager {
       sizeAttenuation: true,
       fog: false,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0,
       depthWrite: false,
     });
     const stars = new THREE.Points(starGeometry, starMaterial);
@@ -1947,6 +1994,7 @@ export class SceneManager {
     stars.frustumCulled = false;
     scene.add(stars);
     this.disposables.push(starGeometry, starMaterial);
+    this.starMaterial = starMaterial;
 
     // Stage 4d.3 nebulae: NEBULA_COUNT large low-alpha additive sprites
     // behind/above the glass walls (cheap space depth behind the stars —
@@ -1989,6 +2037,8 @@ export class SceneManager {
       sprite.scale.set(def.w, def.h, 1);
       scene.add(sprite);
       this.disposables.push(material);
+      this.nebulaMaterials.push(material);
+      this.nebulaBaseOpacities.push(def.opacity);
     });
   }
 

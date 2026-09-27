@@ -1,10 +1,6 @@
 import * as THREE from "three";
 import {
   ADS_PUBLIC_BASE_PATH,
-  BANNER_HEIGHT_M,
-  BANNER_TEXTURE_HEIGHT,
-  BANNER_TEXTURE_WIDTH,
-  BANNER_WIDTH_M,
   PLATFORM_FIGURES,
   SHOPFRONT_COUNT,
   SHOP_SIGN_HEIGHT_M,
@@ -12,11 +8,9 @@ import {
   SHOP_SIGN_TEXTURE_HEIGHT,
   SHOP_SIGN_TEXTURE_WIDTH,
   SHOP_SIGN_WIDTH_M,
-  WALL_HEIGHT,
   type PlatformFigureDef,
 } from "../config";
 import {
-  ACCENT_AD_BANNER,
   ACCENT_AD_FENCE,
   ACCENT_STRIP,
   BASE_AD_CANVAS,
@@ -100,14 +94,6 @@ export function resolveShopSignUrls(assetSlot: number, basePath: string = ADS_PU
   ];
 }
 
-export function resolveBannerUrls(basePath: string = ADS_PUBLIC_BASE_PATH): string[] {
-  return [
-    `${basePath}/banner.png`,
-    `${basePath}/banner.jpg`,
-    `${basePath}/banner.svg`,
-  ];
-}
-
 export function createPlaceholderTexture(
   label: string,
   width: number,
@@ -139,8 +125,8 @@ export function createPlaceholderTexture(
   return texture;
 }
 
-// Visual dressing only: four shopfronts on platform sides and the existing
-// center banner. No perimeter ad meshes and no added physics colliders.
+// Visual dressing only: four shopfronts on platform sides. No center or
+// perimeter ad meshes and no added physics colliders.
 export class AdsManager {
   private readonly disposables: Array<{ dispose(): void }> = [];
   private readonly actors: THREE.Object3D[] = [];
@@ -150,7 +136,6 @@ export class AdsManager {
     sign: THREE.Mesh;
     frame: THREE.Mesh;
   }> = [];
-  private bannerMaterial: THREE.MeshBasicMaterial | null = null;
   private generation = 0;
   private loaded = false;
 
@@ -282,26 +267,6 @@ export class AdsManager {
       this.actors.push(batch);
       this.disposables.push(batch);
     }
-
-    // Keep the central KABAN ARENA banner and slim hanging rig.
-    const bannerGeometry = new THREE.PlaneGeometry(BANNER_WIDTH_M, BANNER_HEIGHT_M);
-    const bannerMat = new THREE.MeshBasicMaterial({ color: NEUTRAL_WHITE, side: THREE.DoubleSide });
-    this.disposables.push(bannerGeometry, bannerMat);
-    this.bannerMaterial = bannerMat;
-    const banner = new THREE.Mesh(bannerGeometry, bannerMat);
-    banner.name = "arena-banner";
-    banner.position.set(0, WALL_HEIGHT + 1.2, 0);
-    scene.add(banner);
-    this.actors.push(banner);
-
-    const barGeometry = new THREE.BoxGeometry(BANNER_WIDTH_M + 0.3, 0.08, 0.08);
-    const barMaterial = new THREE.MeshStandardMaterial({ color: BASE_AD_FRAME, roughness: 0.9 });
-    this.disposables.push(barGeometry, barMaterial);
-    const bar = new THREE.Mesh(barGeometry, barMaterial);
-    bar.name = "arena-banner-rig";
-    bar.position.set(0, WALL_HEIGHT + 1.75, 0);
-    scene.add(bar);
-    this.actors.push(bar);
   }
 
   public get isLoaded(): boolean {
@@ -348,25 +313,6 @@ export class AdsManager {
         }
       }
     }
-    if (this.bannerMaterial !== null) {
-      const bannerTexture = await AdsManager.loadFirstAvailable(
-        loader,
-        resolveBannerUrls(basePath),
-        "KABAN ARENA",
-        BANNER_TEXTURE_WIDTH,
-        BANNER_TEXTURE_HEIGHT,
-        ACCENT_AD_BANNER,
-      );
-      if (generation !== this.generation) {
-        bannerTexture?.dispose();
-        return;
-      }
-      if (bannerTexture !== null) {
-        this.disposables.push(bannerTexture);
-        this.bannerMaterial.map = bannerTexture;
-        this.bannerMaterial.needsUpdate = true;
-      }
-    }
     this.loaded = true;
   }
 
@@ -401,7 +347,6 @@ export class AdsManager {
     }
     this.actors.length = 0;
     this.shopSigns.length = 0;
-    this.bannerMaterial = null;
     for (const tracked of this.disposables) {
       tracked.dispose();
     }

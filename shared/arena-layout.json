@@ -155,17 +155,14 @@
   ],
   "pickups": [
     {
-      "kind": "speed",
       "x": 9.5,
       "z": 6
     },
     {
-      "kind": "shield",
       "x": -8,
       "z": 0
     },
     {
-      "kind": "impulse",
       "x": 6,
       "z": -10
     }

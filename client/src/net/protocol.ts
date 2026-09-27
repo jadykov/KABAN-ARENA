@@ -34,6 +34,7 @@ import {
 } from "../config";
 
 export type RoundPhase = "lobby" | "countdown" | "playing" | "ended";
+export type NetPowerUpKind = "shield" | "speed" | "";
 
 // Decoded snapshot of one replicated player (server PlayerState fields).
 // R1: ready/spectator mark pre-join spectators (alive=false, not rendered,
@@ -53,6 +54,12 @@ export interface NetPlayerSnapshot {
   spectator: boolean;
   superBuff: boolean;
   reloadUntil: number;
+  shieldHp: number;
+  shieldUntil: number;
+  speedUntil: number;
+  pickupKind: NetPowerUpKind;
+  pickupAt: number;
+  pickupSeq: number;
 }
 
 export interface InputPayload {
@@ -91,7 +98,7 @@ export function countSpectators(players: readonly NetPlayerSnapshot[]): number {
 }
 
 export function formatCounters(players: readonly NetPlayerSnapshot[]): string {
-  return `Players: ${countFighters(players)} | Watching: ${countSpectators(players)}`;
+  return `Игроки: ${countFighters(players)} | Зрители: ${countSpectators(players)}`;
 }
 
 function clampAxis(value: number): number {
@@ -278,6 +285,15 @@ export interface NetSuperSnapshot {
   x: number;
   z: number;
   expiresAt: number;
+  nextAt: number;
+}
+
+// Three neutral map slots, keyed by their decimal layout index on the wire.
+export interface NetPickupSnapshot {
+  id: number;
+  x: number;
+  z: number;
+  active: boolean;
   nextAt: number;
 }
 

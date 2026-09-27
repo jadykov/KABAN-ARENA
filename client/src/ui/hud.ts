@@ -17,6 +17,34 @@ export function formatTimer(totalSeconds: number): string {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
+// The server sends event strings for every viewer. Keep wire messages stable
+// and translate the text only when the local HUD displays them.
+export function localizeKillfeed(message: string): string {
+  const joined = /^(.+) joined the fight$/.exec(message);
+  if (joined !== null) {
+    return `${joined[1]} вступает в бой`;
+  }
+  const fragged = /^(.+) fragged (.+)$/.exec(message);
+  if (fragged !== null) {
+    return `${fragged[1]} выбивает ${fragged[2]}`;
+  }
+  const superPickup = /^(.+) grabbed SUPER core \(x2 next shot\)$/.exec(message);
+  if (superPickup !== null) {
+    return `Суперзаряд у ${superPickup[1]}: ×2 к броску`;
+  }
+  return /[А-Яа-яЁё]/u.test(message) ? message : "Событие на арене";
+}
+
+export function localizePowerUp(kind: string): string {
+  if (kind === "shield") {
+    return "Подобран щит";
+  }
+  if (kind === "speed") {
+    return "Подобрано ускорение";
+  }
+  return "Подобран бонус";
+}
+
 export interface HudHandle {
   element: HTMLDivElement;
   setTimer(totalSeconds: number): void;
@@ -60,11 +88,11 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
 
   const infoPlayers = document.createElement("div");
   infoPlayers.id = "hud-info-players";
-  infoPlayers.textContent = "Players: 0";
+  infoPlayers.textContent = "Игроки: 0";
 
   const infoWatching = document.createElement("div");
   infoWatching.id = "hud-info-watching";
-  infoWatching.textContent = "Watching: 0";
+  infoWatching.textContent = "Зрители: 0";
 
   info.appendChild(infoTimer);
   info.appendChild(infoPlayers);
@@ -78,12 +106,12 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
 
   const scoreLabel = document.createElement("span");
   scoreLabel.id = "hud-score-label";
-  scoreLabel.textContent = "SCORE";
+  scoreLabel.textContent = "СЧЁТ";
 
   const score = document.createElement("span");
   score.id = "hud-score";
   score.textContent = "0";
-  score.setAttribute("aria-label", "Score: 0");
+  score.setAttribute("aria-label", "Счёт: 0");
 
   const status = document.createElement("span");
   status.id = "hud-status";
@@ -100,7 +128,7 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
 
   const superBadge = document.createElement("div");
   superBadge.id = "hud-super";
-  superBadge.textContent = "SUPER x2";
+  superBadge.textContent = "СУПЕР ×2";
   superBadge.style.display = "none";
 
   const killfeed = document.createElement("div");
@@ -136,7 +164,7 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
       }
       hearts.appendChild(heart);
     }
-    hearts.setAttribute("aria-label", `Health: ${currentHalves} of ${maxHearts * 2} half hearts`);
+    hearts.setAttribute("aria-label", `Здоровье: ${currentHalves} из ${maxHearts * 2} половинок сердца`);
   };
   renderHearts();
 
@@ -147,17 +175,17 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
     },
     setScore(nextScore: number): void {
       score.textContent = String(nextScore);
-      score.setAttribute("aria-label", `Score: ${nextScore}`);
+      score.setAttribute("aria-label", `Счёт: ${nextScore}`);
     },
     setPlayers(count: number): void {
-      infoPlayers.textContent = `Players: ${count}`;
+      infoPlayers.textContent = `Игроки: ${count}`;
     },
     setWatching(count: number): void {
-      infoWatching.textContent = `Watching: ${count}`;
+      infoWatching.textContent = `Зрители: ${count}`;
     },
     setCounters(players: number, watching: number): void {
-      infoPlayers.textContent = `Players: ${players}`;
-      infoWatching.textContent = `Watching: ${watching}`;
+      infoPlayers.textContent = `Игроки: ${players}`;
+      infoWatching.textContent = `Зрители: ${watching}`;
     },
     setHearts(nextHalves: number): void {
       const safe = Number.isFinite(nextHalves) ? Math.floor(nextHalves) : 0;
@@ -208,7 +236,7 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
       }
       currentHalves = halvesAfterHits(currentHalves, 2);
       renderHearts();
-      handle.addKillfeed(`Hit by ${source} — ${currentHalves} halves left`);
+      handle.addKillfeed(`Попадание от ${source} — осталось половинок сердца: ${currentHalves}`);
     },
     dispose(): void {
       if (disposed) {

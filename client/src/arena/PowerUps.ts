@@ -1,52 +1,43 @@
 import * as THREE from "three";
-import {
-  POWERUP_PICKUP_RADIUS,
-  POWERUP_RESPAWN_S,
-  SHIELD_MAX_HITS,
-  SPEED_DURATION_S,
-  SPEED_MULTIPLIER,
-} from "../config";
-import { ARENA_LAYOUT, PICKUP_VISUAL_Y, type ArenaLayout } from "../layout";
-import {
-  BASE_PICKUP,
-  HL_CHARTREUSE,
-  HL_CHARTREUSE_BRIGHT,
-  HL_CHARTREUSE_DEEP,
-} from "../palette";
+import { SHIELD_CAPACITY, SPEED_MULTIPLIER } from "../config";
+import { ARENA_LAYOUT, PICKUP_VISUAL_Y } from "../layout";
+import { BASE_PICKUP, HL_CHARTREUSE_BRIGHT } from "../palette";
+import type { NetPickupSnapshot } from "../net/protocol";
 
-export type PowerUpKind = ArenaLayout["pickups"][number]["kind"];
+export type PowerUpKind = "shield" | "speed";
+export const POWERUP_KINDS: readonly PowerUpKind[] = ["shield", "speed"];
 
-export const POWERUP_KINDS: readonly PowerUpKind[] = ["speed", "shield", "impulse"];
-
-// Pure skill-based power-up state (set A1). No three.js dependency so the
-// apply/expire rules are unit-testable without a renderer.
+// The authoritative server owns pickup grants, damage absorption, and effect
+// deadlines. This state only mirrors a player's latest replicated effects so
+// local movement prediction and visuals agree with the server.
 export class PowerUpState {
-  private nowSeconds = 0;
-  private speedUntilSeconds = 0;
-  private shieldHits = 0;
+  private serverNowMs = 0;
+  private shieldHp = 0;
+  private shieldUntilMs = 0;
+  private speedUntilMs = 0;
 
-  public get now(): number {
-    return this.nowSeconds;
+  public sync(
+    player: { shieldHp: number; shieldUntil: number; speedUntil: number },
+    serverNow: number,
+  ): void {
+    this.serverNowMs = Number.isFinite(serverNow) ? Math.max(0, serverNow) : 0;
+    this.shieldHp = Number.isFinite(player.shieldHp)
+      ? Math.max(0, Math.min(SHIELD_CAPACITY, player.shieldHp))
+      : 0;
+    this.shieldUntilMs = Number.isFinite(player.shieldUntil) ? Math.max(0, player.shieldUntil) : 0;
+    this.speedUntilMs = Number.isFinite(player.speedUntil) ? Math.max(0, player.speedUntil) : 0;
   }
 
+  // Advance the synchronized clock between 20 Hz snapshots. This never
+  // creates or extends an effect; the next server snapshot corrects it.
   public update(deltaSeconds: number): void {
-    if (deltaSeconds > 0) {
-      this.nowSeconds += deltaSeconds;
+    if (Number.isFinite(deltaSeconds) && deltaSeconds > 0 && this.serverNowMs > 0) {
+      this.serverNowMs += deltaSeconds * 1000;
     }
-  }
-
-  public applyPickup(kind: PowerUpKind): void {
-    if (kind === "speed") {
-      this.speedUntilSeconds = this.nowSeconds + SPEED_DURATION_S;
-    } else if (kind === "shield") {
-      this.shieldHits = SHIELD_MAX_HITS;
-    }
-    // "impulse" applies instantly at the call site (knockback burst) and
-    // holds no timed state, so there is nothing to store here.
   }
 
   public isSpeedActive(): boolean {
-    return this.nowSeconds < this.speedUntilSeconds;
+    return this.serverNowMs > 0 && this.serverNowMs < this.speedUntilMs;
   }
 
   public getSpeedMultiplier(): number {
@@ -54,76 +45,80 @@ export class PowerUpState {
   }
 
   public getSpeedRemaining(): number {
-    return Math.max(0, this.speedUntilSeconds - this.nowSeconds);
+    return this.isSpeedActive() ? (this.speedUntilMs - this.serverNowMs) / 1000 : 0;
   }
 
   public hasShield(): boolean {
-    return this.shieldHits > 0;
+    return this.shieldHp > 0 && this.serverNowMs > 0 && this.serverNowMs < this.shieldUntilMs;
   }
 
-  // Returns true when a shield charge absorbed the hit.
-  public consumeShieldHit(): boolean {
-    if (this.shieldHits <= 0) {
-      return false;
-    }
-    this.shieldHits -= 1;
-    return true;
+  public getShieldHp(): number {
+    return this.hasShield() ? this.shieldHp : 0;
+  }
+
+  public getShieldFraction(): number {
+    return this.getShieldHp() / SHIELD_CAPACITY;
+  }
+
+  public getShieldRemaining(): number {
+    return this.hasShield() ? (this.shieldUntilMs - this.serverNowMs) / 1000 : 0;
   }
 
   public reset(): void {
-    this.nowSeconds = 0;
-    this.speedUntilSeconds = 0;
-    this.shieldHits = 0;
+    this.serverNowMs = 0;
+    this.shieldHp = 0;
+    this.shieldUntilMs = 0;
+    this.speedUntilMs = 0;
   }
 }
 
 export interface PickupSlot {
-  kind: PowerUpKind;
+  id: number;
   x: number;
   z: number;
 }
 
-// Editable pedestal positions from the shared arena layout.
-const PICKUP_SLOTS: readonly PickupSlot[] = ARENA_LAYOUT.pickups;
+// All three pedestals are neutral. Their stable decimal layout indexes match
+// the keys of the server's replicated pickup map.
+const PICKUP_SLOTS: readonly PickupSlot[] = ARENA_LAYOUT.pickups.map((point, id) => ({
+  id,
+  x: point.x,
+  z: point.z,
+}));
+
 export function getPickupSlots(): readonly PickupSlot[] {
   return PICKUP_SLOTS;
 }
 
-// Highlight-bucket pickup colors (chartreuse family, slight per-kind
-// brightness variation for distinguishability): speed base, shield brighter,
-// impulse deep. Exported so burst flashes reuse the exact same colors.
+// The two granted effects can reuse these accents for particles/icons.
 export const KIND_COLORS: Record<PowerUpKind, number> = {
-  speed: HL_CHARTREUSE,
   shield: HL_CHARTREUSE_BRIGHT,
-  impulse: HL_CHARTREUSE_DEEP,
+  speed: HL_CHARTREUSE_BRIGHT,
 };
 
-// Floating pickup visuals (octahedrons, bob + spin, cheap stylized). update()
-// returns the kinds collected this frame by proximity; taken slots respawn
-// after POWERUP_RESPAWN_S. grant() forces a pickup (debug keys / playtest).
+// Floating neutral pedestals. Proximity never collects one locally. Only a
+// replicated active flag changes visibility, so every viewer sees the same
+// pickup and its server-timed return.
 export class PowerUpPickups {
   private readonly group = new THREE.Group();
-  private readonly meshes = new Map<PowerUpKind, THREE.Mesh>();
-  private readonly available = new Map<PowerUpKind, boolean>();
-  private readonly respawnAt = new Map<PowerUpKind, number>();
+  private readonly meshes = new Map<number, THREE.Mesh>();
   private readonly disposables: Array<{ dispose(): void }> = [];
   private elapsed = 0;
 
   public constructor() {
-    for (const slot of getPickupSlots()) {
+    for (const slot of PICKUP_SLOTS) {
       const geometry = new THREE.OctahedronGeometry(0.35);
       const material = new THREE.MeshStandardMaterial({
         color: BASE_PICKUP,
-        emissive: KIND_COLORS[slot.kind],
-        emissiveIntensity: 1.6,
+        emissive: HL_CHARTREUSE_BRIGHT,
+        emissiveIntensity: 1.25,
         roughness: 0.4,
       });
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.set(slot.x, PICKUP_VISUAL_Y, slot.z);
+      mesh.visible = false;
       this.group.add(mesh);
-      this.meshes.set(slot.kind, mesh);
-      this.available.set(slot.kind, true);
-      this.respawnAt.set(slot.kind, 0);
+      this.meshes.set(slot.id, mesh);
       this.disposables.push(geometry, material);
     }
   }
@@ -132,56 +127,43 @@ export class PowerUpPickups {
     return this.group;
   }
 
-  public isAvailable(kind: PowerUpKind): boolean {
-    return this.available.get(kind) ?? false;
+  public isAvailable(id: number): boolean {
+    return this.meshes.get(id)?.visible === true;
   }
 
-  public grant(kind: PowerUpKind): void {
-    this.available.set(kind, false);
-    this.respawnAt.set(kind, this.elapsed + POWERUP_RESPAWN_S);
-    const mesh = this.meshes.get(kind);
-    if (mesh !== undefined) {
-      mesh.visible = false;
+  public sync(pickups: readonly Pick<NetPickupSnapshot, "id" | "active">[]): void {
+    const active = new Set<number>();
+    for (const pickup of pickups) {
+      if (pickup.active === true && Number.isInteger(pickup.id) && pickup.id >= 0) {
+        active.add(pickup.id);
+      }
+    }
+    for (const slot of PICKUP_SLOTS) {
+      const mesh = this.meshes.get(slot.id);
+      if (mesh !== undefined) {
+        mesh.visible = active.has(slot.id);
+      }
     }
   }
 
-  public update(deltaSeconds: number, playerX: number, playerZ: number): PowerUpKind[] {
-    if (deltaSeconds > 0) {
-      this.elapsed += deltaSeconds;
+  public update(deltaSeconds: number): void {
+    if (!Number.isFinite(deltaSeconds) || deltaSeconds <= 0) {
+      return;
     }
-    const collected: PowerUpKind[] = [];
-    for (const slot of getPickupSlots()) {
-      const mesh = this.meshes.get(slot.kind);
-      if (mesh === undefined) {
+    this.elapsed += deltaSeconds;
+    for (const slot of PICKUP_SLOTS) {
+      const mesh = this.meshes.get(slot.id);
+      if (mesh === undefined || !mesh.visible) {
         continue;
       }
-      if (this.available.get(slot.kind) === true) {
-        mesh.rotation.y += deltaSeconds * 2.2;
-        mesh.position.y = PICKUP_VISUAL_Y + Math.sin(this.elapsed * 2.5 + slot.x) * 0.15;
-        const dx = playerX - slot.x;
-        const dz = playerZ - slot.z;
-        if (dx * dx + dz * dz <= POWERUP_PICKUP_RADIUS * POWERUP_PICKUP_RADIUS) {
-          this.grant(slot.kind);
-          collected.push(slot.kind);
-        }
-      } else if (this.elapsed >= (this.respawnAt.get(slot.kind) ?? 0)) {
-        this.available.set(slot.kind, true);
-        mesh.visible = true;
-      }
+      mesh.rotation.y += deltaSeconds * 2.2;
+      mesh.position.y = PICKUP_VISUAL_Y + Math.sin(this.elapsed * 2.5 + slot.id * 2.1) * 0.15;
     }
-    return collected;
   }
 
   public reset(): void {
     this.elapsed = 0;
-    for (const kind of POWERUP_KINDS) {
-      this.available.set(kind, true);
-      this.respawnAt.set(kind, 0);
-      const mesh = this.meshes.get(kind);
-      if (mesh !== undefined) {
-        mesh.visible = true;
-      }
-    }
+    this.sync([]);
   }
 
   public dispose(): void {

@@ -20,6 +20,7 @@ import {
 class FakeElement {
   public id = "";
   public className = "";
+  public textContent = "";
   public readonly dataset: Record<string, string> = {};
   public readonly style: Record<string, string> = {};
   public readonly children: FakeElement[] = [];
@@ -90,6 +91,7 @@ describe("createAim throw-polish markup", () => {
       const bar = el.querySelector("#power-bar");
       expect(bar).not.toBe(null);
       expect(bar?.querySelector("#power-bar-fill")).not.toBe(null);
+      expect(el.querySelector("#power-caption")?.textContent).toBe("ЗАРЯД");
       // Reviewer F1: the reload bar is a sibling OUTSIDE #aim (never a
       // child), so the sweep stays visible while #aim hides during reload.
       expect(el.querySelector("#reload-bar")).toBe(null);
@@ -112,6 +114,7 @@ describe("createAim throw-polish markup", () => {
       const dots = el.querySelectorAll(".traj-dot");
       const faint = dots.map((dot) => dot.style.opacity);
       handle.setCharge01(1);
+      expect(el.querySelector("#power-caption")?.textContent).toBe("ПОЛНЫЙ ЗАРЯД");
       const charged = dots.map((dot) => dot.style.opacity);
       for (let i = 0; i < dots.length; i += 1) {
         expect(Number(charged[i])).toBeGreaterThan(Number(faint[i]));
@@ -121,6 +124,9 @@ describe("createAim throw-polish markup", () => {
       expect(fill?.style.background).not.toBe(CROSSHAIR_RELOAD_COLOR);
       expect(fill?.style.background).toBe(CROSSHAIR_FULL_COLOR);
       handle.setCharge01(0.5);
+      handle.setSuper(true);
+      expect(el.querySelector("#power-caption")?.textContent).toBe("СУПЕРЗАРЯД");
+      handle.setSuper(false);
       expect(fill?.style.width).toBe("50%");
       // Palette ramp pin: mid-charge is chartreuse, empty is charging white.
       expect(fill?.style.background).toBe(HL_CHARTREUSE_CSS);

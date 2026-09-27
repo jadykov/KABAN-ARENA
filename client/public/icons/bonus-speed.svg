@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Скорость">
+  <rect x="3" y="3" width="58" height="58" rx="12" fill="#203a3b" stroke="#d8ea70" stroke-width="3"/>
+  <path d="m33 12 12 13h-8v16H26V25h-8l15-13Z" fill="#d8ea70" stroke="#f0f5bb" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M18 46h31M23 52h21" stroke="#a6c6d7" stroke-width="3" stroke-linecap="round"/>
+</svg>

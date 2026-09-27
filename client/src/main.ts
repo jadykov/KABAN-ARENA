@@ -60,21 +60,9 @@ import {
   type RoundPhase,
 } from "./net/protocol";
 import { TRAJ_DOT_COUNT, createAim, type TrajSample } from "./ui/aim";
-import { createHud } from "./ui/hud";
+import { createHud, localizeKillfeed, localizePowerUp } from "./ui/hud";
 import { createJoystick } from "./ui/joystick";
 import { TouchAimState, isRightHalf } from "./net/touchAim";
-import type { PowerUpKind } from "./arena/PowerUps";
-
-// Debug/playtest power-up grants: physical key positions 1/2/3 on any
-// layout (e.code, never key) — same layout-independence rule as WASD.
-const POWERUP_KEYS: Record<string, PowerUpKind> = {
-  Digit1: "speed",
-  Numpad1: "speed",
-  Digit2: "shield",
-  Numpad2: "shield",
-  Digit3: "impulse",
-  Numpad3: "impulse",
-};
 
 // Fullscreen vendor shims (narrowly-scoped, documented): Android/iOS
 // webviews may expose only webkit-prefixed element-fullscreen APIs, and
@@ -191,7 +179,7 @@ async function boot(): Promise<void> {
   const hud = createHud(document.body);
   hud.setTimer(ROUND_SECONDS);
   hud.setScore(START_SCORE);
-  hud.setStatus("Spectating");
+  hud.setStatus("Наблюдение");
 
   // Stage 5 audio: procedural SFX engine (zero asset files) + DOM mute
   // toggle. Created in code like the FIRE button so index.html stays
@@ -202,15 +190,15 @@ async function boot(): Promise<void> {
   const muteButton = document.createElement("button");
   muteButton.id = "mute-button";
   muteButton.type = "button";
-  muteButton.title = "Toggle sound";
+  muteButton.title = "Включить или выключить звук";
   muteButton.textContent = sfx.isMuted() ? "🔇" : "🔊";
-  muteButton.setAttribute("aria-label", sfx.isMuted() ? "Unmute sound" : "Mute sound");
+  muteButton.setAttribute("aria-label", sfx.isMuted() ? "Включить звук" : "Выключить звук");
   muteButton.setAttribute("aria-pressed", String(sfx.isMuted()));
   muteButton.addEventListener("click", (): void => {
     sfx.unlock();
     const muted = sfx.toggleMuted();
     muteButton.textContent = muted ? "🔇" : "🔊";
-    muteButton.setAttribute("aria-label", muted ? "Unmute sound" : "Mute sound");
+    muteButton.setAttribute("aria-label", muted ? "Включить звук" : "Выключить звук");
     muteButton.setAttribute("aria-pressed", String(muted));
     // A focused button would re-trigger on Space (the charge key) — drop
     // focus immediately so gameplay keys stay gameplay keys.
@@ -229,16 +217,16 @@ async function boot(): Promise<void> {
     if (fullscreenButton !== null) {
       const active = isFullscreenActive();
       fullscreenButton.textContent = active ? "⤡" : "⛶";
-      fullscreenButton.setAttribute("aria-label", active ? "Exit fullscreen" : "Enter fullscreen");
+      fullscreenButton.setAttribute("aria-label", active ? "Выйти из полноэкранного режима" : "На весь экран");
     }
   };
   if (isFullscreenAvailable()) {
     fullscreenButton = document.createElement("button");
     fullscreenButton.id = "fullscreen-button";
     fullscreenButton.type = "button";
-    fullscreenButton.title = "Toggle fullscreen";
+    fullscreenButton.title = "Переключить полноэкранный режим";
     fullscreenButton.textContent = isFullscreenActive() ? "⤡" : "⛶";
-    fullscreenButton.setAttribute("aria-label", isFullscreenActive() ? "Exit fullscreen" : "Enter fullscreen");
+    fullscreenButton.setAttribute("aria-label", isFullscreenActive() ? "Выйти из полноэкранного режима" : "На весь экран");
     fullscreenButton.addEventListener("click", (): void => {
       const el = document.documentElement as unknown as HTMLElement & WebkitFullscreenElement;
       const doc = document as unknown as Document & WebkitFullscreenDocument;
@@ -420,7 +408,7 @@ async function boot(): Promise<void> {
   emblem.setAttribute("aria-hidden", "true");
   const kicker = document.createElement("span");
   kicker.id = "join-kicker";
-  kicker.textContent = "LIVE NIGHT MATCH";
+  kicker.textContent = "БОЙ НА АРЕНЕ";
   brand.appendChild(emblem);
   brand.appendChild(kicker);
 
@@ -429,32 +417,32 @@ async function boot(): Promise<void> {
   title.textContent = "KABAN ARENA";
   const subtitle = document.createElement("p");
   subtitle.id = "join-subtitle";
-  subtitle.textContent = "A little chaos under the stars.";
+  subtitle.textContent = "Три минуты от утра до глубокой ночи.";
 
   const nickLabel = document.createElement("label");
   nickLabel.id = "join-nick-label";
   nickLabel.htmlFor = "join-nick";
-  nickLabel.textContent = "YOUR NICKNAME";
+  nickLabel.textContent = "ВАШ НИК";
   const nickInput = document.createElement("input");
   nickInput.id = "join-nick";
   nickInput.maxLength = 16;
-  nickInput.placeholder = "Your nick";
+  nickInput.placeholder = "Введите ник";
   nickInput.autocomplete = "off";
   const playButton = document.createElement("button");
   playButton.id = "join-play";
   playButton.type = "button";
-  playButton.textContent = "Play";
+  playButton.textContent = "Играть";
   const controls = document.createElement("div");
   controls.id = "join-controls";
   const controlsLabel = document.createElement("div");
   controlsLabel.id = "join-controls-label";
-  controlsLabel.textContent = "HOW TO PLAY";
+  controlsLabel.textContent = "КАК ИГРАТЬ";
   const desktopHint = document.createElement("p");
   desktopHint.className = "join-control join-control--desktop";
-  desktopHint.textContent = "WASD to move · right drag to look. Hold click or Space to charge, release to throw.";
+  desktopHint.textContent = "WASD — движение; правая кнопка мыши — обзор. Удерживайте левую кнопку или пробел для заряда, отпустите для броска.";
   const touchHint = document.createElement("p");
   touchHint.className = "join-control join-control--touch";
-  touchHint.textContent = "Left stick to move · drag right to look. Hold FIRE to aim and charge, release to throw.";
+  touchHint.textContent = "Левый джойстик — движение; проведите справа для обзора. Удерживайте «БРОСОК» для прицела и заряда, отпустите для броска.";
   controls.appendChild(controlsLabel);
   controls.appendChild(desktopHint);
   controls.appendChild(touchHint);
@@ -472,9 +460,9 @@ async function boot(): Promise<void> {
   const fireButton = document.createElement("button");
   fireButton.id = "fire-button";
   fireButton.type = "button";
-  fireButton.textContent = "FIRE";
-  fireButton.title = "Hold to charge, release to throw";
-  fireButton.setAttribute("aria-label", "Hold to charge, release to throw");
+  fireButton.textContent = "БРОСОК";
+  fireButton.title = "Удерживайте для заряда, отпустите для броска";
+  fireButton.setAttribute("aria-label", "Удерживайте для заряда, отпустите для броска");
   fireButton.style.display = "none";
   document.body.appendChild(fireButton);
 
@@ -548,7 +536,7 @@ async function boot(): Promise<void> {
         showJoinOverlay();
       }
     },
-    onRoomFull: (message): void => {
+    onRoomFull: (): void => {
       // Explicit capacity rejection: never leave the player on a silent
       // overlay — show the plate again with feedback instead of hanging.
       isPlaying = false;
@@ -563,12 +551,21 @@ async function boot(): Promise<void> {
       aimOverlay.setCharge01(0);
       aimOverlay.setReload01(1);
       aimOverlay.hide();
-      hud.addKillfeed(message);
-      hud.setStatus("Room is full — try again later");
+      hud.addKillfeed("В комнате нет свободных мест");
+      hud.setStatus("Комната заполнена. Попробуйте позже.");
       showJoinOverlay();
     },
     onKillfeed: (message): void => {
-      hud.addKillfeed(message);
+      hud.addKillfeed(localizeKillfeed(message));
+    },
+    onPickupGranted: (info): void => {
+      if (info.playerId === net.ownSessionId) {
+        sceneManager.showBonusPickup(info.kind);
+        hud.addKillfeed(localizePowerUp(info.kind));
+        sfx.play("pickup");
+      } else {
+        remotes.showBonusPickup(info.playerId, info.kind);
+      }
     },
     onBallHit: (info): void => {
       // Server player-hit event: red blood burst at the impact position.
@@ -629,11 +626,11 @@ async function boot(): Promise<void> {
       sceneManager.setSpectating(true);
       joystick.element.style.display = "none";
       fireButton.style.display = "none";
-      hud.setStatus("Disconnected — press Play to rejoin");
+      hud.setStatus("Связь прервана — нажмите «Играть»");
       showJoinOverlay();
     },
-    onError: (message): void => {
-      hud.addKillfeed(`Net error: ${message}`);
+    onError: (): void => {
+      hud.addKillfeed("Ошибка соединения");
     },
   });
 
@@ -644,9 +641,14 @@ async function boot(): Promise<void> {
     // spectator list. Balls + SUPER core go straight to the scene (null hides
     // the core).
     sceneManager.setBattleSnapshot(snapshot.balls, snapshot.super ?? null);
+    const dayProgress = snapshot.phase === "playing"
+      ? 1 - snapshot.remainingMs / (ROUND_SECONDS * 1000)
+      : snapshot.phase === "ended" ? 1 : 0;
+    sceneManager.setDayProgress(Math.max(0, Math.min(1, dayProgress)));
     hud.setCounters(countFighters(snapshot.players), countSpectators(snapshot.players));
     const selfId = net.ownSessionId;
     const self = snapshot.players.find((player) => player.sessionId === selfId);
+    sceneManager.syncPowerUps(self ?? null, snapshot.serverNow, snapshot.pickups);
     if (self !== undefined) {
       hud.setScore(self.score);
       hud.setHearts(halvesForHp(self.hp));
@@ -666,7 +668,13 @@ async function boot(): Promise<void> {
       aimOverlay.setSuper(false);
     }
     if (self !== undefined && isPlaying && !self.alive) {
-      hud.setStatus("Fragged — respawning…");
+      hud.setStatus("Вы выбыли — возрождение…");
+    } else if (snapshot.phase === "countdown") {
+      hud.setStatus(`Старт через ${Math.max(1, Math.ceil(snapshot.countdownMs / 1000))} с`);
+    } else if (snapshot.phase === "lobby" && isPlaying) {
+      hud.setStatus("Ожидание игроков");
+    } else if (!isPlaying) {
+      hud.setStatus("Наблюдение");
     } else {
       hud.setStatus("");
     }
@@ -709,9 +717,7 @@ async function boot(): Promise<void> {
     } else {
       hud.setTimer(0);
       const winner = snapshot.players.find((player) => player.sessionId === snapshot.winner);
-      if (winner !== undefined && (self === undefined || self.alive || !isPlaying)) {
-        hud.setStatus(`${winner.nick} wins!`);
-      }
+      hud.setStatus(winner !== undefined ? `Победитель: ${winner.nick}` : "Раунд завершён");
     }
     // Stage 5 audio, snapshot-driven edges (all event-gated, never per-frame):
     // round start/end stingers on phase transitions (countdown->playing is
@@ -754,20 +760,19 @@ async function boot(): Promise<void> {
     const nick = normalizePlayNick(nickInput.value);
     if (!net.isConnected) {
       connecting = true;
-      playButton.textContent = "Joining…";
+      playButton.textContent = "Подключение…";
       net
         .connect("")
         .then((): void => {
           connecting = false;
-          playButton.textContent = "Play";
+          playButton.textContent = "Играть";
           net.sendPlay(nick);
         })
-        .catch((error: unknown): void => {
+        .catch((): void => {
           connecting = false;
-          playButton.textContent = "Play";
-          const message = error instanceof Error ? error.message : "join failed";
-          hud.addKillfeed(`Join failed (${message}) — practice mode`);
-          hud.setStatus("Server unreachable — practice mode, retry Play");
+          playButton.textContent = "Играть";
+          hud.addKillfeed("Не удалось подключиться");
+          hud.setStatus("Сервер недоступен. Повторите попытку.");
         });
       return;
     }
@@ -795,11 +800,10 @@ async function boot(): Promise<void> {
       .then((): void => {
         connecting = false;
       })
-      .catch((error: unknown): void => {
+      .catch((): void => {
         connecting = false;
-        const message = error instanceof Error ? error.message : "join failed";
-        hud.addKillfeed(`Spectate failed (${message}) — practice mode`);
-        hud.setStatus("Server unreachable — practice mode, retry Play");
+        hud.addKillfeed("Не удалось подключиться для просмотра");
+        hud.setStatus("Сервер недоступен. Повторите попытку.");
       });
   };
 
@@ -1309,19 +1313,8 @@ async function boot(): Promise<void> {
       snapDebug.toggle();
       return;
     }
-    // Typing a nick must never fire Space/H/R/power-up shortcuts.
+    // Typing a nick must never fire Space/H/R shortcuts.
     if (isTypingTarget(event)) {
-      return;
-    }
-    const granted = POWERUP_KEYS[event.code];
-    if (granted !== undefined) {
-      // Spectators have no avatar: power-up grants are fighters-only, same
-      // gate as Space/fire below. Debug cheat key: no feed line (event feed
-      // shows join/kill/pickup one-liners only).
-      if (!isPlaying) {
-        return;
-      }
-      sceneManager.grantPowerUp(granted);
       return;
     }
     if (event.code === "Space") {
@@ -1336,8 +1329,7 @@ async function boot(): Promise<void> {
       return;
     }
     if (event.code === "KeyH") {
-      // Test-scene hit: a shield charge absorbs one hit, otherwise nothing
-      // visible happens here (the authoritative server HP drives the HUD).
+      // Test-scene hit flash; authoritative shield and HP stay on the server.
       // Debug key: no feed line (event feed shows join/kill/pickup only).
       if (!isPlaying) {
         return;
@@ -1697,17 +1689,10 @@ async function boot(): Promise<void> {
     if (playing && isCharging) {
       aimOverlay.setTrajectory(computeAimTrajectory());
     }
-    // Event feed (owner 4d.4): pickup one-liners only — trampoline rides and
-    // boost expiries stay silent so the feed shows join/kill/pickup alone.
-    // Stage 5 audio rides the same drain: pickup chime, trampoline bounce
-    // and hop-cadence footstep ticks (all cooldown-gated in the engine, and
-    // the killfeed itself stays silent by design — frags already read
-    // through the death sound, so a feed tick would only risk spam).
+    // Local scene events cover trampoline and footsteps. Pickup feedback
+    // arrives separately from the server's authoritative grant event.
     for (const arenaEvent of sceneManager.drainEvents()) {
-      if (arenaEvent.type === "pickup") {
-        hud.addKillfeed(`Picked up ${arenaEvent.kind}`);
-        sfx.play("pickup");
-      } else if (arenaEvent.type === "trampoline") {
+      if (arenaEvent.type === "trampoline") {
         sfx.play("trampoline");
       } else if (arenaEvent.type === "footstep") {
         sfx.play("footstep");
@@ -1715,7 +1700,7 @@ async function boot(): Promise<void> {
     }
     // Remote replication: ease every snapshot through lerp/slerp.
     if (latest !== null) {
-      remotes.sync(latest.players, net.ownSessionId, deltaSeconds);
+      remotes.sync(latest.players, net.ownSessionId, deltaSeconds, latest.serverNow);
     }
     // Inputs-only upstream at 20 ticks/s: camera-relative stick (move.x/y)
     // rotated to WORLD-space via the shared worldMoveFromYaw helper (same

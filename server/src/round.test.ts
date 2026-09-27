@@ -1,23 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { LOBBY_COUNTDOWN_MS, REMATCH_DELAY_MS, ROUND_DURATION_MS, ROUND_HARD_CAP_MS } from "./config.js";
+import { LOBBY_COUNTDOWN_MS, REMATCH_DELAY_MS, ROUND_DURATION_MS } from "./config.js";
 import { getSpawnForIndex, sanitizeNick } from "./hits.js";
 import { createBrain, pickBotTarget, pseudoRandom, stepBot } from "./bots.js";
 import { PlayerState } from "./state.js";
 
 describe("round loop C2 timings 3/3/2", () => {
-  it("lobby countdown is 3s and round is 3min with hard cap under 5min", () => {
+  it("lobby countdown is 3s and the full round lasts 3min", () => {
     expect(LOBBY_COUNTDOWN_MS).toBe(3000);
     expect(ROUND_DURATION_MS).toBe(180000);
-    expect(ROUND_HARD_CAP_MS).toBeLessThan(5 * 60 * 1000);
     expect(REMATCH_DELAY_MS).toBeGreaterThan(0);
   });
 
   it("nick validation enforces 2-16 chars and dedupes", () => {
-    expect(sanitizeNick("A", new Set())).toBe("Kaban");
+    expect(sanitizeNick("A", new Set())).toBe("Кабан");
     expect(sanitizeNick("  Bo  ", new Set())).toBe("Bo");
     expect(sanitizeNick("x".repeat(40), new Set())).toHaveLength(16);
     expect(sanitizeNick("Bo", new Set(["Bo"]))).not.toBe("Bo");
-    expect(sanitizeNick(12345, new Set())).toBe("Kaban");
+    expect(sanitizeNick(12345, new Set())).toBe("Кабан");
   });
 
   it("six spawn points exist for 2-6 player rooms (inside HALF 16.8)", () => {

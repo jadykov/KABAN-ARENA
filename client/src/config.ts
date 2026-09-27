@@ -110,12 +110,10 @@ export const KILLFEED_OPACITY = 0.7;
 
 // Perf budget (AGENTS.md pitfalls): shadow map stays at or below 1024.
 export const SHADOW_MAP_SIZE = 1024;
-// Scene light budget (visual round, option A subtle lift): exactly 1 ambient
-// + 1 directional + the pre-existing banner spot — no new lights. Ambient was
-// raised 0.6 -> 0.78 (~+30%) to lift the brightened violet surfaces; the
-// directional key stays at 1.0 so highlights never blow out on phones.
+// Scene light budget: exactly one ambient and one directional light. These
+// night values anchor the round's continuous dawn-to-night progression.
 export const SCENE_AMBIENT_INTENSITY = 0.78;
-export const SCENE_DIRECTIONAL_INTENSITY = 1.0;
+export const SCENE_DIRECTIONAL_INTENSITY = 0.82;
 
 // Stage 3 physics (QT3-A confirmed 2026-09-11: fixed tick 60Hz decoupled,
 // ice friction 0.05-0.1, trampoline impulse 8-12, tuned here).
@@ -165,9 +163,8 @@ export const KNOCKBACK_IMPULSE = 9;
 // Stage 3 arena (QD2-A neon-warehouse, QD5-A 6-8 low symmetric blocks).
 export const OBSTACLE_COUNT = ARENA_LAYOUT.obstacles.length;
 // Playtest round (owner: sense of open space): perimeter walls halved 3 -> 1.5
-// so the wall top ends up roughly at the banner edge. All wall readers
-// (Arena buildWalls/buildColliders/neon strips, SceneManager lowBehindWall,
-// bannerSpot) derive from this constant, so they follow automatically.
+// so the camera can see over them. All wall readers (Arena colliders and
+// neon strips, SceneManager lowBehindWall) derive from this constant.
 export const WALL_HEIGHT = 1.5;
 export const WALL_THICKNESS = 0.5;
 // Legacy single-radius aliases remain for existing tuning/tests. The actual
@@ -180,9 +177,13 @@ export const SWAMP_RADIUS = ARENA_LAYOUT.swampZones[0]?.radius ?? 0;
 export const SURFACE_MAX_BODY_Y = 1.2;
 export const SPAWN_COUNT = ARENA_LAYOUT.spawns.length;
 
-// Power-up set A1 (speed x1.3 timed, shield 1 hit, impulse knockback).
-export const SPEED_MULTIPLIER = 1.3;
-export const SPEED_DURATION_S = 6;
+// Two server-selected pickup outcomes, mirrored by local prediction/visuals.
+export const SPEED_MULTIPLIER = 1.25;
+export const SPEED_DURATION_S = 5;
+export const SHIELD_DURATION_S = 10;
+export const SHIELD_CAPACITY = 25;
+// Legacy client pickup state still imports this until the synchronized
+// server-selected shield replaces the one-hit local implementation.
 export const SHIELD_MAX_HITS = 1;
 export const POWERUP_RESPAWN_S = 8;
 export const POWERUP_PICKUP_RADIUS = 1.2;
@@ -203,10 +204,6 @@ export const SHOP_SIGN_HEIGHT_M = 0.82;
 export const SHOP_SIGN_OPACITY = 0.78;
 export const SHOP_SIGN_TEXTURE_WIDTH = 512;
 export const SHOP_SIGN_TEXTURE_HEIGHT = 256;
-export const BANNER_WIDTH_M = 4;
-export const BANNER_HEIGHT_M = 1;
-export const BANNER_TEXTURE_WIDTH = 512;
-export const BANNER_TEXTURE_HEIGHT = 128;
 export const ADS_PUBLIC_BASE_PATH = "/ads";
 
 // Stage 4 netcode (client mirrors; server src/config.ts is authoritative).
@@ -357,9 +354,9 @@ export const SELF_SPAWN_Y = 1.1;
 // Guest nicks (no auth): validated locally, deduped server-side.
 export const NICK_MIN_LENGTH = 2;
 export const NICK_MAX_LENGTH = 16;
-export const DEFAULT_NICK = "Kaban";
-// R1 pre-join spectator: empty Play nick falls back to Guest-XXXX.
-export const GUEST_NICK_PREFIX = "Guest";
+export const DEFAULT_NICK = "Кабан";
+// Pre-join spectator: an empty nickname gets a localized generated name.
+export const GUEST_NICK_PREFIX = "Гость";
 
 // R1 spectator hover camera: cinematic angled top-down above the arena
 // with a slow drift/orbit (see SceneManager.updateSpectatorCamera).

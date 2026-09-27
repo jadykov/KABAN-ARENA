@@ -12,7 +12,6 @@ import {
   AdsManager,
   createPlaceholderTexture,
   getShopfrontTransforms,
-  resolveBannerUrls,
   resolveShopSignUrls,
 } from "./AdsLoader";
 
@@ -78,11 +77,6 @@ describe("shopfront layout", () => {
       `${ADS_PUBLIC_BASE_PATH}/fence-3.png`,
       `${ADS_PUBLIC_BASE_PATH}/fence-3.jpg`,
     ]);
-    expect(resolveBannerUrls()).toEqual([
-      `${ADS_PUBLIC_BASE_PATH}/banner.png`,
-      `${ADS_PUBLIC_BASE_PATH}/banner.jpg`,
-      `${ADS_PUBLIC_BASE_PATH}/banner.svg`,
-    ]);
     // Headless Node has no canvas; browsers generate a brand-labelled sign.
     expect(() => createPlaceholderTexture("Магнит", 512, 256, ACCENT_AD_FENCE)).toThrow();
   });
@@ -95,7 +89,7 @@ describe("AdsManager shop visuals and lifecycle", () => {
     ads.buildVisuals(scene);
     try {
       expect(ads.shopfrontCount).toBe(4);
-      expect(scene.children).toHaveLength(11); // four groups, five batches, banner, rig
+      expect(scene.children).toHaveLength(9); // four groups and five batches
       const batches = scene.children.filter((child): child is THREE.InstancedMesh => child instanceof THREE.InstancedMesh);
       expect(batches.map((batch) => [batch.name, batch.count])).toEqual([
         ["shop-static:facade", 4],
@@ -106,8 +100,9 @@ describe("AdsManager shop visuals and lifecycle", () => {
       ]);
       let renderableCount = 0;
       scene.traverse((child) => { if (child instanceof THREE.Mesh) renderableCount += 1; });
-      expect(renderableCount).toBe(15); // five batches + eight sign parts + banner and rig
-      expect(scene.getObjectByName("arena-banner")).toBeDefined();
+      expect(renderableCount).toBe(13); // five batches + eight sign parts
+      expect(scene.getObjectByName("arena-banner")).toBeUndefined();
+      expect(scene.getObjectByName("arena-banner-rig")).toBeUndefined();
       const shops = scene.children.filter((child) => child.name.startsWith("shopfront:"));
       expect(shops.map((shop) => shop.name)).toEqual([
         "shopfront:0:krasnoe-beloe",
@@ -167,7 +162,7 @@ describe("AdsManager shop visuals and lifecycle", () => {
     }
   });
 
-  it("shares repeated brand texture, loads banner, and disposes all resources", async () => {
+  it("shares repeated brand texture and disposes all resources", async () => {
     const textures: THREE.Texture[] = [];
     const disposed: Array<ReturnType<typeof vi.spyOn>> = [];
     const load = vi.spyOn(THREE.TextureLoader.prototype, "loadAsync").mockImplementation(async (url) => {
@@ -185,7 +180,7 @@ describe("AdsManager shop visuals and lifecycle", () => {
     await ads.load("/static");
     expect(ads.isLoaded).toBe(true);
     expect(load.mock.calls.map(([url]) => url)).toEqual([
-      "/static/fence-2.png", "/static/fence-3.png", "/static/fence-1.png", "/static/banner.png",
+      "/static/fence-2.png", "/static/fence-3.png", "/static/fence-1.png",
     ]);
     const signMeshes = scene.children
       .filter((child) => child.name.startsWith("shopfront:"))
@@ -221,7 +216,7 @@ describe("AdsManager shop visuals and lifecycle", () => {
     ads.buildVisuals(scene);
     await expect(ads.load("/missing")).resolves.toBeUndefined();
     expect(ads.isLoaded).toBe(true);
-    expect(missing).toHaveBeenCalledTimes(9); // three brands x two formats, banner x three
+    expect(missing).toHaveBeenCalledTimes(6); // three brands x two formats
     ads.dispose(scene);
     expect(scene.children).toHaveLength(0);
     expect(ads.isLoaded).toBe(false);

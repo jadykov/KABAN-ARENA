@@ -14,7 +14,9 @@ import {
   type FirePayload,
   type InputPayload,
   type NetBallSnapshot,
+  type NetPickupSnapshot,
   type NetPlayerSnapshot,
+  type NetPowerUpKind,
   type NetSuperSnapshot,
   type RoundPhase,
 } from "./protocol";
@@ -22,11 +24,13 @@ import {
 export interface RoomSnapshot {
   phase: RoundPhase;
   tick: number;
+  serverNow: number;
   countdownMs: number;
   remainingMs: number;
   winner: string;
   players: NetPlayerSnapshot[];
   balls: NetBallSnapshot[];
+  pickups: NetPickupSnapshot[];
   super: NetSuperSnapshot | null;
 }
 
@@ -41,6 +45,7 @@ export interface NetworkEvents {
   onSpectator(sessionId: string): void;
   onRoomFull(message: string): void;
   onKillfeed(message: string): void;
+  onPickupGranted(info: PickupGrantedInfo): void;
   onBallHit(info: BallHitInfo): void;
   onLeave(): void;
   onError(message: string): void;
@@ -56,6 +61,10 @@ function toString(value: unknown, fallback: string): string {
 
 function toBoolean(value: unknown): boolean {
   return value === true;
+}
+
+function toPowerUpKind(value: unknown): NetPowerUpKind {
+  return value === "shield" || value === "speed" ? value : "";
 }
 
 // R1 compat: snapshots predating ready/spectator (or partial patches)
@@ -79,6 +88,12 @@ interface WirePlayer {
   spectator?: unknown;
   superBuff?: unknown;
   reloadUntil?: unknown;
+  shieldHp?: unknown;
+  shieldUntil?: unknown;
+  speedUntil?: unknown;
+  pickupKind?: unknown;
+  pickupAt?: unknown;
+  pickupSeq?: unknown;
 }
 
 interface WirePlayers {
@@ -104,14 +119,27 @@ interface WireBalls {
   forEach(callback: (value: WireBall, key: string) => void): void;
 }
 
+interface WirePickup {
+  x?: unknown;
+  z?: unknown;
+  active?: unknown;
+  nextAt?: unknown;
+}
+
+interface WirePickups {
+  forEach(callback: (value: WirePickup, key: string) => void): void;
+}
+
 interface WireState {
   phase?: unknown;
   tick?: unknown;
+  serverNow?: unknown;
   countdownMs?: unknown;
   remainingMs?: unknown;
   winner?: unknown;
   players?: WirePlayers | undefined;
   balls?: WireBalls | undefined;
+  pickups?: WirePickups | undefined;
   superActive?: unknown;
   superX?: unknown;
   superZ?: unknown;
@@ -144,6 +172,12 @@ export function decodeSnapshot(state: unknown, selfId: string | null = null): Ro
         spectator: toBooleanWithDefault(player.spectator, false),
         superBuff: toBoolean(player.superBuff),
         reloadUntil: toNumber(player.reloadUntil, 0),
+        shieldHp: Math.max(0, toNumber(player.shieldHp, 0)),
+        shieldUntil: Math.max(0, toNumber(player.shieldUntil, 0)),
+        speedUntil: Math.max(0, toNumber(player.speedUntil, 0)),
+        pickupKind: toPowerUpKind(player.pickupKind),
+        pickupAt: Math.max(0, toNumber(player.pickupAt, 0)),
+        pickupSeq: Math.max(0, Math.floor(toNumber(player.pickupSeq, 0))),
       });
     });
   } catch {
@@ -175,6 +209,28 @@ export function decodeSnapshot(state: unknown, selfId: string | null = null): Ro
   } catch {
     // Partial ball patches never kill the render loop.
   }
+  const pickups: NetPickupSnapshot[] = [];
+  try {
+    wire.pickups?.forEach((pickup: WirePickup, key: string): void => {
+      if (!/^(0|[1-9]\d*)$/.test(key)) {
+        return;
+      }
+      const id = Number(key);
+      if (!Number.isSafeInteger(id)) {
+        return;
+      }
+      pickups.push({
+        id,
+        x: toNumber(pickup.x, 0),
+        z: toNumber(pickup.z, 0),
+        active: toBoolean(pickup.active),
+        nextAt: Math.max(0, toNumber(pickup.nextAt, 0)),
+      });
+    });
+    pickups.sort((a, b) => a.id - b.id);
+  } catch {
+    // Bad or partial pickup patches never interrupt rendering.
+  }
   const superActive = toBoolean(wire.superActive);
   const superSnapshot: NetSuperSnapshot | null = superActive
     ? {
@@ -188,11 +244,13 @@ export function decodeSnapshot(state: unknown, selfId: string | null = null): Ro
   return {
     phase: roundPhaseFromString(wire.phase),
     tick: toNumber(wire.tick, 0),
+    serverNow: Math.max(0, toNumber(wire.serverNow, 0)),
     countdownMs: toNumber(wire.countdownMs, 0),
     remainingMs: toNumber(wire.remainingMs, 0),
     winner: toString(wire.winner, ""),
     players,
     balls,
+    pickups,
     super: superSnapshot,
   };
 }
@@ -235,6 +293,31 @@ export function decodeBallHitPlayer(payload: unknown): BallHitInfo | null {
     return null;
   }
   return { ballId, victimId, x, y, z, super: body["super"] === true };
+}
+
+export interface PickupGrantedInfo {
+  playerId: string;
+  slotId: number;
+  kind: Exclude<NetPowerUpKind, "">;
+  seq: number;
+}
+
+export function decodePickupGranted(payload: unknown): PickupGrantedInfo | null {
+  if (typeof payload !== "object" || payload === null) {
+    return null;
+  }
+  const body = payload as Record<string, unknown>;
+  const playerId = body["playerId"];
+  const slotId = body["slotId"];
+  const kind = body["kind"];
+  const seq = body["seq"];
+  if (typeof playerId !== "string" || playerId === ""
+    || typeof slotId !== "number" || !Number.isSafeInteger(slotId) || slotId < 0
+    || (kind !== "shield" && kind !== "speed")
+    || typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 1) {
+    return null;
+  }
+  return { playerId, slotId, kind, seq };
 }
 
 export class NetworkManager {
@@ -319,6 +402,12 @@ export class NetworkManager {
       const message = toString(body.message, "");
       if (message !== "") {
         this.events.onKillfeed(message);
+      }
+    });
+    room.onMessage("pickup-granted", (payload: unknown): void => {
+      const info = decodePickupGranted(payload);
+      if (info !== null) {
+        this.events.onPickupGranted(info);
       }
     });
     room.onMessage(BALL_HIT_PLAYER_MESSAGE, (payload: unknown): void => {

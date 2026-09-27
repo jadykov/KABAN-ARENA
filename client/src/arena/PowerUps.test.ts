@@ -1,116 +1,108 @@
 import { describe, expect, it } from "vitest";
-import {
-  POWERUP_PICKUP_RADIUS,
-  POWERUP_RESPAWN_S,
-  SHIELD_MAX_HITS,
-  SPEED_DURATION_S,
-  SPEED_MULTIPLIER,
-} from "../config";
+import { SHIELD_CAPACITY, SPEED_MULTIPLIER } from "../config";
+import { ARENA_LAYOUT } from "../layout";
 import { PowerUpPickups, PowerUpState, getPickupSlots } from "./PowerUps";
 
-describe("PowerUpState skill set A1", () => {
-  it("applies speed x1.3 and expires after the duration", () => {
+describe("PowerUpState mirrors server effects", () => {
+  it("uses the synchronized five-second speed deadline for prediction", () => {
     const state = new PowerUpState();
     expect(state.getSpeedMultiplier()).toBe(1);
-    state.applyPickup("speed");
-    expect(state.isSpeedActive()).toBe(true);
+    state.sync({ shieldHp: 0, shieldUntil: 0, speedUntil: 6000 }, 1000);
+    expect(SPEED_MULTIPLIER).toBe(1.25);
     expect(state.getSpeedMultiplier()).toBe(SPEED_MULTIPLIER);
-    expect(SPEED_MULTIPLIER).toBe(1.3);
-    expect(state.getSpeedRemaining()).toBeGreaterThan(0);
-    state.update(SPEED_DURATION_S + 1);
+    expect(state.getSpeedRemaining()).toBe(5);
+    state.update(4.9);
+    expect(state.isSpeedActive()).toBe(true);
+    state.update(0.1);
     expect(state.isSpeedActive()).toBe(false);
     expect(state.getSpeedMultiplier()).toBe(1);
-    expect(state.getSpeedRemaining()).toBe(0);
   });
 
-  it("refreshes speed on re-pickup", () => {
+  it("mirrors partial shield capacity and ends it at its server deadline", () => {
     const state = new PowerUpState();
-    state.applyPickup("speed");
-    state.update(SPEED_DURATION_S - 1);
-    state.applyPickup("speed");
-    expect(state.getSpeedRemaining()).toBeCloseTo(SPEED_DURATION_S, 5);
-  });
-
-  it("absorbs exactly SHIELD_MAX_HITS hits", () => {
-    const state = new PowerUpState();
-    expect(SHIELD_MAX_HITS).toBe(1);
-    expect(state.hasShield()).toBe(false);
-    expect(state.consumeShieldHit()).toBe(false);
-    state.applyPickup("shield");
+    state.sync({ shieldHp: SHIELD_CAPACITY, shieldUntil: 11000, speedUntil: 0 }, 1000);
+    expect(SHIELD_CAPACITY).toBe(25);
     expect(state.hasShield()).toBe(true);
-    expect(state.consumeShieldHit()).toBe(true);
+    expect(state.getShieldHp()).toBe(25);
+    expect(state.getShieldRemaining()).toBe(10);
+
+    // A stronger hit can consume only part of the server shield capacity.
+    state.sync({ shieldHp: 12.5, shieldUntil: 11000, speedUntil: 0 }, 2000);
+    expect(state.getShieldHp()).toBe(12.5);
+    expect(state.getShieldFraction()).toBe(0.5);
+    state.update(9);
     expect(state.hasShield()).toBe(false);
-    expect(state.consumeShieldHit()).toBe(false);
+    expect(state.getShieldHp()).toBe(0);
   });
 
-  it("holds no timed state for impulse knockback", () => {
+  it("replaces local state with each snapshot and ignores invalid values", () => {
     const state = new PowerUpState();
-    state.applyPickup("impulse");
+    state.sync({ shieldHp: 25, shieldUntil: 11000, speedUntil: 6000 }, 1000);
+    state.sync({ shieldHp: 0, shieldUntil: 0, speedUntil: 0 }, 1500);
+    expect(state.hasShield()).toBe(false);
     expect(state.isSpeedActive()).toBe(false);
-    expect(state.hasShield()).toBe(false);
-  });
 
-  it("resets all state", () => {
-    const state = new PowerUpState();
-    state.applyPickup("speed");
-    state.applyPickup("shield");
-    state.update(1);
+    state.sync({
+      shieldHp: Number.POSITIVE_INFINITY,
+      shieldUntil: Number.NaN,
+      speedUntil: Number.NaN,
+    }, Number.NaN);
+    expect(state.hasShield()).toBe(false);
+    expect(state.getSpeedMultiplier()).toBe(1);
     state.reset();
-    expect(state.isSpeedActive()).toBe(false);
-    expect(state.hasShield()).toBe(false);
-    expect(state.now).toBe(0);
+    expect(state.getShieldFraction()).toBe(0);
+    expect(state.getSpeedRemaining()).toBe(0);
   });
 });
 
-describe("PowerUpPickups pedestals", () => {
-  it("exposes one pedestal per kind", () => {
+describe("three neutral pickup visuals", () => {
+  it("uses stable decimal layout indexes, with no preselected kind", () => {
     const slots = getPickupSlots();
     expect(slots).toHaveLength(3);
-    expect(new Set(slots.map((slot) => slot.kind))).toEqual(
-      new Set(["speed", "shield", "impulse"]),
-    );
+    expect(slots.map((slot) => slot.id)).toEqual([0, 1, 2]);
+    expect(slots.map(({ x, z }) => ({ x, z }))).toEqual(ARENA_LAYOUT.pickups);
+    expect(slots.every((slot) => !("kind" in slot))).toBe(true);
   });
 
-  it("collects by proximity and respawns after the delay", () => {
+  it("changes availability only from replicated state", () => {
     const pickups = new PowerUpPickups();
     try {
-      const speedSlot = getPickupSlots().find((slot) => slot.kind === "speed");
-      expect(speedSlot).toBeDefined();
-      if (speedSlot === undefined) {
-        return;
-      }
-      expect(pickups.isAvailable("speed")).toBe(true);
-      // Far away: nothing collected.
-      expect(pickups.update(1 / 60, 5, 5)).toHaveLength(0);
-      // Outside the pickup radius: still nothing.
-      const outside = pickups.update(
-        1 / 60,
-        speedSlot.x + POWERUP_PICKUP_RADIUS * 2,
-        speedSlot.z,
-      );
-      expect(outside).toHaveLength(0);
-      // On the pedestal: collected and hidden.
-      const collected = pickups.update(1 / 60, speedSlot.x, speedSlot.z);
-      expect(collected).toEqual(["speed"]);
-      expect(pickups.isAvailable("speed")).toBe(false);
-      // Still gone before the respawn delay.
-      pickups.update(POWERUP_RESPAWN_S - 1, speedSlot.x, speedSlot.z);
-      expect(pickups.isAvailable("speed")).toBe(false);
-      // Back after the delay.
-      pickups.update(1.5, 5, 5);
-      expect(pickups.isAvailable("speed")).toBe(true);
+      expect(pickups.object.children).toHaveLength(3);
+      expect(getPickupSlots().every((slot) => !pickups.isAvailable(slot.id))).toBe(true);
+
+      pickups.sync([
+        { id: 0, active: true },
+        { id: 1, active: false },
+        { id: 2, active: true },
+      ]);
+      expect(pickups.isAvailable(0)).toBe(true);
+      expect(pickups.isAvailable(1)).toBe(false);
+      expect(pickups.isAvailable(2)).toBe(true);
+
+      // Time and proximity cannot collect or respawn a pedestal locally.
+      pickups.update(100);
+      expect(pickups.isAvailable(0)).toBe(true);
+      expect(pickups.isAvailable(1)).toBe(false);
+      pickups.sync([{ id: 0, active: false }, { id: 1, active: false }, { id: 2, active: false }]);
+      pickups.update(100);
+      expect(pickups.isAvailable(0)).toBe(false);
+      expect(pickups.isAvailable(1)).toBe(false);
+      pickups.sync([{ id: 1, active: true }]);
+      expect(pickups.isAvailable(1)).toBe(true);
+      expect(pickups.isAvailable(0)).toBe(false);
     } finally {
       pickups.dispose();
     }
   });
 
-  it("grants and resets directly", () => {
+  it("hides stale pickup visuals on reset", () => {
     const pickups = new PowerUpPickups();
     try {
-      pickups.grant("shield");
-      expect(pickups.isAvailable("shield")).toBe(false);
+      pickups.sync([{ id: 0, active: true }]);
       pickups.reset();
-      expect(pickups.isAvailable("shield")).toBe(true);
+      expect(pickups.isAvailable(0)).toBe(false);
+      expect(pickups.isAvailable(1)).toBe(false);
+      expect(pickups.isAvailable(2)).toBe(false);
     } finally {
       pickups.dispose();
     }

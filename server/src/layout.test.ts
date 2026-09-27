@@ -8,6 +8,7 @@ import {
   TRAMPOLINE_SPOTS,
 } from "./config.js";
 import { getSpawnForIndex, isOnTrampolinePad } from "./hits.js";
+import { validateArenaLayout } from "../../shared/arena-layout.mjs";
 
 describe("authoritative shared arena layout", () => {
   it("uses the same JSON objects for solids, surfaces, pads, and all six spawns", () => {
@@ -37,5 +38,18 @@ describe("authoritative shared arena layout", () => {
     } finally {
       first.radius = oldRadius;
     }
+  });
+
+  it("keeps at most three distinct neutral pickup points", () => {
+    expect(ARENA_LAYOUT.pickups).toHaveLength(3);
+    for (const pickup of ARENA_LAYOUT.pickups) {
+      expect(pickup).toEqual({ x: expect.any(Number), z: expect.any(Number) });
+    }
+    const extra = structuredClone(ARENA_LAYOUT);
+    extra.pickups.push({ x: 0, z: 8 });
+    expect(() => validateArenaLayout(extra)).toThrow(/at most three neutral pickup/);
+    const duplicate = structuredClone(ARENA_LAYOUT);
+    duplicate.pickups[1] = { ...duplicate.pickups[0]! };
+    expect(() => validateArenaLayout(duplicate)).toThrow(/duplicate pickup position/);
   });
 });

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Щит">
+  <rect x="3" y="3" width="58" height="58" rx="12" fill="#203a3b" stroke="#d8ea70" stroke-width="3"/>
+  <path d="M32 11 49 17v14c0 11-7 18-17 23C22 49 15 42 15 31V17l17-6Z" fill="#91aa78" stroke="#f0f5bb" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M32 17v29M21 28h22" stroke="#325451" stroke-width="3" stroke-linecap="round"/>
+</svg>

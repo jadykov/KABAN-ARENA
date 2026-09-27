@@ -284,7 +284,7 @@ describe("room netcode: join/leave/late-join/input replication", () => {
   });
 });
 
-describe("round loop: score-or-timer end, respawn, clean reset", () => {
+describe("round loop: full timer, respawn, clean reset", () => {
   it("round ends on 3min timer with the leader as winner, then resets", async () => {
     const room = await playingRoom();
     expect(room.state.phase).toBe("playing");
@@ -303,13 +303,17 @@ describe("round loop: score-or-timer end, respawn, clean reset", () => {
     expect(room.state.winner).toBe("");
   });
 
-  it("round ends early on first-to-100, hard cap stays reachable", async () => {
+  it("a player reaching 100 points does not end the round early", async () => {
     const room = await playingRoom();
     const p1 = getPlayer(room, "s1");
     if (p1 !== undefined) {
       p1.score = 100;
     }
     advance(room, 5000);
+    room.tickRoom();
+    expect(room.state.phase).toBe("playing");
+    expect(room.state.winner).toBe("");
+    advance(room, ROUND_DURATION_MS - 5000);
     room.tickRoom();
     expect(room.state.phase).toBe("ended");
     expect(room.state.winner).toBe("s1");
@@ -873,7 +877,7 @@ describe("R1 pre-join spectator", () => {
     expect(player?.spectator).toBe(false);
     expect(player?.alive).toBe(true);
     expect(player?.hp).toBe(100);
-    expect(player?.nick.startsWith("Guest-")).toBe(true);
+    expect(player?.nick.startsWith("Гость-")).toBe(true);
   });
 });
 

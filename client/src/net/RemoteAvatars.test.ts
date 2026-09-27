@@ -35,6 +35,12 @@ function makeSnapshot(overrides: Partial<NetPlayerSnapshot> & { sessionId: strin
     spectator: false,
     superBuff: false,
     reloadUntil: 0,
+    shieldHp: 0,
+    shieldUntil: 0,
+    speedUntil: 0,
+    pickupKind: "",
+    pickupAt: 0,
+    pickupSeq: 0,
     ...overrides,
   };
 }
@@ -244,6 +250,32 @@ describe("RemoteAvatars remote death burst (alive→false edge)", () => {
   });
 });
 
+describe("RemoteAvatars replicated bonuses", () => {
+  it("shows timed shield and wind on a remote avatar and a one-second pickup badge", () => {
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    try {
+      avatars.sync([makeSnapshot({
+        sessionId: "r1", shieldHp: 25, shieldUntil: 11_000, speedUntil: 6_000,
+      })], null, FRAME, 1_000);
+      const rig = rigOf(scene);
+      const shield = rig.getObjectByName("bonus-shield");
+      const wind = rig.getObjectByName("bonus-speed-wind");
+      const badge = rig.getObjectByName("bonus-badge");
+      expect(shield?.visible).toBe(true);
+      expect(wind?.visible).toBe(true);
+      avatars.showBonusPickup("r1", "shield");
+      expect(badge?.visible).toBe(true);
+      avatars.sync([makeSnapshot({ sessionId: "r1", shieldHp: 0, shieldUntil: 0, speedUntil: 0 })], null, 1.01, 12_000);
+      expect(shield?.visible).toBe(false);
+      expect(wind?.visible).toBe(false);
+      expect(badge?.visible).toBe(false);
+    } finally {
+      avatars.dispose();
+    }
+  });
+});
+
 // Stage 4d.4: remote victim hit-flash — flashVictim spikes THAT remote's body
 // emissive (ACCENT_HIT_FLASH, 2.5 -> 0 over 0.18s via its own HitFlash,
 // ticked in sync), visible to all viewers. Non-victims stay dark, unknown
@@ -324,4 +356,3 @@ describe("RemoteAvatars victim hit-flash (flashVictim routing)", () => {
     }
   });
 });
-
