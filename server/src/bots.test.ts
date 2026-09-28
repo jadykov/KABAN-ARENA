@@ -4,6 +4,7 @@ import {
   BALL_HIT_RADIUS,
   BODY_CENTER_Y,
   BOT_FIRE_RANGE,
+  CHARGE_MAX_S,
   MAX_HP,
 } from "./config.js";
 import { createBrain, pitchForTarget, planBotFire } from "./bots.js";
@@ -150,5 +151,30 @@ describe("planBotFire aims at the victim body Y (bug 3b)", () => {
     }
     expect(plan.pitch).toBeGreaterThanOrEqual(0.08);
     expect(plan.pitch).toBeLessThanOrEqual(0.7);
+  });
+});
+
+describe("bot fast-charge pickup", () => {
+  it("reaches full power in half the normal charge time while active without changing fire cadence", () => {
+    const victim = makeFighter("s1", 0, -6, BODY_CENTER_Y, false);
+    const ordinary = makeFighter("bot-normal", 0, 0, BODY_CENTER_Y, true);
+    const boosted = makeFighter("bot-boosted", 0, 0, BODY_CENTER_Y, true);
+    boosted.chargeUntil = 10_000;
+    const ordinaryBrain = createBrain(-10_000, 1);
+    const boostedBrain = createBrain(-10_000, 1);
+    const normalShot = planBotFire(ordinary, [ordinary, victim], ordinaryBrain, 0);
+    const boostedShot = planBotFire(boosted, [boosted, victim], boostedBrain, 0);
+    expect(normalShot).not.toBe(null);
+    expect(boostedShot).not.toBe(null);
+    if (normalShot === null || boostedShot === null) return;
+    expect(boostedShot.chargeS).toBe(normalShot.chargeS);
+    expect(boostedShot.power01).toBeCloseTo(0.5 + 0.5 * Math.min(1, boostedShot.chargeS / (CHARGE_MAX_S / 2)));
+    expect(boostedShot.power01).toBeGreaterThan(normalShot.power01);
+    expect(boostedBrain.nextFireAt).toBe(ordinaryBrain.nextFireAt);
+
+    const expired = makeFighter("bot-expired", 0, 0, BODY_CENTER_Y, true);
+    expired.chargeUntil = 10_000;
+    const expiredPlan = planBotFire(expired, [expired, victim], createBrain(-10_000, 1), 10_000);
+    expect(expiredPlan?.power01).toBeCloseTo(normalShot.power01);
   });
 });

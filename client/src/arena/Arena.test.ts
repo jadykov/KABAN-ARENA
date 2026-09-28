@@ -223,6 +223,8 @@ describe("swamp, ice, and trampolines", () => {
     const edges = scene.getObjectByName("obstacle-top-edges") as THREE.InstancedMesh;
     const marks = scene.getObjectByName("ramp-surface-marks") as THREE.InstancedMesh;
     const slabs = scene.getObjectByName("ramp-slabs") as THREE.InstancedMesh;
+    const blocks = scene.getObjectByName("arena-obstacles") as THREE.InstancedMesh;
+    const platforms = scene.getObjectByName("platform-volumes") as THREE.InstancedMesh;
     const plinths = scene.getObjectByName("wall-plinths") as THREE.InstancedMesh;
     const textures = [
       floor.material.map!,
@@ -244,6 +246,14 @@ describe("swamp, ice, and trampolines", () => {
       expect(edges.count).toBe(getObstacleLayout().length * 4);
       expect(marks.count).toBe(getRamps().length * 4);
       expect(slabs.count).toBe(getRamps().length);
+      // Beveled render meshes soften corners without touching the box/rotated
+      // box colliders checked below. Shared instancing keeps draw calls flat.
+      for (const mesh of [blocks, platforms, slabs, edges, marks]) {
+        const normals = mesh.geometry.getAttribute("normal");
+        expect(normals.count).toBeGreaterThan(24);
+        expect(Array.from({ length: normals.count }, (_, i) => i).some((i) =>
+          Math.abs(normals.getX(i)) > 0.1 && Math.abs(normals.getY(i)) > 0.1)).toBe(true);
+      }
       expect(plinths.count).toBe(4);
       const matrix = new THREE.Matrix4();
       const position = new THREE.Vector3();

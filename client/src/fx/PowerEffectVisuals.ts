@@ -1,9 +1,9 @@
 import * as THREE from "three";
 import { HL_SHIELD, HL_CHARTREUSE_BRIGHT } from "../palette";
 
-export type PowerEffectKind = "shield" | "speed";
+export type PowerEffectKind = "shield" | "speed" | "charge";
 
-const BADGE_SECONDS = 1;
+export const BADGE_SECONDS = 1.5;
 const BADGE_SIZE_M = 0.36;
 // The capsule crown is 1m above the rig origin. Keep the small badge just
 // clear of it so the follow camera sees it without losing it near the top.
@@ -16,23 +16,27 @@ const WIND_BOB_RATE = 5;
 
 let shieldIconTexture: THREE.Texture | null = null;
 let speedIconTexture: THREE.Texture | null = null;
+let chargeIconTexture: THREE.Texture | null = null;
 let iconUsers = 0;
 
 function acquireIcons(): void {
   iconUsers += 1;
-  if (shieldIconTexture !== null && speedIconTexture !== null) return;
+  if (shieldIconTexture !== null && speedIconTexture !== null && chargeIconTexture !== null) return;
   // Headless scene tests have no image loader. They still exercise the effect
   // meshes; browser builds load the two real SVG assets from public/icons.
   if (typeof document === "undefined" || typeof document.createElementNS !== "function") {
     shieldIconTexture = new THREE.Texture();
     speedIconTexture = new THREE.Texture();
+    chargeIconTexture = new THREE.Texture();
   } else {
     const loader = new THREE.TextureLoader();
     shieldIconTexture = loader.load("/icons/bonus-shield.svg");
     speedIconTexture = loader.load("/icons/bonus-speed.svg");
+    chargeIconTexture = loader.load("/icons/bonus-charge.svg");
   }
   shieldIconTexture.colorSpace = THREE.SRGBColorSpace;
   speedIconTexture.colorSpace = THREE.SRGBColorSpace;
+  chargeIconTexture.colorSpace = THREE.SRGBColorSpace;
 }
 
 function releaseIcons(): void {
@@ -40,8 +44,10 @@ function releaseIcons(): void {
   if (iconUsers !== 0) return;
   shieldIconTexture?.dispose();
   speedIconTexture?.dispose();
+  chargeIconTexture?.dispose();
   shieldIconTexture = null;
   speedIconTexture = null;
+  chargeIconTexture = null;
 }
 
 // Small shared visual vocabulary for local and remote fighters. All geometry
@@ -50,6 +56,7 @@ export class PowerEffectVisuals {
   private readonly parent: THREE.Object3D;
   private readonly shield: THREE.Mesh;
   private readonly wind: THREE.LineSegments;
+  private readonly runTrail: THREE.LineSegments;
   private readonly badge: THREE.Sprite;
   private badgeLeft = 0;
   private phase = 0;
@@ -92,6 +99,26 @@ export class PowerEffectVisuals {
     this.wind.visible = false;
     parent.add(this.wind);
 
+    // Short strokes sit behind local +Z (the avatar's forward direction).
+    // The parent rotates with the runner, so a turn keeps every stroke
+    // pointing from front to back. This is independent of the speed pickup.
+    const trailGeometry = new THREE.BufferGeometry();
+    trailGeometry.setAttribute("position", new THREE.Float32BufferAttribute([
+      -0.25, 0.18, -0.29, -0.31, 0.19, -0.72,
+       0.19, 0.31, -0.35,  0.23, 0.32, -0.83,
+       0.02, 0.06, -0.28,  0.00, 0.07, -0.59,
+    ], 3));
+    const trailMaterial = new THREE.LineBasicMaterial({
+      color: 0xd8eef1,
+      transparent: true,
+      opacity: 0.46,
+      depthWrite: false,
+    });
+    this.runTrail = new THREE.LineSegments(trailGeometry, trailMaterial);
+    this.runTrail.name = "run-wind-trail";
+    this.runTrail.visible = false;
+    parent.add(this.runTrail);
+
     acquireIcons();
     const badgeMaterial = new THREE.SpriteMaterial({
       map: shieldIconTexture,
@@ -113,19 +140,27 @@ export class PowerEffectVisuals {
     this.wind.visible = speedActive;
   }
 
+  public setRunning(speed01: number): void {
+    const speed = Number.isFinite(speed01) ? Math.max(0, Math.min(1, speed01)) : 0;
+    this.runTrail.visible = speed > 0.25;
+    (this.runTrail.material as THREE.LineBasicMaterial).opacity = 0.22 + 0.3 * speed;
+  }
+
   public reset(): void {
     this.setActive(false, false);
+    this.setRunning(0);
     this.badgeLeft = 0;
     this.badge.visible = false;
     this.badge.position.y = BADGE_Y_M;
   }
 
-  public showPickup(kind: PowerEffectKind): void {
+  public showPickup(kind: PowerEffectKind, durationSeconds: number = BADGE_SECONDS): void {
     const material = this.badge.material as THREE.SpriteMaterial;
-    material.map = kind === "shield" ? shieldIconTexture : speedIconTexture;
+    material.map = kind === "shield" ? shieldIconTexture
+      : kind === "speed" ? speedIconTexture : chargeIconTexture;
     material.needsUpdate = true;
-    this.badgeLeft = BADGE_SECONDS;
-    this.badge.visible = true;
+    this.badgeLeft = Math.max(0, Math.min(BADGE_SECONDS, durationSeconds));
+    this.badge.visible = this.badgeLeft > 0;
   }
 
   public update(deltaSeconds: number): void {
@@ -140,8 +175,12 @@ export class PowerEffectVisuals {
       this.wind.position.y = Math.sin(this.phase * WIND_BOB_RATE) * WIND_BOB_AMPLITUDE_M;
       this.wind.rotation.y += deltaSeconds * 0.8;
     }
+    if (this.runTrail.visible) {
+      this.runTrail.position.z = -0.06 * (0.5 + 0.5 * Math.sin(this.phase * 10));
+    }
     if (this.badgeLeft > 0) {
       this.badgeLeft = Math.max(0, this.badgeLeft - deltaSeconds);
+      if (this.badgeLeft < 0.000001) this.badgeLeft = 0;
       this.badge.visible = this.badgeLeft > 0;
     }
   }
@@ -149,11 +188,13 @@ export class PowerEffectVisuals {
   public dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.parent.remove(this.shield, this.wind, this.badge);
+    this.parent.remove(this.shield, this.wind, this.runTrail, this.badge);
     this.shield.geometry.dispose();
     (this.shield.material as THREE.Material).dispose();
     this.wind.geometry.dispose();
     (this.wind.material as THREE.Material).dispose();
+    this.runTrail.geometry.dispose();
+    (this.runTrail.material as THREE.Material).dispose();
     (this.badge.material as THREE.Material).dispose();
     releaseIcons();
   }

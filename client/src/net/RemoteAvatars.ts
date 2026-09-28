@@ -22,7 +22,7 @@ import {
   type HopState,
 } from "../fx/AvatarVisuals";
 import { HitFlash } from "../fx/CameraShake";
-import { PowerEffectVisuals, type PowerEffectKind } from "../fx/PowerEffectVisuals";
+import { BADGE_SECONDS, PowerEffectVisuals, type PowerEffectKind } from "../fx/PowerEffectVisuals";
 import { RemoteTrack, type RemoteTarget } from "./interpolation";
 import { paletteForSession, type NetPlayerSnapshot } from "./protocol";
 import { ACCENT_HIT_FLASH, NEUTRAL_WHITE, NEUTRAL_WHITE_CSS } from "../palette";
@@ -177,6 +177,7 @@ export class RemoteAvatars {
         // estimated from the eased Y trail, damped against jitter.
         const moved = Math.hypot(entry.group.position.x - prevX, entry.group.position.z - prevZ);
         const speed01 = deltaSeconds > 0 ? Math.min(1, moved / (deltaSeconds * MOVE_SPEED)) : 0;
+        entry.effects.setRunning(speed01);
         const rawVy = deltaSeconds > 0 ? (entry.group.position.y - entry.prevY) / deltaSeconds : 0;
         entry.prevY = entry.group.position.y;
         const smooth = 1 - Math.exp(-REMOTE_VY_SMOOTH_RATE * Math.max(0, deltaSeconds));
@@ -193,6 +194,7 @@ export class RemoteAvatars {
         }
         // Dead and hidden: clear any residual bounce/glide for the respawn.
         resetHopState(entry.hop);
+        entry.effects.setRunning(0);
         resetHopVisual(entry.rig, 0);
         entry.gate.reset();
         entry.vySmooth = 0;
@@ -260,7 +262,8 @@ export class RemoteAvatars {
     };
     const pending = this.pendingPickups.get(snapshot.sessionId);
     if (pending !== undefined) {
-      if (Date.now() - pending.at < 1000) effects.showPickup(pending.kind);
+      const remaining = BADGE_SECONDS - (Date.now() - pending.at) / 1000;
+      if (remaining > 0) effects.showPickup(pending.kind, remaining);
       this.pendingPickups.delete(snapshot.sessionId);
     }
     return entry;

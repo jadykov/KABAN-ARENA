@@ -201,6 +201,88 @@ input:focus-visible {
   text-shadow: 0 1px 1px rgba(2, 11, 21, 0.9);
 }
 
+#hud-shield-heart {
+  position: relative;
+  display: inline-flex;
+  width: 25px;
+  height: 25px;
+  margin-left: 5px;
+  align-items: center;
+  justify-content: center;
+  border-left: 1px solid rgba(185, 237, 225, 0.35);
+  color: #e5fffb;
+  font-family: Arial, sans-serif;
+  font-size: 15px;
+  text-shadow: 0 0 6px rgba(159, 248, 225, 0.7);
+}
+
+#hud-shield-heart img {
+  position: absolute;
+  inset: 1px 0 0 2px;
+  width: 24px;
+  height: 24px;
+  opacity: 0.92;
+}
+
+#hud-shield-heart span {
+  position: relative;
+  z-index: 1;
+  margin: 2px 0 0 2px;
+}
+
+#hud-shield-capacity {
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  bottom: -3px;
+  height: 3px;
+  border-radius: 2px;
+  background: #b7f9e7;
+  box-shadow: 0 0 6px rgba(159, 248, 225, 0.75);
+}
+
+#hud-buffs {
+  position: fixed;
+  top: calc(82px + env(safe-area-inset-top, 0px));
+  left: calc(8px + env(safe-area-inset-left, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 144px;
+}
+
+.hud-buff {
+  display: flex;
+  min-height: 29px;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 5px;
+  border: 1px solid rgba(167, 223, 213, 0.5);
+  border-radius: 9px;
+  background: rgba(20, 49, 60, 0.88);
+  box-shadow: 0 3px 10px rgba(2, 11, 21, 0.25);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.hud-buff img {
+  width: 21px;
+  height: 21px;
+  flex: none;
+}
+
+.hud-buff-title {
+  flex: 1;
+  color: #e9f6ee;
+}
+
+.hud-buff-timer {
+  color: #f9e5ac;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 #hud-super {
   position: fixed;
   top: calc(49px + env(safe-area-inset-top, 0px));
@@ -726,6 +808,20 @@ input:focus-visible {
   #hud-hearts .heart {
     min-width: 17px;
     font-size: 19px;
+  }
+
+  #hud-buffs {
+    top: calc(76px + env(safe-area-inset-top, 0px));
+    width: 132px;
+  }
+
+  .hud-buff {
+    font-size: 8px;
+  }
+
+  #hud-shield-heart {
+    width: 22px;
+    margin-left: 2px;
   }
 
   #fire-button {

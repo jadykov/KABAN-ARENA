@@ -3,6 +3,7 @@ import type { Client } from "colyseus";
 import {
   ARENA_LAYOUT,
   BOT_SPEED,
+  CHARGE_DURATION_MS,
   LOBBY_COUNTDOWN_MS,
   PLAYER_SPEED,
   POWERUP_RESPAWN_MS,
@@ -60,7 +61,7 @@ function setMove(room: ArenaRoom, x: number, z: number, charging = false): void 
 }
 
 describe("neutral server pickups", () => {
-  it("replicates three neutral positions, chooses either effect, and respawns each point after 30 seconds", async () => {
+  it("replicates three neutral positions, chooses all three equal-range effects, and respawns each point after 30 seconds", async () => {
     expect(POWERUP_RESPAWN_MS).toBe(30_000);
     const { room, player } = await playingRoom();
     expect(room.state.pickups.size).toBe(3);
@@ -68,16 +69,21 @@ describe("neutral server pickups", () => {
     (room as unknown as { broadcast(type: string, body?: unknown): void }).broadcast = (type, body): void => {
       if (type === "pickup-granted") events.push(body as (typeof events)[number]);
     };
+    const rolls = [1 / 3 - 0.000001, 1 / 3, 2 / 3];
+    const kinds = ["shield", "speed", "charge"];
     for (const [index, slot] of ARENA_LAYOUT.pickups.entries()) {
       const marker = room.state.pickups.get(String(index));
       expect(marker).toMatchObject({ x: slot.x, z: slot.z, active: true });
-      room.pickupRandom = () => index % 2 === 0 ? 0.1 : 0.9;
+      room.pickupRandom = () => rolls[index]!;
       player.x = slot.x;
       player.z = slot.z;
       tick(room);
-      const expected = index % 2 === 0 ? "shield" : "speed";
+      const expected = kinds[index];
       expect(events[index]).toEqual({ playerId: "s1", slotId: index, kind: expected, seq: index + 1 });
       expect(player.pickupKind).toBe(expected);
+      if (expected === "charge") {
+        expect(player.chargeUntil).toBe((room.testNow ?? 0) + CHARGE_DURATION_MS);
+      }
       expect(marker?.active).toBe(false);
       expect(marker?.nextAt).toBe((room.testNow ?? 0) + POWERUP_RESPAWN_MS);
     }
@@ -94,9 +100,74 @@ describe("neutral server pickups", () => {
     expect(room.state.pickups.get("2")?.active).toBe(false);
     player.x = ARENA_LAYOUT.pickups[0]!.x;
     player.z = ARENA_LAYOUT.pickups[0]!.z;
-    room.pickupRandom = () => 0.9;
+    room.pickupRandom = () => 2 / 3 - 0.000001;
     tick(room);
     expect(events[3]).toMatchObject({ slotId: 0, kind: "speed", seq: 4 });
+  });
+
+  it("keeps fast charge through a canceled or denied shot and spends it on the next accepted fire", async () => {
+    const { room, player } = await playingRoom();
+    expect(CHARGE_DURATION_MS).toBe(10_000);
+    player.x = ARENA_LAYOUT.pickups[0]!.x;
+    player.z = ARENA_LAYOUT.pickups[0]!.z;
+    room.pickupRandom = () => 0.9;
+    tick(room);
+    const deadline = player.chargeUntil;
+    expect(deadline).toBe((room.testNow ?? 0) + CHARGE_DURATION_MS);
+    player.x = 0;
+    player.z = 8;
+    // Canceling the client-side charge sends no fire message.
+    tick(room, 500);
+    expect(player.chargeUntil).toBe(deadline);
+    const fire = (): void => room.handleFire(player.sessionId, { power01: 1, yaw: 0, pitch: 0.2 });
+    player.reloadUntil = (room.testNow ?? 0) + 500;
+    fire();
+    expect(player.chargeUntil).toBe(deadline);
+    expect(room.state.balls.size).toBe(0);
+    player.reloadUntil = 0;
+    fire();
+    expect(room.state.balls.size).toBe(1);
+    expect(player.chargeUntil).toBe(0);
+    expect(player.reloadUntil).toBeGreaterThan(room.testNow ?? 0);
+  });
+
+  it("expires fast charge at its deadline, including a shot before the next simulation tick", async () => {
+    const { room, player } = await playingRoom();
+    player.x = ARENA_LAYOUT.pickups[0]!.x;
+    player.z = ARENA_LAYOUT.pickups[0]!.z;
+    room.pickupRandom = () => 0.9;
+    tick(room);
+    const deadline = player.chargeUntil;
+    player.x = 0;
+    player.z = 8;
+    tick(room, CHARGE_DURATION_MS - 1);
+    expect(player.chargeUntil).toBe(deadline);
+    // The fire handler checks server time even if a scheduled tick has not run.
+    room.testNow = deadline;
+    room.handleFire(player.sessionId, { power01: 1, yaw: 0, pitch: 0.2 });
+    expect(player.chargeUntil).toBe(0);
+    expect(room.state.balls.size).toBe(1);
+
+    player.chargeUntil = (room.testNow ?? 0) + CHARGE_DURATION_MS;
+    tick(room, CHARGE_DURATION_MS - 1);
+    expect(player.chargeUntil).toBeGreaterThan(room.testNow ?? 0);
+    tick(room, 1);
+    expect(player.chargeUntil).toBe(0);
+  });
+
+  it("spends a bot's fast charge on its next spawned ball", async () => {
+    const { room } = await playingRoom();
+    const bot = new PlayerState();
+    bot.sessionId = "charge-bot";
+    bot.isBot = true;
+    bot.ready = true;
+    bot.spectator = false;
+    bot.alive = true;
+    bot.x = 0;
+    bot.z = 8;
+    bot.chargeUntil = (room.testNow ?? 0) + CHARGE_DURATION_MS;
+    expect(room.spawnBall(bot, 1, 0, 0.2, false, room.testNow ?? 0)).not.toBe(null);
+    expect(bot.chargeUntil).toBe(0);
   });
 
   it("shield absorbs one heart, passes excess damage to HP, and expires after ten seconds", async () => {
@@ -140,6 +211,7 @@ describe("neutral server pickups", () => {
     other.shieldHp = SHIELD_CAPACITY;
     other.shieldUntil = (room.testNow ?? 0) + SHIELD_DURATION_MS;
     other.speedUntil = (room.testNow ?? 0) + SPEED_DURATION_MS;
+    other.chargeUntil = (room.testNow ?? 0) + CHARGE_DURATION_MS;
     const ball = new BallState();
     ball.ownerId = player.sessionId;
     ball.power01 = 1;
@@ -161,11 +233,23 @@ describe("neutral server pickups", () => {
     hit(ball, other, "ball-3", room.testNow ?? 0);
     expect(other.alive).toBe(false);
     expect(other.speedUntil).toBe(0);
+    expect(other.chargeUntil).toBe(0);
     expect(other.shieldHp).toBe(0);
     tick(room, 150);
     expect(other.alive).toBe(true);
     expect(other.hp).toBe(100);
     expect(other.speedUntil).toBe(0);
+    expect(other.chargeUntil).toBe(0);
+  });
+
+  it("clears fast charge on rematch reset and fresh round start", async () => {
+    const { room, player } = await playingRoom();
+    player.chargeUntil = (room.testNow ?? 0) + CHARGE_DURATION_MS;
+    (room as unknown as { resetForRematch(): void }).resetForRematch();
+    expect(player.chargeUntil).toBe(0);
+    player.chargeUntil = (room.testNow ?? 0) + CHARGE_DURATION_MS;
+    (room as unknown as { startPlaying(now: number): void }).startPlaying(room.testNow ?? 0);
+    expect(player.chargeUntil).toBe(0);
   });
 
   it("speed increases both human and bot movement by 25 percent and ends at five seconds", async () => {

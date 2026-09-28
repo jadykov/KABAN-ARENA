@@ -38,6 +38,7 @@ function makeSnapshot(overrides: Partial<NetPlayerSnapshot> & { sessionId: strin
     shieldHp: 0,
     shieldUntil: 0,
     speedUntil: 0,
+    chargeUntil: 0,
     pickupKind: "",
     pickupAt: 0,
     pickupSeq: 0,
@@ -251,7 +252,7 @@ describe("RemoteAvatars remote death burst (alive→false edge)", () => {
 });
 
 describe("RemoteAvatars replicated bonuses", () => {
-  it("shows timed shield and wind on a remote avatar and a one-second pickup badge", () => {
+  it("shows timed shield and wind on a remote avatar and a 1.5-second pickup badge", () => {
     const scene = new THREE.Scene();
     const avatars = new RemoteAvatars(scene);
     try {
@@ -266,10 +267,26 @@ describe("RemoteAvatars replicated bonuses", () => {
       expect(wind?.visible).toBe(true);
       avatars.showBonusPickup("r1", "shield");
       expect(badge?.visible).toBe(true);
-      avatars.sync([makeSnapshot({ sessionId: "r1", shieldHp: 0, shieldUntil: 0, speedUntil: 0 })], null, 1.01, 12_000);
+      avatars.sync([makeSnapshot({ sessionId: "r1", shieldHp: 0, shieldUntil: 0, speedUntil: 0 })], null, 1.51, 12_000);
       expect(shield?.visible).toBe(false);
       expect(wind?.visible).toBe(false);
       expect(badge?.visible).toBe(false);
+    } finally {
+      avatars.dispose();
+    }
+  });
+
+  it("shows the run trail for a moving remote and hides it when the avatar dies", () => {
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    try {
+      avatars.sync([makeSnapshot({ sessionId: "r1" })], null, FRAME);
+      const trail = rigOf(scene).getObjectByName("run-wind-trail");
+      expect(trail?.visible).toBe(false);
+      avatars.sync([makeSnapshot({ sessionId: "r1", z: 2 })], null, FRAME);
+      expect(trail?.visible).toBe(true);
+      avatars.sync([makeSnapshot({ sessionId: "r1", z: 2, alive: false })], null, FRAME);
+      expect(trail?.visible).toBe(false);
     } finally {
       avatars.dispose();
     }

@@ -6,16 +6,16 @@
 // Fog tracks the sky so the arena fades into each phase without a hard seam.
 export const BASE_BG = 0x0b1829;
 export const BASE_BG_CSS = "#0b1829";
-export const SKY_DAWN_BG = 0x718f9d;
-export const SKY_DAWN_FOG = 0x849ba2;
-export const SKY_DAY_BG = 0x91b8c5;
-export const SKY_DAY_FOG = 0x9ebcbf;
-export const SKY_SUNSET_BG = 0x675f71;
-export const SKY_SUNSET_FOG = 0x807985;
+export const SKY_DAWN_BG = 0xa1bfd9;
+export const SKY_DAWN_FOG = 0xc3ccd0;
+export const SKY_DAY_BG = 0x80c3ed;
+export const SKY_DAY_FOG = 0xa9d2e9;
+export const SKY_SUNSET_BG = 0x936b70;
+export const SKY_SUNSET_FOG = 0xaa857c;
 export const SKY_SUN_DISC = 0xffe6ad;
 export const SKY_SUNSET_DISC = 0xffaa7a;
-export const SKY_CLOUD_DAY = 0xf1f2e6;
-export const SKY_CLOUD_SUNSET = 0xe8bba7;
+export const SKY_CLOUD_DAY = 0xf4f8f7;
+export const SKY_CLOUD_SUNSET = 0xf3c8a6;
 // Cool slate walking surface. The grout and faint floor stars add scale
 // without competing with players, pickups, or aim feedback.
 export const BASE_FLOOR = 0x536b7b;
@@ -51,13 +51,13 @@ export const BASE_AD_CANVAS = "#102b35";
 // fill keeps the unlit side readable instead of falling to black.
 export const SCENE_WARM_LIGHT = 0xffe0ab;
 export const SCENE_WARM_LIGHT_CSS = "#ffe0ab";
-export const SCENE_COOL_FILL = 0xa6c6d7;
-export const SCENE_DAWN_KEY = 0xffdfb1;
-export const SCENE_DAWN_FILL = 0xb8d1d5;
-export const SCENE_DAY_KEY = 0xfff3d1;
-export const SCENE_DAY_FILL = 0xd0e2df;
-export const SCENE_SUNSET_KEY = 0xffbd8b;
-export const SCENE_SUNSET_FILL = 0xc6abb6;
+export const SCENE_COOL_FILL = 0x8299b4;
+export const SCENE_DAWN_KEY = 0xffd997;
+export const SCENE_DAWN_FILL = 0xe5c9b5;
+export const SCENE_DAY_KEY = 0xfff8e4;
+export const SCENE_DAY_FILL = 0xb4d1df;
+export const SCENE_SUNSET_KEY = 0xffaa70;
+export const SCENE_SUNSET_FILL = 0x977f91;
 export const ACCENT_STRIP = 0xd9a161;
 export const ACCENT_STRIP_BASE = 0x514638;
 export const ACCENT_ICE_GLOW = 0x9bdbea;

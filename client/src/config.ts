@@ -181,6 +181,9 @@ export const SPAWN_COUNT = ARENA_LAYOUT.spawns.length;
 export const SPEED_MULTIPLIER = 1.25;
 export const SPEED_DURATION_S = 5;
 export const SHIELD_DURATION_S = 10;
+export const CHARGE_DURATION_S = 10;
+// Full power takes half the normal second while the next-shot bonus is active.
+export const CHARGE_BOOST_MULTIPLIER = 2;
 export const SHIELD_CAPACITY = 25;
 // Legacy client pickup state still imports this until the synchronized
 // server-selected shield replaces the one-hit local implementation.

@@ -64,7 +64,7 @@ function toBoolean(value: unknown): boolean {
 }
 
 function toPowerUpKind(value: unknown): NetPowerUpKind {
-  return value === "shield" || value === "speed" ? value : "";
+  return value === "shield" || value === "speed" || value === "charge" ? value : "";
 }
 
 // R1 compat: snapshots predating ready/spectator (or partial patches)
@@ -91,6 +91,7 @@ interface WirePlayer {
   shieldHp?: unknown;
   shieldUntil?: unknown;
   speedUntil?: unknown;
+  chargeUntil?: unknown;
   pickupKind?: unknown;
   pickupAt?: unknown;
   pickupSeq?: unknown;
@@ -175,6 +176,7 @@ export function decodeSnapshot(state: unknown, selfId: string | null = null): Ro
         shieldHp: Math.max(0, toNumber(player.shieldHp, 0)),
         shieldUntil: Math.max(0, toNumber(player.shieldUntil, 0)),
         speedUntil: Math.max(0, toNumber(player.speedUntil, 0)),
+        chargeUntil: Math.max(0, toNumber(player.chargeUntil, 0)),
         pickupKind: toPowerUpKind(player.pickupKind),
         pickupAt: Math.max(0, toNumber(player.pickupAt, 0)),
         pickupSeq: Math.max(0, Math.floor(toNumber(player.pickupSeq, 0))),

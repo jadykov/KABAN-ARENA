@@ -22,6 +22,7 @@ import {
   BOT_SPEED,
   CENTER_ITEM_NAMES,
   type CenterItemKind,
+  CHARGE_DURATION_MS,
   CHARGE_MOVE_MULT,
   FIRE_PITCH_MAX,
   FIRE_PITCH_MIN,
@@ -885,6 +886,9 @@ export class ArenaRoom extends Room<ArenaState> {
       return;
     }
     const now = this.currentTime();
+    if (shooter.chargeUntil > 0 && now >= shooter.chargeUntil) {
+      shooter.chargeUntil = 0;
+    }
     if (now < shooter.reloadUntil) {
       return;
     }
@@ -996,6 +1000,9 @@ export class ArenaRoom extends Room<ArenaState> {
       }
     }
     shooter.reloadUntil = now + RELOAD_MS;
+    // This is the first accepted shot after pickup. Canceling a charge never
+    // calls spawnBall, while denied shots return before reaching this path.
+    shooter.chargeUntil = 0;
     return ball;
   }
 
@@ -1478,6 +1485,7 @@ export class ArenaRoom extends Room<ArenaState> {
     player.shieldHp = 0;
     player.shieldUntil = 0;
     player.speedUntil = 0;
+    player.chargeUntil = 0;
     player.pickupKind = "";
     player.pickupAt = 0;
   }
@@ -1490,6 +1498,9 @@ export class ArenaRoom extends Room<ArenaState> {
       }
       if (player.speedUntil > 0 && now >= player.speedUntil) {
         player.speedUntil = 0;
+      }
+      if (player.chargeUntil > 0 && now >= player.chargeUntil) {
+        player.chargeUntil = 0;
       }
     });
   }
@@ -1516,12 +1527,15 @@ export class ArenaRoom extends Room<ArenaState> {
         const dx = player.x - pickup.x;
         const dz = player.z - pickup.z;
         if (dx * dx + dz * dz > POWERUP_PICKUP_RADIUS * POWERUP_PICKUP_RADIUS) return;
-        const kind = this.pickupRandom() < 0.5 ? "shield" : "speed";
+        const roll = this.pickupRandom();
+        const kind = roll < 1 / 3 ? "shield" : roll < 2 / 3 ? "speed" : "charge";
         if (kind === "shield") {
           player.shieldHp = SHIELD_CAPACITY;
           player.shieldUntil = now + SHIELD_DURATION_MS;
-        } else {
+        } else if (kind === "speed") {
           player.speedUntil = now + SPEED_DURATION_MS;
+        } else {
+          player.chargeUntil = now + CHARGE_DURATION_MS;
         }
         player.pickupKind = kind;
         player.pickupAt = now;

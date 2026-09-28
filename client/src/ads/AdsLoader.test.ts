@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ADS_PUBLIC_BASE_PATH,
@@ -105,6 +106,9 @@ describe("AdsManager shop visuals and lifecycle", () => {
       expect(batches.find((batch) => batch.name === "shop-static:trim")!.count).toBeGreaterThan(50);
       expect(batches.find((batch) => batch.name === "shop-static:lamp")!.count).toBeGreaterThanOrEqual(7);
       expect(batches.find((batch) => batch.name === "shop-static:glow")!.visible).toBe(false);
+      for (const kind of ["trim", "canopy", "accent", "lamp"]) {
+        expect(batches.find((batch) => batch.name === `shop-static:${kind}`)?.geometry).toBeInstanceOf(RoundedBoxGeometry);
+      }
       let renderableCount = 0;
       scene.traverse((child) => { if (child instanceof THREE.Mesh) renderableCount += 1; });
       expect(renderableCount).toBe(15); // seven batches + eight sign parts
@@ -166,9 +170,11 @@ describe("AdsManager shop visuals and lifecycle", () => {
       });
       expect(new Set(facadeColors).size).toBe(4);
 
-      const getLocalParts = (kind: string, shopIndex: number): Array<{ position: THREE.Vector3; scale: THREE.Vector3; rotation: THREE.Quaternion }> => {
+      const getLocalParts = (kind: string, shopIndex: number, face: "front" | "rear" = "front"): Array<{ position: THREE.Vector3; scale: THREE.Vector3; rotation: THREE.Quaternion }> => {
         const batch = scene.getObjectByName(`shop-static:${kind}`) as THREE.InstancedMesh;
         const shop = shops[shopIndex]!;
+        const platform = PLATFORM_FIGURES[shopIndex]!;
+        const rearZ = -2 * (platform.rampSide.endsWith("z") ? platform.hx : platform.hz) + 0.005;
         shop.updateMatrixWorld(true);
         const inverse = shop.matrixWorld.clone().invert();
         const parts = [];
@@ -180,7 +186,7 @@ describe("AdsManager shop visuals and lifecycle", () => {
           const rotation = new THREE.Quaternion();
           const scale = new THREE.Vector3();
           local.decompose(position, rotation, scale);
-          if (Math.abs(position.x) < 1.5 && Math.abs(position.z) < 0.65) {
+          if (Math.abs(position.x) < 1.5 && Math.abs(position.z - (face === "rear" ? rearZ : 0)) < 0.65) {
             parts.push({ position, scale, rotation });
           }
         }
@@ -190,9 +196,44 @@ describe("AdsManager shop visuals and lifecycle", () => {
         .map(({ position, scale }) => [position.y.toFixed(2), position.z.toFixed(2), scale.x.toFixed(2)].join(":"))
         .join("|"));
       expect(new Set(canopyShapes).size).toBe(4);
-      expect(getLocalParts("trim", 1).some(({ rotation }) => Math.abs(rotation.z) > 0.04)).toBe(true);
-      expect(getLocalParts("trim", 0).some(({ rotation }) => Math.abs(rotation.z) > 0.04)).toBe(false);
+      [1.07, 1.04, 1.07, 1.07].forEach((beamX, index) => {
+        const transform = getShopfrontTransforms()[index]!;
+        const beams = getLocalParts("trim", index).filter(({ position, scale }) =>
+          scale.y > 2.4 * transform.topY / 3
+          && Math.abs(Math.abs(position.x) - beamX * transform.facadeWidth / 2.4) < 0.005);
+        expect(beams).toHaveLength(2);
+        expect(beams[0]!.position.x).toBeCloseTo(-beams[1]!.position.x, 6);
+        expect(beams[0]!.position.y).toBeCloseTo(beams[1]!.position.y, 6);
+        expect(beams[0]!.position.z).toBeCloseTo(beams[1]!.position.z, 6);
+        expect(beams[0]!.scale.distanceTo(beams[1]!.scale)).toBeLessThan(1e-6);
+        expect(beams.every(({ rotation }) => Math.abs(rotation.z) < 1e-6)).toBe(true);
+      });
       expect(getLocalParts("accent", 0).length).toBeGreaterThan(getLocalParts("accent", 1).length);
+      // Rear fixtures sit against the wall opposite the storefront, including
+      // an exit door, condenser, high window and a separate vented hatch.
+      shops.forEach((_, index) => {
+        const transform = getShopfrontTransforms()[index]!;
+        const platform = PLATFORM_FIGURES[index]!;
+        const rearWallZ = -2 * (platform.rampSide.endsWith("z") ? platform.hx : platform.hz) + 0.015;
+        expect(getLocalParts("trim", index, "rear").length).toBeGreaterThan(3);
+        expect(getLocalParts("accent", index, "rear").length).toBeGreaterThan(0);
+        for (const kind of ["trim", "canopy", "accent"]) {
+          for (const { position, scale } of getLocalParts(kind, index, "rear")) {
+            expect(Math.abs(position.x) + scale.x / 2).toBeLessThan(transform.facadeWidth / 2);
+            expect(position.y + scale.y / 2).toBeLessThan(transform.topY);
+            expect(position.z + scale.z / 2).toBeLessThan(rearWallZ);
+          }
+        }
+      });
+      const condenser = getLocalParts("canopy", 1, "rear").find(({ scale }) => scale.z > 0.15);
+      expect(condenser).toBeDefined();
+      const condenserSlats = getLocalParts("accent", 1, "rear").filter(({ position, scale }) =>
+        position.x < 0 && scale.x > 0.35 && scale.x < 0.5 && scale.y < 0.05);
+      expect(condenserSlats).toHaveLength(3);
+      expect(condenserSlats.every(({ position, scale }) =>
+        position.z - scale.z / 2 < condenser!.position.z - condenser!.scale.z / 2)).toBe(true);
+      expect(getLocalParts("trim", 2, "rear").some(({ position, scale }) =>
+        position.x < 0 && scale.y > 0.5 && scale.y < 0.7)).toBe(true);
       expect(batches.every((batch) => batch.boundingSphere !== null)).toBe(true);
     } finally {
       ads.dispose(scene);

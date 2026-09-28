@@ -35,6 +35,20 @@ describe("PowerUpState mirrors server effects", () => {
     expect(state.getShieldHp()).toBe(0);
   });
 
+  it("tracks the ten-second next-shot charge deadline and server consumption", () => {
+    const state = new PowerUpState();
+    state.sync({ shieldHp: 0, shieldUntil: 0, speedUntil: 0, chargeUntil: 11000 }, 1000);
+    expect(state.hasChargeBoost()).toBe(true);
+    expect(state.getChargeRemaining()).toBe(10);
+    state.update(2);
+    expect(state.getChargeRemaining()).toBe(8);
+    state.sync({ shieldHp: 0, shieldUntil: 0, speedUntil: 0, chargeUntil: 0 }, 3100);
+    expect(state.hasChargeBoost()).toBe(false);
+    state.sync({ shieldHp: 0, shieldUntil: 0, speedUntil: 0, chargeUntil: 11000 }, 1000);
+    state.update(10);
+    expect(state.getChargeRemaining()).toBe(0);
+  });
+
   it("replaces local state with each snapshot and ignores invalid values", () => {
     const state = new PowerUpState();
     state.sync({ shieldHp: 25, shieldUntil: 11000, speedUntil: 6000 }, 1000);

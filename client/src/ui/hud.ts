@@ -42,7 +42,16 @@ export function localizePowerUp(kind: string): string {
   if (kind === "speed") {
     return "Подобрано ускорение";
   }
+  if (kind === "charge") {
+    return "Подобран быстрый заряд";
+  }
   return "Подобран бонус";
+}
+
+export interface HudBuffs {
+  shield?: { seconds: number; hp: number };
+  speed?: { seconds: number };
+  charge?: { seconds: number };
 }
 
 export interface HudHandle {
@@ -58,6 +67,7 @@ export interface HudHandle {
   // passing halvesForHp() directly.
   setHearts(halves: number): void;
   setHeartsFromHearts(hearts: number): void;
+  setBuffs(buffs: HudBuffs): void;
   getHearts(): number;
   getHalves(): number;
   setSuperBadge(visible: boolean): void;
@@ -126,6 +136,48 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
   hearts.id = "hud-hearts";
   hearts.setAttribute("role", "img");
 
+  // Shield absorbs damage separately from health. Keep four normal hearts
+  // and show one outlined shield heart while any shield capacity remains.
+  const shieldHeart = document.createElement("span");
+  shieldHeart.id = "hud-shield-heart";
+  shieldHeart.style.display = "none";
+  const shieldSymbol = document.createElement("img");
+  shieldSymbol.src = "/icons/bonus-shield.svg";
+  shieldSymbol.alt = "";
+  const shieldHeartGlyph = document.createElement("span");
+  shieldHeartGlyph.textContent = "♥";
+  const shieldCapacity = document.createElement("i");
+  shieldCapacity.id = "hud-shield-capacity";
+  shieldHeart.appendChild(shieldSymbol);
+  shieldHeart.appendChild(shieldHeartGlyph);
+  shieldHeart.appendChild(shieldCapacity);
+
+  const buffsPanel = document.createElement("div");
+  buffsPanel.id = "hud-buffs";
+  buffsPanel.setAttribute("aria-label", "Активные бонусы");
+  const buffRows = {} as Record<keyof HudBuffs, { row: HTMLDivElement; timer: HTMLSpanElement }>;
+  for (const [kind, label] of [
+    ["shield", "Щит"], ["speed", "Ускорение"], ["charge", "Быстрый заряд"],
+  ] as const) {
+    const row = document.createElement("div");
+    row.className = `hud-buff hud-buff--${kind}`;
+    row.style.display = "none";
+    row.setAttribute("data-kind", kind);
+    const icon = document.createElement("img");
+    icon.src = `/icons/bonus-${kind}.svg`;
+    icon.alt = "";
+    const title = document.createElement("span");
+    title.className = "hud-buff-title";
+    title.textContent = label;
+    const timer = document.createElement("span");
+    timer.className = "hud-buff-timer";
+    row.appendChild(icon);
+    row.appendChild(title);
+    row.appendChild(timer);
+    buffsPanel.appendChild(row);
+    buffRows[kind] = { row, timer };
+  }
+
   const superBadge = document.createElement("div");
   superBadge.id = "hud-super";
   superBadge.textContent = "СУПЕР ×2";
@@ -138,15 +190,23 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
 
   root.appendChild(info);
   root.appendChild(hearts);
+  root.appendChild(buffsPanel);
   root.appendChild(scoreBlock);
   root.appendChild(superBadge);
   root.appendChild(killfeed);
   parent.appendChild(root);
 
   let currentHalves = maxHearts * 2;
+  let currentShieldHp = 0;
   let disposed = false;
 
+  const updateHeartLabel = (): void => {
+    const shieldLabel = currentShieldHp > 0 ? `; щит: ${Math.ceil(currentShieldHp)} из 25 прочности` : "";
+    hearts.setAttribute("aria-label", `Здоровье: ${currentHalves} из ${maxHearts * 2} половинок сердца${shieldLabel}`);
+  };
+
   const renderHearts = (): void => {
+    while (hearts.lastElementChild !== null) hearts.removeChild(hearts.lastElementChild);
     hearts.textContent = "";
     const perHeart = halvesPerHeart(currentHalves);
     for (let i = 0; i < maxHearts; i += 1) {
@@ -164,7 +224,8 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
       }
       hearts.appendChild(heart);
     }
-    hearts.setAttribute("aria-label", `Здоровье: ${currentHalves} из ${maxHearts * 2} половинок сердца`);
+    hearts.appendChild(shieldHeart);
+    updateHeartLabel();
   };
   renderHearts();
 
@@ -197,6 +258,30 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
       const clamped = Math.max(0, Math.min(maxHearts, safe));
       currentHalves = clamped * 2;
       renderHearts();
+    },
+    setBuffs(buffs: HudBuffs): void {
+      for (const kind of ["shield", "speed", "charge"] as const) {
+        const value = buffs[kind];
+        const active = value !== undefined && Number.isFinite(value.seconds) && value.seconds > 0;
+        const { row, timer } = buffRows[kind];
+        row.style.display = active ? "" : "none";
+        if (active && value !== undefined) {
+          const seconds = Math.max(0, value.seconds);
+          const formatted = `${(Math.ceil(seconds * 10) / 10).toFixed(1)} с`;
+          if (timer.textContent !== formatted) timer.textContent = formatted;
+          row.setAttribute("aria-label", `${kind === "shield" ? "Щит" : kind === "speed" ? "Ускорение" : "Быстрый заряд"}: ${formatted}`);
+        }
+      }
+      const hp = buffs.shield?.hp ?? 0;
+      const shieldActive = hp > 0 && buffRows.shield.row.style.display !== "none";
+      currentShieldHp = shieldActive ? hp : 0;
+      updateHeartLabel();
+      shieldHeart.style.display = shieldActive ? "" : "none";
+      if (shieldActive) {
+        const fraction = Math.max(0, Math.min(1, hp / 25));
+        shieldCapacity.style.width = `${Math.round(fraction * 100)}%`;
+        shieldHeart.setAttribute("aria-label", `Щит: ${Math.ceil(hp)} из 25 прочности`);
+      }
     },
     getHearts(): number {
       return Math.ceil(currentHalves / 2);

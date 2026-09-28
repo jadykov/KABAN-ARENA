@@ -4,8 +4,8 @@ import { ARENA_LAYOUT, PICKUP_VISUAL_Y } from "../layout";
 import { BASE_PICKUP, HL_CHARTREUSE_BRIGHT } from "../palette";
 import type { NetPickupSnapshot } from "../net/protocol";
 
-export type PowerUpKind = "shield" | "speed";
-export const POWERUP_KINDS: readonly PowerUpKind[] = ["shield", "speed"];
+export type PowerUpKind = "shield" | "speed" | "charge";
+export const POWERUP_KINDS: readonly PowerUpKind[] = ["shield", "speed", "charge"];
 
 // The authoritative server owns pickup grants, damage absorption, and effect
 // deadlines. This state only mirrors a player's latest replicated effects so
@@ -15,9 +15,10 @@ export class PowerUpState {
   private shieldHp = 0;
   private shieldUntilMs = 0;
   private speedUntilMs = 0;
+  private chargeUntilMs = 0;
 
   public sync(
-    player: { shieldHp: number; shieldUntil: number; speedUntil: number },
+    player: { shieldHp: number; shieldUntil: number; speedUntil: number; chargeUntil?: number },
     serverNow: number,
   ): void {
     this.serverNowMs = Number.isFinite(serverNow) ? Math.max(0, serverNow) : 0;
@@ -26,6 +27,8 @@ export class PowerUpState {
       : 0;
     this.shieldUntilMs = Number.isFinite(player.shieldUntil) ? Math.max(0, player.shieldUntil) : 0;
     this.speedUntilMs = Number.isFinite(player.speedUntil) ? Math.max(0, player.speedUntil) : 0;
+    this.chargeUntilMs = Number.isFinite(player.chargeUntil)
+      ? Math.max(0, player.chargeUntil ?? 0) : 0;
   }
 
   // Advance the synchronized clock between 20 Hz snapshots. This never
@@ -46,6 +49,14 @@ export class PowerUpState {
 
   public getSpeedRemaining(): number {
     return this.isSpeedActive() ? (this.speedUntilMs - this.serverNowMs) / 1000 : 0;
+  }
+
+  public hasChargeBoost(): boolean {
+    return this.serverNowMs > 0 && this.serverNowMs < this.chargeUntilMs;
+  }
+
+  public getChargeRemaining(): number {
+    return this.hasChargeBoost() ? (this.chargeUntilMs - this.serverNowMs) / 1000 : 0;
   }
 
   public hasShield(): boolean {
@@ -69,6 +80,7 @@ export class PowerUpState {
     this.shieldHp = 0;
     this.shieldUntilMs = 0;
     this.speedUntilMs = 0;
+    this.chargeUntilMs = 0;
   }
 }
 
@@ -90,10 +102,11 @@ export function getPickupSlots(): readonly PickupSlot[] {
   return PICKUP_SLOTS;
 }
 
-// The two granted effects can reuse these accents for particles/icons.
+// Neutral effects share the visual accent; badges carry distinct symbols.
 export const KIND_COLORS: Record<PowerUpKind, number> = {
   shield: HL_CHARTREUSE_BRIGHT,
   speed: HL_CHARTREUSE_BRIGHT,
+  charge: HL_CHARTREUSE_BRIGHT,
 };
 
 // Floating neutral pedestals. Proximity never collects one locally. Only a

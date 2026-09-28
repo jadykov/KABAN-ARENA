@@ -42,6 +42,7 @@ import { clampIntensity, createSfx, detectRicochetOnsets } from "./audio/Sfx";
 import { NetworkManager, type RoomSnapshot } from "./net/NetworkManager";
 import { RemoteAvatars } from "./net/RemoteAvatars";
 import { beginChargeLevel, mirrorChargeCameraPitch, pitchRateScale, shouldTrackAimFromCamera, stepChargeLevel, unmirrorChargeCameraPitch, yawRateScale, type ChargeLevel } from "./net/chargeAim";
+import { advanceEffectiveChargeMs } from "./net/chargeBoost";
 import { cameraYawBehindFacing, forwardnessRateScale, shouldIdleFollow, stepIdleFollowPitch, stepIdleFollowYaw, stickAngleFromForward, tolerantCameraPitchMin, type IdleFollowGate } from "./net/idleFollow";
 import {
   applyExpo,
@@ -345,6 +346,8 @@ async function boot(): Promise<void> {
 
   // R2 charge/reload state (ms wall clock via Date.now()).
   let chargeStartMs = 0;
+  let chargeLastMs = 0;
+  let chargeEffectiveMs = 0;
   let isCharging = false;
   let isReloading = false;
   let reloadUntilMs = 0;
@@ -551,6 +554,7 @@ async function boot(): Promise<void> {
       aimOverlay.setCharge01(0);
       aimOverlay.setReload01(1);
       aimOverlay.hide();
+      hud.setBuffs({});
       hud.addKillfeed("В комнате нет свободных мест");
       hud.setStatus("Комната заполнена. Попробуйте позже.");
       showJoinOverlay();
@@ -622,6 +626,7 @@ async function boot(): Promise<void> {
       aimOverlay.setCharge01(0);
       aimOverlay.setReload01(1);
       aimOverlay.hide();
+      hud.setBuffs({});
       hud.setSuperBadge(false);
       sceneManager.setSpectating(true);
       joystick.element.style.display = "none";
@@ -825,6 +830,16 @@ async function boot(): Promise<void> {
     return self.alive;
   }
 
+  function advanceCharge(nowMs: number): number {
+    const elapsed = Math.max(0, nowMs - chargeLastMs);
+    const boostRemainingMs = sceneManager.getPowerUpHudState().chargeRemaining * 1000;
+    chargeEffectiveMs = advanceEffectiveChargeMs(
+      chargeEffectiveMs, elapsed, boostRemainingMs,
+    );
+    chargeLastMs = nowMs;
+    return chargeEffectiveMs;
+  }
+
   function startCharge(): void {
     if (!isPlaying || sceneManager.isSpectating()) {
       return;
@@ -841,6 +856,8 @@ async function boot(): Promise<void> {
     }
     isCharging = true;
     chargeStartMs = nowMs;
+    chargeLastMs = nowMs;
+    chargeEffectiveMs = 0;
     // Stage 4e: a charge takes over the right half — drop any active
     // free-camera drag so a second finger cannot swing aim mid-charge (new
     // right-half downs stay ignored until the charge ends, see camDown).
@@ -887,6 +904,7 @@ async function boot(): Promise<void> {
     }
     const nowMs = Date.now();
     const chargeMs = nowMs - chargeStartMs;
+    const effectiveChargeMs = advanceCharge(nowMs);
     isCharging = false;
     chargeLevel.active = false;
     sceneManager.setCharge01(0);
@@ -943,7 +961,7 @@ async function boot(): Promise<void> {
       aimPitch = Math.max(CAMERA_PITCH_MIN, Math.min(CAMERA_PITCH_MAX, unmirrored));
       chargeMirrored = false;
     }
-    const power01 = chargeToPower01(chargeMs / 1000);
+    const power01 = chargeToPower01(effectiveChargeMs / 1000);
     const selfPos = sceneManager.getAvatarPosition();
     // Release-moment aim: the SAME raw aimYaw/aimPitch the preview has been
     // showing, so payload == preview by construction. No assist — the shot
@@ -1434,7 +1452,7 @@ async function boot(): Promise<void> {
   // ball frame.
   const projScratch = new THREE.Vector3();
   function computeAimTrajectory(): TrajSample[] {
-    const chargeS = Math.max(0, (Date.now() - chargeStartMs) / 1000);
+    const chargeS = chargeEffectiveMs / 1000;
     const speed = powerToSpeed(chargeToPower01(chargeS));
     const dir = directionFromYawPitch(aimYaw, aimPitch);
     const origin = sceneManager.getAvatarPosition();
@@ -1634,7 +1652,7 @@ async function boot(): Promise<void> {
       sceneManager.setAimAngles(aimYaw, aimPitch);
       const nowMs = Date.now();
       if (isCharging) {
-        const charge01 = Math.max(0, Math.min(1, (nowMs - chargeStartMs) / (CHARGE_MAX_S * 1000)));
+        const charge01 = advanceCharge(nowMs) / (CHARGE_MAX_S * 1000);
         sceneManager.setCharge01(charge01);
         // Stage 5 audio: tension-creak progress feed (scalar write, zero
         // allocs, no-op unless a charge is live in the engine).
@@ -1683,6 +1701,16 @@ async function boot(): Promise<void> {
       }
     }
     sceneManager.update(deltaSeconds, move, look);
+    if (playing && selfAlive && isPlaying) {
+      const buffs = sceneManager.getPowerUpHudState();
+      hud.setBuffs({
+        shield: buffs.shieldRemaining > 0 ? { seconds: buffs.shieldRemaining, hp: buffs.shieldHp } : undefined,
+        speed: buffs.speedRemaining > 0 ? { seconds: buffs.speedRemaining } : undefined,
+        charge: buffs.chargeRemaining > 0 ? { seconds: buffs.chargeRemaining } : undefined,
+      });
+    } else {
+      hud.setBuffs({});
+    }
     // F3 overlay refresh (internally throttled to ~10Hz; no-op when hidden).
     snapDebug.refresh();
     // Honest preview after the camera moved: dots track the real arc.

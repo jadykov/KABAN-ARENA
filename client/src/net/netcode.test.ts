@@ -278,7 +278,8 @@ describe("snapshot decoding (tolerant late-join states)", () => {
       ["s1", {
         sessionId: "s1", nick: "Игрок", alive: true,
         shieldHp: 12.5, shieldUntil: 11000, speedUntil: 6000,
-        pickupKind: "shield", pickupAt: 1000, pickupSeq: 3,
+        chargeUntil: 12000,
+        pickupKind: "charge", pickupAt: 1000, pickupSeq: 3,
       }],
     ]);
     const pickups = new Map([
@@ -292,8 +293,8 @@ describe("snapshot decoding (tolerant late-join states)", () => {
       pickups: { forEach: (cb: (v: unknown, k: string) => void): void => pickups.forEach((v, k) => cb(v, k)) },
     });
     expect(snapshot.players[0]).toMatchObject({
-      shieldHp: 12.5, shieldUntil: 11000, speedUntil: 6000,
-      pickupKind: "shield", pickupAt: 1000, pickupSeq: 3,
+      shieldHp: 12.5, shieldUntil: 11000, speedUntil: 6000, chargeUntil: 12000,
+      pickupKind: "charge", pickupAt: 1000, pickupSeq: 3,
     });
     expect(snapshot.pickups).toEqual([
       { id: 0, x: 3, z: 4, active: true, nextAt: 0 },
@@ -304,7 +305,7 @@ describe("snapshot decoding (tolerant late-join states)", () => {
 
   it("rejects malformed pickup keys and falls back safely for partial data", () => {
     const players = new Map([["s1", {
-      shieldHp: Number.NaN, shieldUntil: -2, speedUntil: Number.POSITIVE_INFINITY,
+      shieldHp: Number.NaN, shieldUntil: -2, speedUntil: Number.POSITIVE_INFINITY, chargeUntil: Number.NaN,
       pickupKind: "impulse", pickupAt: Number.NaN, pickupSeq: -4,
     }]]);
     const pickups = new Map<string, unknown>([
@@ -318,7 +319,7 @@ describe("snapshot decoding (tolerant late-join states)", () => {
     });
     expect(snapshot.serverNow).toBe(0);
     expect(snapshot.players[0]).toMatchObject({
-      shieldHp: 0, shieldUntil: 0, speedUntil: 0,
+      shieldHp: 0, shieldUntil: 0, speedUntil: 0, chargeUntil: 0,
       pickupKind: "", pickupAt: 0, pickupSeq: 0,
     });
     expect(snapshot.pickups).toEqual([{ id: 0, x: 0, z: 2, active: false, nextAt: 0 }]);
@@ -361,6 +362,7 @@ describe("R1 lobby counters (Players N | Watching M)", () => {
       shieldHp: 0,
       shieldUntil: 0,
       speedUntil: 0,
+      chargeUntil: 0,
       pickupKind: "",
       pickupAt: 0,
       pickupSeq: 0,

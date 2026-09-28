@@ -87,6 +87,9 @@ export const SHIELD_DURATION_MS = 10000;
 export const SHIELD_CAPACITY = 25;
 export const SPEED_DURATION_MS = 5000;
 export const SPEED_MULTIPLIER = 1.25;
+// The next shot reaches full power in half the usual charge time. The client
+// maps charge time to power; the server owns when the effect ends or is spent.
+export const CHARGE_DURATION_MS = 10000;
 
 // Damage model hitscan A: 100HP / 25 dmg = 4 hits = 4 hearts (QD3).
 // R2 cannon: float HP kept, FULL=25 (1 heart), WEAK=12.5 (half heart),

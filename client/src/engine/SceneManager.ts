@@ -273,28 +273,31 @@ export interface ReconcileTelemetry {
 const DAY_PHASES = [
   { at: 0, background: new THREE.Color(SKY_DAWN_BG), fog: new THREE.Color(SKY_DAWN_FOG),
     ambient: new THREE.Color(SCENE_DAWN_FILL), key: new THREE.Color(SCENE_DAWN_KEY),
-    ambientIntensity: 0.88, keyIntensity: 0.98 },
+    ambientIntensity: 0.98, keyIntensity: 1.28 },
   { at: 0.32, background: new THREE.Color(SKY_DAY_BG), fog: new THREE.Color(SKY_DAY_FOG),
     ambient: new THREE.Color(SCENE_DAY_FILL), key: new THREE.Color(SCENE_DAY_KEY),
-    ambientIntensity: 1.02, keyIntensity: 1.12 },
+    ambientIntensity: 0.78, keyIntensity: 1.63 },
   { at: 0.68, background: new THREE.Color(SKY_SUNSET_BG), fog: new THREE.Color(SKY_SUNSET_FOG),
     ambient: new THREE.Color(SCENE_SUNSET_FILL), key: new THREE.Color(SCENE_SUNSET_KEY),
-    ambientIntensity: 0.86, keyIntensity: 0.99 },
+    ambientIntensity: 0.49, keyIntensity: 1.28 },
   { at: 1, background: new THREE.Color(BASE_BG), fog: new THREE.Color(BASE_BG),
     ambient: new THREE.Color(SCENE_COOL_FILL), key: new THREE.Color(SCENE_WARM_LIGHT),
-    ambientIntensity: SCENE_AMBIENT_INTENSITY, keyIntensity: SCENE_DIRECTIONAL_INTENSITY },
+    ambientIntensity: 0.31, keyIntensity: 0.48 },
 ] as const;
 
-// The sun crosses the ground horizon near the sunset color phase. Its peak
-// stays low enough to enter the resting camera's upper field of view.
-const SUN_ARC_END = 0.76;
+// Both discs use this slightly slanted east-to-west path. The moon follows
+// the sun from the same horizon; its half arc continues beyond round end.
+const SUN_ARC_END = 0.78;
 const SUN_PATH_HALF_WIDTH = 22;
 const SUN_PATH_Z = -62;
-const SUN_ARC_HEIGHT = 7;
+const SUN_ARC_HEIGHT = 7.5;
 const SUN_ARC_DROP = 2.2;
 const SUN_FADE_START = 0.66;
-const CLOUD_FADE_START = 0.64;
-const CLOUD_FADE_END = 0.84;
+const MOON_ARC_START = 0.66;
+const MOON_ARC_DURATION = 0.64;
+const MOON_FADE_DURATION = 0.18;
+const CLOUD_FADE_START = 0.68;
+const CLOUD_FADE_END = 0.86;
 const PORCH_LIGHT_START = 2 / 3;
 const PORCH_LIGHT_RAMP = 0.035;
 const SUN_DAY_COLOR = new THREE.Color(SKY_SUN_DISC);
@@ -305,6 +308,47 @@ const CLOUD_SUNSET_COLOR = new THREE.Color(SKY_CLOUD_SUNSET);
 function smooth01(value: number): number {
   const t = Math.max(0, Math.min(1, value));
   return t * t * (3 - 2 * t);
+}
+
+function skyArcX(t: number): number {
+  return (t * 2 - 1) * SUN_PATH_HALF_WIDTH;
+}
+
+function skyArcY(t: number): number {
+  return SUN_ARC_HEIGHT * Math.sin(Math.PI * t) - SUN_ARC_DROP * t;
+}
+
+function skyArcZ(t: number): number {
+  return SUN_PATH_Z + 5 * (t - 0.5);
+}
+
+// One soft, irregular alpha silhouette shared by seven translucent sky
+// planes. The texture carries no sharp facets or rectangular opaque pixels.
+function makeCloudTexture(): THREE.DataTexture {
+  const size = 64;
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const u = (x + 0.5) / size * 2 - 1;
+      const v = (y + 0.5) / size * 2 - 1;
+      const angle = Math.atan2(v, u);
+      const radius = Math.hypot(u, v);
+      const edge = 0.73 + 0.07 * Math.sin(3 * angle + 0.4)
+        + 0.045 * Math.cos(5 * angle - 0.7);
+      const alpha = smooth01((edge - radius) / 0.2) * 0.78;
+      const index = (y * size + x) * 4;
+      data[index] = 255;
+      data[index + 1] = 255;
+      data[index + 2] = 255;
+      data[index + 3] = Math.round(alpha * 255);
+    }
+  }
+  const texture = new THREE.DataTexture(data, size, size);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
 }
 
 // Stylized round sky with exactly one shadowed directional light (<= 1024)
@@ -322,8 +366,8 @@ export class SceneManager {
   private ambientLight: THREE.AmbientLight | null = null;
   private directionalLight: THREE.DirectionalLight | null = null;
   private sunDisc: THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial> | null = null;
-  private clouds: THREE.InstancedMesh<THREE.IcosahedronGeometry, THREE.MeshBasicMaterial> | null = null;
-  private moonMaterial: THREE.MeshBasicMaterial | null = null;
+  private clouds: THREE.InstancedMesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial> | null = null;
+  private moonDisc: THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial> | null = null;
   private starMaterial: THREE.PointsMaterial | null = null;
   private readonly nebulaMaterials: THREE.SpriteMaterial[] = [];
   private readonly nebulaBaseOpacities: number[] = [];
@@ -354,6 +398,12 @@ export class SceneManager {
   private readonly arena = new ArenaBuilder();
   private readonly ads = new AdsManager();
   private readonly powerState = new PowerUpState();
+  private readonly powerHudState = {
+    shieldHp: 0,
+    shieldRemaining: 0,
+    speedRemaining: 0,
+    chargeRemaining: 0,
+  };
   private readonly pickups = new PowerUpPickups();
   private readonly particles = new ParticlePool();
   private readonly shake = new CameraShake();
@@ -549,11 +599,11 @@ export class SceneManager {
         + (to.keyIntensity - from.keyIntensity) * blend;
     }
     const sunArc = Math.min(1, this.dayProgress / SUN_ARC_END);
-    const sunX = (sunArc * 2 - 1) * SUN_PATH_HALF_WIDTH;
-    const sunY = SUN_ARC_HEIGHT * Math.sin(Math.PI * sunArc) - SUN_ARC_DROP * sunArc;
+    const sunX = skyArcX(sunArc);
+    const sunY = skyArcY(sunArc);
     const sunOpacity = smooth01((SUN_ARC_END - this.dayProgress) / (SUN_ARC_END - SUN_FADE_START));
     if (this.sunDisc !== null) {
-      this.sunDisc.position.set(sunX, sunY, SUN_PATH_Z);
+      this.sunDisc.position.set(sunX, sunY, skyArcZ(sunArc));
       this.sunDisc.lookAt(0, 7, 0);
       this.sunDisc.material.color.lerpColors(
         SUN_DAY_COLOR, SUN_SUNSET_COLOR, smooth01((this.dayProgress - 0.43) / 0.25),
@@ -568,8 +618,16 @@ export class SceneManager {
       this.directionalLight.position.set(
         sunX * 0.22 * sunOpacity + 5 * (1 - sunOpacity),
         Math.max(9, sunY * 0.22) * sunOpacity + 10 * (1 - sunOpacity),
-        SUN_PATH_Z * 0.22 * sunOpacity + 5 * (1 - sunOpacity),
+        skyArcZ(sunArc) * 0.22 * sunOpacity + 5 * (1 - sunOpacity),
       );
+    }
+    const moonArc = Math.max(0, Math.min(1, (this.dayProgress - MOON_ARC_START) / MOON_ARC_DURATION));
+    const moonOpacity = 0.92 * smooth01((this.dayProgress - MOON_ARC_START) / MOON_FADE_DURATION);
+    if (this.moonDisc !== null) {
+      this.moonDisc.position.set(skyArcX(moonArc), skyArcY(moonArc), skyArcZ(moonArc));
+      this.moonDisc.lookAt(0, 7, 0);
+      this.moonDisc.material.opacity = moonOpacity;
+      this.moonDisc.visible = moonOpacity > 0;
     }
     if (this.clouds !== null) {
       const fade = 1 - smooth01((this.dayProgress - CLOUD_FADE_START)
@@ -577,14 +635,15 @@ export class SceneManager {
       this.clouds.material.color.lerpColors(
         CLOUD_DAY_COLOR, CLOUD_SUNSET_COLOR, smooth01((this.dayProgress - 0.38) / 0.3),
       );
-      this.clouds.material.opacity = (0.52 + 0.16 * smooth01(this.dayProgress / 0.32)) * fade;
-      this.clouds.position.x = this.dayProgress * 2.5;
+      this.clouds.material.opacity = (0.24 + 0.15 * smooth01(this.dayProgress / 0.32)) * fade;
+      this.clouds.position.x = this.dayProgress * 1.8;
       this.clouds.visible = fade > 0;
     }
-    this.ads.setPorchLighting(smooth01((this.dayProgress - PORCH_LIGHT_START) / PORCH_LIGHT_RAMP));
-    const stars = smooth01((this.dayProgress - 0.55) / 0.4);
+    const eveningLights = smooth01((this.dayProgress - PORCH_LIGHT_START) / PORCH_LIGHT_RAMP);
+    this.ads.setPorchLighting(eveningLights);
+    this.fireflies?.setVisibility(eveningLights);
+    const stars = smooth01((this.dayProgress - 0.66) / 0.3);
     if (this.starMaterial !== null) this.starMaterial.opacity = 0.9 * stars;
-    if (this.moonMaterial !== null) this.moonMaterial.opacity = 0.92 * smooth01((this.dayProgress - 0.65) / 0.35);
     for (let i = 0; i < this.nebulaMaterials.length; i += 1) {
       const material = this.nebulaMaterials[i];
       if (material !== undefined) material.opacity = (this.nebulaBaseOpacities[i] ?? 0) * stars;
@@ -665,6 +724,7 @@ export class SceneManager {
     this.ballsPool = new BallsPool(this.scene);
     this.superCore = new SuperCore(this.scene);
     this.fireflies = new Fireflies(this.scene);
+    this.fireflies.setVisibility(smooth01((this.dayProgress - PORCH_LIGHT_START) / PORCH_LIGHT_RAMP));
 
     this.scene.add(this.pickups.object);
     this.scene.add(this.particles.object);
@@ -1082,6 +1142,7 @@ export class SceneManager {
       const speed01 = deltaSeconds > 0
         ? Math.min(1, Math.hypot(movedX, movedZ) / (deltaSeconds * MOVE_SPEED))
         : 0;
+      this.powerEffects?.setRunning(this.airborneGate.isAirborne ? 0 : speed01);
       updateHopVisual(this.avatarRig, 0, speed01, this.hop, deltaSeconds, this.airborneGate.isAirborne);
       // Stage 5 audio footstep tick: one event per hop-boundary crossing
       // (updateHopVisual advances lastHop once per bounce, ~2-4 Hz at full
@@ -1135,9 +1196,8 @@ export class SceneManager {
       }
       this.superCore.update(deltaSeconds);
     }
-    // Stage 4d.3 fireflies: ambient drift every frame in BOTH play and
-    // spectate paths (updateCombat runs in both). Billboard + sine bob,
-    // zero per-frame allocations, no lights, 1 draw call.
+    // Fireflies drift in play and spectate only after the final-minute
+    // lighting gate. The hidden swarm skips its matrix update entirely.
     this.fireflies?.update(deltaSeconds, this.camera);
   }
 
@@ -1218,6 +1278,18 @@ export class SceneManager {
     this.powerEffects?.setActive(this.powerState.hasShield(), this.powerState.isSpeedActive());
   }
 
+  public hasChargeBoost(): boolean {
+    return this.powerState.hasChargeBoost();
+  }
+
+  public getPowerUpHudState(): Readonly<typeof this.powerHudState> {
+    this.powerHudState.shieldHp = this.powerState.getShieldHp();
+    this.powerHudState.shieldRemaining = this.powerState.getShieldRemaining();
+    this.powerHudState.speedRemaining = this.powerState.getSpeedRemaining();
+    this.powerHudState.chargeRemaining = this.powerState.getChargeRemaining();
+    return this.powerHudState;
+  }
+
   // Test/debug helpers (no gameplay use): seed and read the physics body
   // state so sliding/impulse regression tests can drive update() headless.
   public getPlayerVelocity(): Vector3Like | null {
@@ -1264,6 +1336,7 @@ export class SceneManager {
     if (this.avatarRig !== null) {
       resetHopVisual(this.avatarRig, 0);
     }
+    this.powerEffects?.setRunning(0);
   }
 
   // Spawn/teleport the local avatar + Rapier body to the authoritative
@@ -1993,7 +2066,7 @@ export class SceneManager {
     this.directionalLight = null;
     this.sunDisc = null;
     this.clouds = null;
-    this.moonMaterial = null;
+    this.moonDisc = null;
     this.starMaterial = null;
     this.nebulaMaterials.length = 0;
     this.nebulaBaseOpacities.length = 0;
@@ -2007,9 +2080,9 @@ export class SceneManager {
     }
   }
 
-  // Day/night sky dressing (zero light cost): one sun disc, nine faceted
-  // cloud lobes in one batch, then the existing moon and starfield. All sky
-  // materials ignore fog so distant forms stay visible through the glass.
+  // Day/night sky dressing (zero light cost): sun and moon on one arc, seven
+  // feathered cloud hints in one batch, then the starfield. All sky materials
+  // ignore fog so distant forms stay visible through the glass.
   private buildSky(scene: THREE.Scene): void {
     const sunGeometry = new THREE.CircleGeometry(2.8, 20);
     const sunMaterial = new THREE.MeshBasicMaterial({
@@ -2022,33 +2095,39 @@ export class SceneManager {
     this.disposables.push(sunGeometry, sunMaterial);
     this.sunDisc = sun;
 
-    const cloudGeometry = new THREE.IcosahedronGeometry(1, 0);
+    const cloudGeometry = new THREE.PlaneGeometry(1, 1);
+    const cloudTexture = makeCloudTexture();
     const cloudMaterial = new THREE.MeshBasicMaterial({
-      color: SKY_CLOUD_DAY, fog: false, transparent: true, opacity: 0,
+      color: SKY_CLOUD_DAY, map: cloudTexture, fog: false, transparent: true, opacity: 0,
       depthWrite: false,
     });
-    // Three compact three-lobe silhouettes. The single InstancedMesh costs
-    // one draw call and only nine 20-face shapes, with no texture or motion
-    // allocation. Position values are intentionally far outside the arena.
-    const cloudLobes: ReadonlyArray<readonly [number, number, number, number, number, number]> = [
-      [-20, 6.3, -58, 3.2, 1.7, 2.0], [-16, 7.4, -58, 3.7, 2.1, 2.0], [-12, 6.5, -58, 3.3, 1.7, 2.0],
-      [-4, 6.9, -66, 3.4, 1.8, 2.1], [0, 8.0, -66, 3.8, 2.2, 2.1], [4, 7.0, -66, 3.5, 1.8, 2.1],
-      [12, 6.4, -58, 3.3, 1.7, 2.0], [16, 7.5, -58, 3.7, 2.1, 2.0], [20, 6.5, -58, 3.2, 1.7, 2.0],
+    // Scattered at varied height/depth/angle; the shared 64px alpha texture
+    // gives each two-triangle plane a soft edge. Seven planes = one draw call.
+    const cloudHints: ReadonlyArray<readonly [number, number, number, number, number, number]> = [
+      [-22.0, 6.2, -61, 8.2, 2.4, -0.07],
+      [-14.4, 5.5, -57, 5.7, 1.8, 0.10],
+      [-6.0, 7.4, -68, 10.4, 2.6, -0.04],
+      [2.8, 6.7, -62, 6.7, 2.0, 0.06],
+      [11.7, 7.1, -67, 9.5, 2.7, -0.11],
+      [19.2, 5.8, -59, 7.3, 2.0, 0.08],
+      [23.1, 6.5, -65, 6.1, 1.7, -0.03],
     ];
-    const clouds = new THREE.InstancedMesh(cloudGeometry, cloudMaterial, cloudLobes.length);
+    const clouds = new THREE.InstancedMesh(cloudGeometry, cloudMaterial, cloudHints.length);
     clouds.name = "day-clouds";
     clouds.frustumCulled = false;
     const cloudMatrix = new THREE.Matrix4();
     const cloudPosition = new THREE.Vector3();
     const cloudScale = new THREE.Vector3();
     const cloudRotation = new THREE.Quaternion();
-    cloudLobes.forEach(([x, y, z, width, height, depth], index) => {
-      cloudMatrix.compose(cloudPosition.set(x, y, z), cloudRotation, cloudScale.set(width, height, depth));
+    const cloudNormal = new THREE.Vector3(0, 0, 1);
+    cloudHints.forEach(([x, y, z, width, height, angle], index) => {
+      cloudRotation.setFromAxisAngle(cloudNormal, angle);
+      cloudMatrix.compose(cloudPosition.set(x, y, z), cloudRotation, cloudScale.set(width, height, 1));
       clouds.setMatrixAt(index, cloudMatrix);
     });
     clouds.instanceMatrix.needsUpdate = true;
     scene.add(clouds);
-    this.disposables.push(cloudGeometry, cloudMaterial);
+    this.disposables.push(cloudGeometry, cloudMaterial, cloudTexture);
     this.clouds = clouds;
 
     const moonGeometry = new THREE.CircleGeometry(3, 32);
@@ -2057,11 +2136,11 @@ export class SceneManager {
     });
     const moon = new THREE.Mesh(moonGeometry, moonMaterial);
     moon.name = "moon";
-    moon.position.set(-30, 38, -60);
-    moon.lookAt(0, 0, 0);
+    moon.position.set(skyArcX(0), skyArcY(0), skyArcZ(0));
+    moon.lookAt(0, 7, 0);
     scene.add(moon);
     this.disposables.push(moonGeometry, moonMaterial);
-    this.moonMaterial = moonMaterial;
+    this.moonDisc = moon;
 
     const starCount = 100;
     const positions = new Float32Array(starCount * 3);

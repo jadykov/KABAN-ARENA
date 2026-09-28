@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import {
   ARENA_HALF_SIZE,
   ICE_FRICTION,
@@ -471,7 +472,7 @@ export class ArenaBuilder {
     const specs = getObstacleLayout();
     // Face colors are already lit material colors. A white material prevents
     // the bright moss tops from being multiplied back into darkness.
-    const geometry = this.track(new THREE.BoxGeometry(1, 1, 1));
+    const geometry = this.track(new RoundedBoxGeometry(1, 1, 1, 2, 0.055));
     paintBoxFaceVertices(geometry, BASE_OBSTACLE_TOP, BASE_OBSTACLE);
     const material = this.track(
       new THREE.MeshStandardMaterial({
@@ -503,7 +504,7 @@ export class ArenaBuilder {
 
     // Thin inset paint on the existing top perimeter. The trim is visual
     // only, so the authoritative cover footprints and heights remain exact.
-    const edgeGeometry = this.track(new THREE.BoxGeometry(1, 1, 1));
+    const edgeGeometry = this.track(new RoundedBoxGeometry(1, 1, 1, 2, 0.07));
     const edgeMaterial = this.track(new THREE.MeshStandardMaterial({
       color: BASE_OBSTACLE_EDGE, roughness: 0.9,
     }));
@@ -534,7 +535,7 @@ export class ArenaBuilder {
     // figure (tiered prism look, top 5mm below the collider top so the faces
     // never z-fight — the capsule stands on the figure box). No extra lights.
     const platforms = getPlatforms();
-    const topGeometry = this.track(new THREE.BoxGeometry(1, 1, 1));
+    const topGeometry = this.track(new RoundedBoxGeometry(1, 1, 1, 2, 0.045));
     paintBoxFaceVertices(topGeometry, BASE_PLATFORM_TOP, BASE_PLATFORM);
     const topMaterial = this.track(
       new THREE.MeshStandardMaterial({
@@ -545,6 +546,7 @@ export class ArenaBuilder {
       }),
     );
     const tops = new THREE.InstancedMesh(topGeometry, topMaterial, platforms.length);
+    tops.name = "platform-volumes";
     const matrix = new THREE.Matrix4();
     // Four gently varied leaf tints preserve each shop's silhouette.
     const accents = [
@@ -590,7 +592,7 @@ export class ArenaBuilder {
       new THREE.MeshStandardMaterial({ color: BASE_RAMP, roughness: 0.9, metalness: 0 }),
     );
     const ramps = getRamps();
-    const rampGeometry = this.track(new THREE.BoxGeometry(1, 1, 1));
+    const rampGeometry = this.track(new RoundedBoxGeometry(1, 1, 1, 2, 0.035));
     const rampSlabs = new THREE.InstancedMesh(rampGeometry, rampMaterial, ramps.length);
     rampSlabs.name = "ramp-slabs";
     const slabMatrix = new THREE.Matrix4();
@@ -618,7 +620,7 @@ export class ArenaBuilder {
 
     // Four short stair-like markings on every slope communicate that ramps
     // are walkable, while the space underneath remains visibly open.
-    const markGeometry = this.track(new THREE.BoxGeometry(1, 1, 1));
+    const markGeometry = this.track(new RoundedBoxGeometry(1, 1, 1, 2, 0.07));
     const markMaterial = this.track(new THREE.MeshStandardMaterial({
       color: BASE_RAMP_MARK, roughness: 0.96,
     }));
@@ -795,7 +797,7 @@ export class ArenaBuilder {
 // Paint whole faces, rather than using vertex Y (which used to brighten the
 // top edge of side walls). Cool shade and warm-facing sides stay distinct even
 // on devices with a small shadow map. Vertex colors are linear in Three.js.
-function paintBoxFaceVertices(geometry: THREE.BoxGeometry, topHex: number, sideHex: number): void {
+function paintBoxFaceVertices(geometry: THREE.BufferGeometry, topHex: number, sideHex: number): void {
   const normals = geometry.getAttribute("normal");
   const colors = new Float32Array(normals.count * 3);
   const top = new THREE.Color(topHex);

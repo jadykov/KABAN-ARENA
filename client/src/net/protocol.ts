@@ -34,7 +34,7 @@ import {
 } from "../config";
 
 export type RoundPhase = "lobby" | "countdown" | "playing" | "ended";
-export type NetPowerUpKind = "shield" | "speed" | "";
+export type NetPowerUpKind = "shield" | "speed" | "charge" | "";
 
 // Decoded snapshot of one replicated player (server PlayerState fields).
 // R1: ready/spectator mark pre-join spectators (alive=false, not rendered,
@@ -57,6 +57,7 @@ export interface NetPlayerSnapshot {
   shieldHp: number;
   shieldUntil: number;
   speedUntil: number;
+  chargeUntil: number;
   pickupKind: NetPowerUpKind;
   pickupAt: number;
   pickupSeq: number;

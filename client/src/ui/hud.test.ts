@@ -247,6 +247,38 @@ describe("createHud top-left info list", () => {
       handle.dispose();
     }
   });
+
+  it("keeps shield capacity separate from health and times all three active buffs", () => {
+    const parent = new FakeElement();
+    const handle = createHud(asHtml(parent));
+    try {
+      handle.setHearts(5);
+      handle.setBuffs({
+        shield: { seconds: 9.94, hp: 12.5 },
+        speed: { seconds: 4.23 },
+        charge: { seconds: 10 },
+      });
+      const hearts = byId(handle, "hud-hearts");
+      expect(hearts.children.filter((child) => child.className.startsWith("heart "))).toHaveLength(4);
+      expect(hearts.attributes["aria-label"]).toBe("Здоровье: 5 из 8 половинок сердца; щит: 13 из 25 прочности");
+      expect(byId(handle, "hud-shield-heart").style.display).toBe("");
+      expect(byId(handle, "hud-shield-heart").attributes["aria-label"]).toBe("Щит: 13 из 25 прочности");
+      expect(byId(handle, "hud-shield-capacity").style.width).toBe("50%");
+      const rows = byId(handle, "hud-buffs").children;
+      expect(rows.map((row) => row.attributes["data-kind"])).toEqual(["shield", "speed", "charge"]);
+      expect(rows.map((row) => row.children[2]?.textContent)).toEqual(["10.0 с", "4.3 с", "10.0 с"]);
+      expect(rows.map((row) => (row.children[0] as unknown as { src: string }).src)).toEqual([
+        "/icons/bonus-shield.svg", "/icons/bonus-speed.svg", "/icons/bonus-charge.svg",
+      ]);
+      handle.setBuffs({ charge: { seconds: 0.04 } });
+      expect(rows.map((row) => row.style.display)).toEqual(["none", "none", ""]);
+      expect(byId(handle, "hud-shield-heart").style.display).toBe("none");
+      handle.setBuffs({});
+      expect(rows.every((row) => row.style.display === "none")).toBe(true);
+    } finally {
+      handle.dispose();
+    }
+  });
 });
 
 describe("Russian player-facing event messages", () => {
@@ -265,6 +297,7 @@ describe("Russian player-facing event messages", () => {
   it("names local pickup effects in Russian", () => {
     expect(localizePowerUp("shield")).toBe("Подобран щит");
     expect(localizePowerUp("speed")).toBe("Подобрано ускорение");
+    expect(localizePowerUp("charge")).toBe("Подобран быстрый заряд");
     expect(localizePowerUp("future-kind")).toBe("Подобран бонус");
   });
 });

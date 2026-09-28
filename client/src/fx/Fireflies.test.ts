@@ -58,11 +58,17 @@ describe("Fireflies star swarm (visual round: tiny 4-point twinkles, starry colo
     expect(FIREFLY_TEXTURE_SIZE).toBeLessThanOrEqual(256);
   });
 
-  it("dims the base glow -50% (shared material opacity 0.45, white base)", () => {
+  it("stays hidden until the evening gate, then uses the dim base glow", () => {
     expect(FIREFLY_OPACITY).toBe(0.45);
     const { swarm } = createSwarm();
     try {
       const material = swarm.object.material as THREE.MeshBasicMaterial;
+      expect(swarm.object.visible).toBe(false);
+      expect(material.opacity).toBe(0);
+      swarm.setVisibility(0.5);
+      expect(swarm.object.visible).toBe(true);
+      expect(material.opacity).toBeCloseTo(FIREFLY_OPACITY * 0.5, 10);
+      swarm.setVisibility(1);
       expect(material.opacity).toBeCloseTo(FIREFLY_OPACITY, 10);
       // White base color: the tint comes from per-instance colors, multiplied
       // with the white star texture.
@@ -70,6 +76,34 @@ describe("Fireflies star swarm (visual round: tiny 4-point twinkles, starry colo
       expect(material.blending).toBe(THREE.AdditiveBlending);
       expect(material.depthWrite).toBe(false);
       expect(material.fog).toBe(false);
+    } finally {
+      swarm.dispose();
+    }
+  });
+
+  it("freezes while hidden and restarts its drift after a new-round reset", () => {
+    const { camera, swarm } = createSwarm();
+    try {
+      const matrix = new THREE.Matrix4();
+      const first = new THREE.Matrix4();
+      swarm.object.getMatrixAt(0, first);
+      swarm.update(1, camera);
+      swarm.object.getMatrixAt(0, matrix);
+      expect(matrix.equals(first)).toBe(true);
+      swarm.setVisibility(1);
+      swarm.update(0.5, camera);
+      swarm.object.getMatrixAt(0, first);
+      swarm.update(0.5, camera);
+      swarm.setVisibility(0);
+      expect(swarm.object.visible).toBe(false);
+      expect((swarm.object.material as THREE.MeshBasicMaterial).opacity).toBe(0);
+      swarm.update(1, camera);
+      swarm.object.getMatrixAt(0, matrix);
+      expect(matrix.equals(first)).toBe(false);
+      swarm.setVisibility(1);
+      swarm.update(0.5, camera);
+      swarm.object.getMatrixAt(0, matrix);
+      expect(matrix.equals(first)).toBe(true);
     } finally {
       swarm.dispose();
     }
@@ -175,6 +209,7 @@ describe("Fireflies star swarm (visual round: tiny 4-point twinkles, starry colo
 
   it("twinkles subset-only with at most one concurrent pulse over a long sim", () => {
     const { camera, swarm } = createSwarm();
+    swarm.setVisibility(1);
     const mesh = swarm.object;
     try {
       const matrix = new THREE.Matrix4();
@@ -214,6 +249,7 @@ describe("Fireflies star swarm (visual round: tiny 4-point twinkles, starry colo
 
   it("wanders travel while hoverers stay home (displacement bounds)", () => {
     const { camera, swarm } = createSwarm();
+    swarm.setVisibility(1);
     const mesh = swarm.object;
     try {
       const matrix = new THREE.Matrix4();
@@ -257,6 +293,7 @@ describe("Fireflies star swarm (visual round: tiny 4-point twinkles, starry colo
 
   it("reuses instance buffers across updates (structural zero-alloc check)", () => {
     const { camera, swarm } = createSwarm();
+    swarm.setVisibility(1);
     try {
       const mesh = swarm.object;
       const attribute = mesh.instanceMatrix;

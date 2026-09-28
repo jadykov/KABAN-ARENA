@@ -20,8 +20,17 @@ import {
   IDENTITY_LOCAL,
   IDENTITY_REMOTES,
   SCENE_COOL_FILL,
+  SCENE_DAWN_FILL,
+  SCENE_DAWN_KEY,
+  SCENE_DAY_FILL,
+  SCENE_DAY_KEY,
+  SCENE_SUNSET_FILL,
+  SCENE_SUNSET_KEY,
   SCENE_WARM_LIGHT,
   SCENE_WARM_LIGHT_CSS,
+  SKY_DAWN_BG,
+  SKY_DAY_BG,
+  SKY_SUNSET_BG,
 } from "./palette";
 
 function lightness(hex: number): number {
@@ -38,6 +47,19 @@ function colorDistance(a: number, b: number): number {
 }
 
 describe("night arena palette", () => {
+  it("has a fresh blue day, warm dawn shadows, and darker burgundy dusk", () => {
+    expect(SKY_DAY_BG & 255).toBeGreaterThan((SKY_DAY_BG >> 8) & 255);
+    expect((SKY_DAY_BG >> 8) & 255).toBeGreaterThan((SKY_DAY_BG >> 16) & 255);
+    expect(lightness(SKY_DAY_BG)).toBeGreaterThan(lightness(SKY_SUNSET_BG));
+    expect(lightness(SKY_DAWN_BG)).toBeGreaterThan(lightness(SKY_SUNSET_BG));
+    expect((SCENE_DAWN_FILL >> 16) & 255).toBeGreaterThan(SCENE_DAWN_FILL & 255);
+    expect((SCENE_DAWN_KEY >> 16) & 255).toBeGreaterThan(SCENE_DAWN_KEY & 255);
+    expect((SCENE_DAY_KEY >> 16) & 255).toBeGreaterThan(SCENE_DAY_KEY & 255);
+    expect(SCENE_DAY_FILL & 255).toBeGreaterThan((SCENE_DAY_FILL >> 16) & 255);
+    expect((SCENE_SUNSET_KEY >> 16) & 255).toBeGreaterThan(SCENE_SUNSET_KEY & 255);
+    expect((SCENE_SUNSET_FILL >> 16) & 255).toBeGreaterThan(SCENE_SUNSET_FILL & 255);
+  });
+
   it("keeps the walking floor visible and the moss volumes brighter", () => {
     expect(lightness(BASE_BG)).toBeLessThan(lightness(BASE_FLOOR_GROUT));
     expect(lightness(BASE_FLOOR_GROUT)).toBeLessThan(lightness(BASE_FLOOR));

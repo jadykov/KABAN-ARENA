@@ -243,17 +243,26 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     expect(fog.color.getHex()).toBe(SKY_DAWN_FOG);
     expect(moon.material.opacity).toBe(0);
     expect(stars.material.opacity).toBe(0);
+    const dawnLight = ambient.intensity + key.intensity;
 
     manager.setDayProgress(0.32);
     expect(background.getHex()).toBe(SKY_DAY_BG);
     expect(fog.color.getHex()).toBe(SKY_DAY_FOG);
     expect(ambient.color.getHex()).toBe(SCENE_DAY_FILL);
     expect(key.color.getHex()).toBe(SCENE_DAY_KEY);
+    const dayLight = ambient.intensity + key.intensity;
+    expect(dayLight).toBeGreaterThan(dawnLight);
+    expect(dayLight / dawnLight).toBeLessThan(1.1);
+    expect(ambient.intensity).toBeLessThan(0.98);
+    expect(key.intensity).toBeGreaterThan(1.5);
     manager.setDayProgress(0.68);
     expect(background.getHex()).toBe(SKY_SUNSET_BG);
     expect(fog.color.getHex()).toBe(SKY_SUNSET_FOG);
     expect(ambient.color.getHex()).toBe(SCENE_SUNSET_FILL);
     expect(key.color.getHex()).toBe(SCENE_SUNSET_KEY);
+    const sunsetLight = ambient.intensity + key.intensity;
+    expect(sunsetLight).toBeLessThan(dawnLight);
+    expect(key.intensity / ambient.intensity).toBeGreaterThan(2);
     expect(stars.material.opacity).toBeGreaterThan(0);
     expect(moon.material.opacity).toBeGreaterThan(0);
     manager.setDayProgress(0.69);
@@ -270,15 +279,17 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     expect(key.color.getHex()).toBe(SCENE_WARM_LIGHT);
     expect(stars.material.opacity).toBeCloseTo(0.9);
     expect(moon.material.opacity).toBeCloseTo(0.92);
+    expect(ambient.intensity + key.intensity).toBeLessThan(sunsetLight * 0.5);
     expect(scene.children.filter((child) => child instanceof THREE.Light)).toHaveLength(lightCount);
     manager.setDayProgress(0);
     expect(background.getHex()).toBe(SKY_DAWN_BG);
     expect(stars.material.opacity).toBe(0);
   });
 
-  it("rises and sets the visible sun while keeping the one key aligned with it", async () => {
+  it("moves the sun and following moon on the same tilted arc", async () => {
     const { manager, scene, camera } = await createManagerWithScene();
     const sun = scene.getObjectByName("sun") as THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
+    const moon = scene.getObjectByName("moon") as THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
     const key = scene.children.find((child): child is THREE.DirectionalLight => child instanceof THREE.DirectionalLight)!;
     camera.aspect = 9 / 16;
     camera.updateProjectionMatrix();
@@ -294,6 +305,7 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     expect(sun.material.color.getHex()).toBe(SKY_SUN_DISC);
     expect(sun.position.y).toBeCloseTo(0);
     expect(sun.material.opacity).toBeGreaterThan(0.9);
+    expect(moon.visible).toBe(false);
     expect(key.position.x).toBeLessThan(0);
     expectInPortraitView();
     const dawnX = sun.position.x;
@@ -304,6 +316,7 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     expect(sun.position.y).toBeLessThan(7);
     expect(sun.material.opacity).toBeGreaterThan(0.9);
     expectInPortraitView(0.95);
+    const highSun = sun.position.clone();
 
     manager.setDayProgress(0.68);
     expect(sun.position.x).toBeGreaterThan(0);
@@ -314,28 +327,48 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     expect(key.position.x).toBeGreaterThan(0);
     expectInPortraitView();
 
-    manager.setDayProgress(0.76);
+    manager.setDayProgress(0.78);
     expect(sun.position.y).toBeLessThan(0);
     expect(sun.material.opacity).toBe(0);
     expect(sun.visible).toBe(false);
+    expect(moon.position.x).toBeGreaterThan(dawnX);
+    expect(moon.material.opacity).toBeGreaterThan(0);
+    // Sun at 0.35 / 0.78 and moon at 0.66 + 0.64 * that same arc fraction.
+    manager.setDayProgress(0.66 + 0.64 * (0.35 / 0.78));
+    expect(moon.position.distanceTo(highSun)).toBeLessThan(0.001);
+    expect(moon.material.opacity).toBeGreaterThan(0.8);
     manager.setDayProgress(1);
+    expect(moon.position.x).toBeGreaterThan(0);
+    expect(moon.position.y).toBeGreaterThan(5);
+    expect(moon.position.y).toBeLessThan(8);
+    expect(moon.visible).toBe(true);
     expect(scene.children.filter((child) => child instanceof THREE.Light)).toHaveLength(2);
     manager.setDayProgress(0);
     expect(sun.visible).toBe(true);
+    expect(moon.visible).toBe(false);
     expect(sun.position.x).toBeCloseTo(dawnX);
   });
 
-  it("uses one nine-lobe low-poly cloud batch and fades it by night", async () => {
+  it("uses one sparse batch of soft irregular cloud hints and fades it by night", async () => {
     const { manager, scene, camera } = await createManagerWithScene();
     camera.aspect = 9 / 16;
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld(true);
-    const clouds = scene.getObjectByName("day-clouds") as THREE.InstancedMesh<THREE.IcosahedronGeometry, THREE.MeshBasicMaterial>;
+    const clouds = scene.getObjectByName("day-clouds") as THREE.InstancedMesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
     expect(clouds).toBeInstanceOf(THREE.InstancedMesh);
-    expect(clouds.count).toBe(9);
-    expect(clouds.geometry).toBeInstanceOf(THREE.IcosahedronGeometry);
-    expect(clouds.geometry.parameters.detail).toBe(0);
-    expect(clouds.material.map).toBeNull();
+    expect(clouds.count).toBe(7);
+    expect(clouds.geometry).toBeInstanceOf(THREE.PlaneGeometry);
+    expect(clouds.geometry.index?.count).toBe(6);
+    const cloudMap = clouds.material.map as THREE.DataTexture;
+    expect(cloudMap).toBeInstanceOf(THREE.DataTexture);
+    const image = cloudMap.image as { data: Uint8Array; width: number; height: number };
+    expect(image.width).toBe(64);
+    expect(image.height).toBe(64);
+    const alphaAt = (x: number, y: number): number => image.data[(y * 64 + x) * 4 + 3] ?? 0;
+    expect(alphaAt(0, 0)).toBe(0);
+    expect(alphaAt(63, 63)).toBe(0);
+    expect(alphaAt(32, 32)).toBeGreaterThan(150);
+    expect(alphaAt(56, 32)).toBeLessThan(alphaAt(32, 32));
     expect(clouds.material.fog).toBe(false);
     expect(clouds.material.depthWrite).toBe(false);
     expect(clouds.material.color.getHex()).toBe(SKY_CLOUD_DAY);
@@ -344,31 +377,36 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     const cloudRotation = new THREE.Quaternion();
     const cloudScale = new THREE.Vector3();
     const projectedCloud = new THREE.Vector3();
-    const centersInPortraitView = [0, 0, 0];
-    const clusterCenterXs: number[] = [];
+    let centersInPortraitView = 0;
+    let onLeft = 0;
+    let onRight = 0;
+    const heights = new Set<number>();
     for (let i = 0; i < clouds.count; i += 1) {
       clouds.getMatrixAt(i, cloudMatrix);
       cloudMatrix.decompose(cloudPosition, cloudRotation, cloudScale);
-      expect(cloudPosition.y).toBeGreaterThan(6);
-      expect(cloudPosition.y).toBeLessThan(9);
+      expect(cloudPosition.y).toBeGreaterThan(5);
+      expect(cloudPosition.y).toBeLessThan(8);
       expect(Math.max(Math.abs(cloudPosition.x), Math.abs(cloudPosition.z))).toBeGreaterThan(ARENA_HALF_SIZE);
+      expect(cloudScale.x).toBeGreaterThan(cloudScale.y * 2);
       projectedCloud.copy(cloudPosition).project(camera);
-      if (i % 3 === 1) clusterCenterXs.push(projectedCloud.x);
       if (Math.abs(projectedCloud.x) < 1 && Math.abs(projectedCloud.y) < 1) {
-        centersInPortraitView[Math.floor(i / 3)]! += 1;
+        centersInPortraitView += 1;
+        if (projectedCloud.x < 0) onLeft += 1;
+        if (projectedCloud.x > 0) onRight += 1;
       }
+      heights.add(cloudPosition.y);
     }
-    for (const count of centersInPortraitView) expect(count).toBeGreaterThanOrEqual(1);
-    expect(clusterCenterXs[0]).toBeLessThan(-0.3);
-    expect(Math.abs(clusterCenterXs[1]!)).toBeLessThan(0.2);
-    expect(clusterCenterXs[2]).toBeGreaterThan(0.3);
+    expect(centersInPortraitView).toBeGreaterThanOrEqual(4);
+    expect(onLeft).toBeGreaterThan(0);
+    expect(onRight).toBeGreaterThan(0);
+    expect(heights.size).toBeGreaterThan(5);
     const dawnOpacity = clouds.material.opacity;
     manager.setDayProgress(0.32);
     expect(clouds.material.opacity).toBeGreaterThan(dawnOpacity);
     manager.setDayProgress(0.68);
     expect(clouds.material.color.getHex()).toBe(SKY_CLOUD_SUNSET);
     expect(clouds.material.opacity).toBeGreaterThan(0);
-    manager.setDayProgress(0.84);
+    manager.setDayProgress(0.86);
     expect(clouds.material.opacity).toBe(0);
     expect(clouds.visible).toBe(false);
     manager.setDayProgress(0);
@@ -422,7 +460,7 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     expect(scene.getObjectByName("day-clouds")).toBeUndefined();
   });
 
-  it("drifts 6 dimmed fireflies as one InstancedMesh (blink subset + wander/hover)", async () => {
+  it("reveals 6 fireflies with the final-minute shop lights, then resets them", async () => {
     // 4d.3 feedback round: 8 -> 6, base glow halved, blink + behaviors.
     expect(FIREFLY_COUNT).toBe(6);
     expect(FIREFLY_OPACITY).toBe(0.45);
@@ -450,7 +488,15 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     const material = swarm.material as THREE.MeshBasicMaterial;
     expect(material.blending).toBe(THREE.AdditiveBlending);
     expect(material.depthWrite).toBe(false);
-    // Feedback dim (-50%): the shared material carries the halved glow.
+    expect(swarm.visible).toBe(false);
+    expect(material.opacity).toBe(0);
+    manager.setDayProgress(2 / 3);
+    expect(swarm.visible).toBe(false);
+    manager.setDayProgress(0.685);
+    expect(swarm.visible).toBe(true);
+    expect(material.opacity).toBeGreaterThan(0);
+    expect(material.opacity).toBeLessThan(FIREFLY_OPACITY);
+    manager.setDayProgress(0.72);
     expect(material.opacity).toBeCloseTo(FIREFLY_OPACITY, 10);
     // Run frames so the billboard/bob update writes instance matrices, then
     // verify every firefly hovers above head height (~2.1 capsule top) and
@@ -470,6 +516,29 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
       expect(Math.abs(position.x)).toBeLessThan(ARENA_HALF_SIZE);
       expect(Math.abs(position.z)).toBeLessThan(ARENA_HALF_SIZE);
     }
+    manager.setDayProgress(0);
+    expect(swarm.visible).toBe(false);
+    expect(material.opacity).toBe(0);
+  });
+});
+
+describe("SceneManager local run trail", () => {
+  it("follows movement and clears on a spectate transition", async () => {
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 200);
+    const manager = new SceneManager(scene, camera);
+    manager.build();
+    expect(await manager.initPhysics()).toBe(true);
+    managers.push(manager);
+    manager.teleportSelf(0, 0);
+    const trail = scene.getObjectByName("run-wind-trail");
+    expect(trail?.visible).toBe(false);
+    for (let frame = 0; frame < 20; frame += 1) {
+      manager.update(FRAME, { x: 0, y: 1 }, NO_LOOK);
+    }
+    expect(trail?.visible).toBe(true);
+    manager.setSpectating(true);
+    expect(trail?.visible).toBe(false);
   });
 });
 

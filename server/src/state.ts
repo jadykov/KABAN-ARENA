@@ -37,6 +37,7 @@ export class PlayerState extends Schema {
   @type("number") shieldHp = 0;
   @type("number") shieldUntil = 0;
   @type("number") speedUntil = 0;
+  @type("number") chargeUntil = 0;
   @type("string") pickupKind = "";
   @type("number") pickupAt = 0;
   @type("number") pickupSeq = 0;

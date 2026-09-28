@@ -148,7 +148,10 @@ export function planBotFire(
   brain.seed += 1;
   const chargeRange = BOT_CHARGE_MAX_S - BOT_CHARGE_MIN_S;
   const chargeS = BOT_CHARGE_MIN_S + pseudoRandom(brain.seed) * chargeRange;
-  const power01 = 0.5 + 0.5 * Math.max(0, Math.min(1, chargeS / CHARGE_MAX_S));
+  // A bot can collect the same neutral charge pickup as a human. Keep its
+  // firing schedule, but map the planned charge to full power in half time.
+  const chargeMultiplier = bot.chargeUntil > nowMs ? 2 : 1;
+  const power01 = 0.5 + 0.5 * Math.max(0, Math.min(1, chargeS * chargeMultiplier / CHARGE_MAX_S));
   // Base yaw toward the target (-Z forward convention: atan2(-dx, -dz)).
   // No yaw spray: the ball flies exactly along this yaw + pitch below.
   const dx = best.x - bot.x;

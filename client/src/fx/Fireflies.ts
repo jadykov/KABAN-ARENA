@@ -209,13 +209,14 @@ export class Fireflies {
       map: this.texture,
       color: NEUTRAL_WHITE,
       transparent: true,
-      opacity: FIREFLY_OPACITY,
+      opacity: 0,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       fog: false,
     });
     this.mesh = new THREE.InstancedMesh(geometry, material, FIREFLY_COUNT);
     this.mesh.name = "fireflies";
+    this.mesh.visible = false;
     this.mesh.frustumCulled = false;
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     for (let i = 0; i < FIREFLY_COUNT; i += 1) {
@@ -233,12 +234,24 @@ export class Fireflies {
     return this.mesh;
   }
 
+  // Round progress drives this from the same final-minute ramp as the shop
+  // lights. Invisible before the gate, including waiting and new rounds.
+  public setVisibility(value: number): void {
+    const visibility = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+    if (visibility === 0 && this.mesh.visible) {
+      this.time = 0;
+      this.envelopes.fill(0);
+    }
+    this.mesh.visible = visibility > 0;
+    (this.mesh.material as THREE.MeshBasicMaterial).opacity = FIREFLY_OPACITY * visibility;
+  }
+
   // Per-frame drift: wander/hover XZ + sine Y bob, billboarded with the live
   // camera quaternion, plus at most ONE twinkle pulse (first-active-wins
   // across the staggered subset, so the swarm never flashes all at once).
   // Scalar math + reused scratch objects only — no allocations, no lights.
   public update(deltaSeconds: number, camera: THREE.Camera): void {
-    if (!(deltaSeconds > 0)) {
+    if (!(deltaSeconds > 0) || !this.mesh.visible) {
       return;
     }
     this.time += deltaSeconds;

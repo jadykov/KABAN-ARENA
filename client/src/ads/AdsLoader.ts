@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import {
   ADS_PUBLIC_BASE_PATH,
   PLATFORM_FIGURES,
@@ -177,7 +178,9 @@ export class AdsManager {
 
   public buildVisuals(scene: THREE.Scene): void {
     const plane = new THREE.PlaneGeometry(1, 1);
-    const box = new THREE.BoxGeometry(1, 1, 1);
+    // A single low-segment bevel softens awnings, beams and fixtures without
+    // adding materials or changing the platform colliders.
+    const box = new RoundedBoxGeometry(1, 1, 1, 2, 0.045);
     const facade = new THREE.MeshStandardMaterial({ color: NEUTRAL_WHITE, roughness: 0.94 });
     const glazing = new THREE.MeshStandardMaterial({
       color: NEUTRAL_WHITE,
@@ -277,6 +280,12 @@ export class AdsManager {
       const unit = w / 2.4;
       const style = SHOP_STYLES[transform.platformIndex];
       if (style === undefined) throw new Error("Missing shop style");
+      const platform = PLATFORM_FIGURES[transform.platformIndex];
+      if (platform === undefined) throw new Error("Missing shop platform");
+      const wallDepth = 2 * (platform.rampSide.endsWith("z") ? platform.hx : platform.hz);
+      // The root sits 0.015 m outside the front wall. Keep rear fixtures
+      // against the opposite wall and clear of the perpendicular ramp.
+      const rearFaceZ = -wallDepth + 0.005;
       const add = (
         kind: StaticKind, x: number, y: number, z: number,
         width: number, height: number, depth: number, color: number, tiltZ = 0,
@@ -284,6 +293,17 @@ export class AdsManager {
         kind, shop, x * unit, y * sy, z,
         width * unit, height * sy, depth, color, tiltZ,
       );
+      const back = (
+        kind: "trim" | "canopy" | "accent",
+        x: number, y: number, width: number, height: number, depth: number,
+        color: number, layer = 0,
+      ): void => add(kind, x, y, rearFaceZ - depth / 2 - layer, width, height, depth, color);
+      const pairedBeams = (
+        x: number, y: number, z: number, width: number, height: number,
+        depth: number, color: number,
+      ): void => {
+        for (const side of [-1, 1]) add("trim", side * x, y, z, width, height, depth, color);
+      };
       const pane = (
         x: number, y: number, width: number, height: number,
         glassColor: number, frameColor = style.frame,
@@ -322,13 +342,14 @@ export class AdsManager {
           add("accent", -0.58, 0.96, 0.105, 0.13, 0.14, 0.035, 0xdfb77a);
           add("accent", -0.76, 1.34, 0.105, 0.20, 0.13, 0.035, 0x8caa70);
           add("accent", 0.41, 0.88, 0.098, 0.035, 0.14, 0.035, 0xd8c6a7);
+          add("trim", 0.59, 1.41, 0.081, 0.13, 0.30, 0.035, style.frame);
+          add("accent", 0.59, 1.41, 0.105, 0.075, 0.17, 0.025, 0xdfc99f);
           add("canopy", 0, 2.04, 0.22, 2.43, 0.11, 0.42, style.roof);
           for (let i = -2; i <= 2; i += 1) {
             add("accent", i * 0.48, 1.98, 0.443, 0.24, 0.065, 0.025,
               i % 2 === 0 ? style.accent : 0xe0cba9);
           }
-          add("trim", -1.07, 1.42, 0.073, 0.10, 2.48, 0.08, style.frame);
-          add("trim", 1.07, 1.42, 0.073, 0.10, 2.48, 0.08, style.frame);
+          pairedBeams(1.07, 1.42, 0.073, 0.10, 2.48, 0.08, style.frame);
           add("canopy", -0.75, 0.30, 0.11, 0.48, 0.17, 0.13, 0x9a7858);
           for (const leafX of [-0.87, -0.74, -0.61]) {
             add("accent", leafX, 0.49, 0.13, 0.055, 0.24, 0.025, 0x5a8058,
@@ -337,7 +358,7 @@ export class AdsManager {
           break;
         }
         case 1: {
-          // A compact depot: sloping side ribs, louvered windows, double
+          // A compact depot: straight side ribs, louvered windows, double
           // utility doors and a narrow metal hood distinguish the other K&B.
           doorX = 0;
           porchY = 1.86;
@@ -354,10 +375,11 @@ export class AdsManager {
               add("trim", ventX, ventY, 0.095, 0.30, 0.045, 0.035, style.trim);
             }
           }
+          add("trim", 1.02, 1.69, 0.087, 0.21, 0.24, 0.045, style.frame);
+          add("accent", 1.02, 1.69, 0.12, 0.12, 0.045, 0.025, 0xb2b8a4);
           add("canopy", 0, 2.09, 0.18, 2.34, 0.09, 0.35, style.roof);
           add("accent", 0, 2.03, 0.37, 2.30, 0.055, 0.04, style.accent);
-          add("trim", -1.04, 1.42, 0.105, 0.19, 2.62, 0.10, style.trim, -0.10);
-          add("trim", 1.04, 1.42, 0.105, 0.19, 2.62, 0.10, style.trim, 0.10);
+          pairedBeams(1.04, 1.42, 0.105, 0.19, 2.62, 0.10, style.trim);
           add("trim", 0, 2.87, 0.073, 2.18, 0.065, 0.07, style.frame);
           for (const ventX of [-0.92, 0.92]) {
             add("glazing", ventX, 2.73, 0.068, 0.23, 0.15, 1, 0x253e3c);
@@ -374,7 +396,7 @@ export class AdsManager {
           // little over-sign arms. Its front edge is a warm thin blade.
           doorX = 0.17;
           porchY = 1.84;
-          porchLights = [-0.48, 0.49];
+          porchLights = [-0.48, 0.48];
           signX = 0.05;
           pane(-0.63, 1.01, 0.68, 1.28, style.glass);
           pane(doorX, 0.91, 0.63, 1.61, style.door);
@@ -385,13 +407,15 @@ export class AdsManager {
           add("accent", -0.53, 0.93, 0.105, 0.17, 0.14, 0.035, 0xd9bb76);
           add("accent", -0.68, 1.34, 0.105, 0.16, 0.17, 0.035, 0x8cba80);
           add("trim", 0.39, 0.82, 0.102, 0.035, 0.13, 0.035, style.frame);
+          for (const ventY of [1.30, 1.38, 1.46]) {
+            add("accent", 0.60, ventY, 0.095, 0.13, 0.025, 0.025, style.trim);
+          }
           add("canopy", 0, 2.05, 0.23, 2.40, 0.09, 0.40, style.roof);
           add("accent", 0, 1.99, 0.44, 2.38, 0.035, 0.03, style.accent);
-          add("trim", -1.07, 1.40, 0.092, 0.16, 2.62, 0.09, style.trim, -0.09);
-          add("trim", 1.08, 1.40, 0.092, 0.12, 2.62, 0.09, style.trim);
-          for (const armX of [-0.55, 0.62]) {
+          pairedBeams(1.07, 1.40, 0.092, 0.15, 2.62, 0.09, style.trim);
+          for (const armX of [-0.59, 0.59]) {
             add("trim", armX, 2.91, 0.14, 0.045, 0.11, 0.08, style.frame);
-            add("lamp", armX + 0.05, 2.87, 0.21, 0.21, 0.035, 0.07, 0xffe4ad);
+            add("lamp", armX, 2.87, 0.21, 0.21, 0.035, 0.07, 0xffe4ad);
           }
           add("canopy", -0.75, 0.30, 0.11, 0.44, 0.17, 0.13, 0x9c7857);
           for (const leafX of [-0.84, -0.72, -0.61]) {
@@ -418,15 +442,81 @@ export class AdsManager {
             add("accent", bayX - 0.10, 0.99, 0.105, 0.10, 0.16, 0.025, 0x83a45e);
             add("accent", bayX + 0.10, 0.99, 0.105, 0.10, 0.16, 0.025, 0xd3a166);
           }
+          for (const bayX of [-0.78, 0.78]) {
+            add("accent", bayX, 1.79, 0.09, 0.24, 0.05, 0.035, style.trim);
+          }
           add("canopy", 0, 2.13, 0.23, 2.44, 0.11, 0.43, style.roof);
           add("accent", 0, 2.07, 0.46, 2.40, 0.05, 0.03, style.accent);
-          add("trim", -1.07, 1.48, 0.08, 0.075, 2.55, 0.08, style.frame);
-          add("trim", 1.07, 1.48, 0.08, 0.075, 2.55, 0.08, style.frame);
+          pairedBeams(1.07, 1.48, 0.08, 0.075, 2.55, 0.08, style.frame);
           add("canopy", 0, 2.88, 0.06, 2.42, 0.10, 0.15, style.trim);
           add("canopy", 0, 2.96, 0.06, 1.65, 0.045, 0.16, style.roof);
           for (const ribX of [-0.84, -0.56, 0.56, 0.84]) {
             add("accent", ribX, 2.09, 0.47, 0.035, 0.15, 0.04, style.frame);
           }
+          break;
+        }
+      }
+
+      // Small service-side details give each building a different back while
+      // leaving the platform itself as the only wall and collider. Boxes are
+      // reused in the existing static batches; nothing protrudes onto ramps.
+      switch (transform.platformIndex) {
+        case 0: {
+          // A delivery door with a small exit plaque and a high louver.
+          back("trim", 0.53, 0.89, 0.68, 1.67, 0.045, style.door);
+          back("trim", 0.53, 1.75, 0.76, 0.07, 0.07, style.frame, 0.015);
+          for (const edgeX of [0.16, 0.90]) {
+            back("trim", edgeX, 0.89, 0.045, 1.74, 0.06, style.frame, 0.015);
+          }
+          back("accent", 0.28, 0.93, 0.045, 0.12, 0.06, style.trim, 0.045);
+          back("accent", 0.53, 1.91, 0.58, 0.12, 0.035, 0xe6d8b8);
+          back("trim", -0.64, 1.73, 0.69, 0.43, 0.045, 0x5c6a64);
+          for (const ventY of [1.59, 1.69, 1.79, 1.89]) {
+            back("accent", -0.64, ventY, 0.60, 0.025, 0.025, style.trim, 0.04);
+          }
+          break;
+        }
+        case 1: {
+          // Metal shutter and a compact condenser with three readable slats.
+          back("trim", 0.55, 1.07, 0.71, 1.40, 0.045, 0x304c43);
+          for (const shutterY of [0.72, 0.96, 1.20, 1.44, 1.68]) {
+            back("accent", 0.55, shutterY, 0.68, 0.035, 0.035, 0x7e9a8b, 0.035);
+          }
+          back("canopy", -0.58, 1.89, 0.66, 0.54, 0.17, 0x73867b);
+          back("trim", -0.58, 1.89, 0.53, 0.39, 0.035, 0x344b47, 0.18);
+          for (const ventY of [1.78, 1.89, 2.00]) {
+            back("accent", -0.58, ventY, 0.42, 0.025, 0.03, 0xb0b7a2, 0.22);
+          }
+          back("trim", -0.83, 1.46, 0.035, 0.30, 0.055, style.trim);
+          back("trim", -0.33, 1.46, 0.035, 0.30, 0.055, style.trim);
+          break;
+        }
+        case 2: {
+          // A service door and a small square window break up the olive back.
+          back("trim", 0.57, 0.91, 0.64, 1.64, 0.045, style.door);
+          for (const edgeX of [0.23, 0.91]) {
+            back("trim", edgeX, 0.91, 0.045, 1.70, 0.06, style.frame, 0.015);
+          }
+          back("accent", 0.30, 0.93, 0.045, 0.13, 0.06, 0xe0bc84, 0.045);
+          back("trim", -0.56, 1.64, 0.69, 0.62, 0.045, 0x3b5750);
+          back("trim", -0.56, 1.64, 0.045, 0.67, 0.055, style.frame, 0.015);
+          back("trim", -0.56, 1.64, 0.73, 0.045, 0.055, style.frame, 0.015);
+          back("canopy", -0.56, 1.28, 0.78, 0.09, 0.11, style.roof);
+          break;
+        }
+        case 3: {
+          // A narrow service hatch, ventilation grille and short drainpipe.
+          back("trim", -0.49, 0.93, 0.65, 1.58, 0.045, style.door);
+          back("trim", -0.49, 1.76, 0.74, 0.07, 0.07, style.frame, 0.015);
+          for (const edgeX of [-0.84, -0.14]) {
+            back("trim", edgeX, 0.93, 0.045, 1.65, 0.06, style.frame, 0.015);
+          }
+          back("accent", -0.25, 0.91, 0.045, 0.12, 0.06, style.trim, 0.045);
+          back("trim", 0.52, 1.54, 0.68, 0.42, 0.045, 0x53766c);
+          for (const ventY of [1.40, 1.49, 1.58, 1.67]) {
+            back("accent", 0.52, ventY, 0.57, 0.025, 0.025, 0xc4d4b9, 0.04);
+          }
+          back("trim", 0.99, 0.67, 0.045, 1.20, 0.08, style.frame);
           break;
         }
       }
