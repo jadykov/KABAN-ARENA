@@ -1,5 +1,6 @@
 import * as THREE from "three";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AdsManager } from "../ads/AdsLoader";
 import {
   AIRBORNE_VY_THRESHOLD,
   ARENA_HALF_SIZE,
@@ -52,8 +53,12 @@ import {
   SCENE_WARM_LIGHT,
   SKY_DAWN_BG,
   SKY_DAWN_FOG,
+  SKY_CLOUD_DAY,
+  SKY_CLOUD_SUNSET,
   SKY_DAY_BG,
   SKY_DAY_FOG,
+  SKY_SUN_DISC,
+  SKY_SUNSET_DISC,
   SKY_SUNSET_BG,
   SKY_SUNSET_FOG,
 } from "../palette";
@@ -126,7 +131,9 @@ describe("SceneManager camera clamp + wall fade", () => {
 });
 
 describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", () => {
-  async function createManagerWithScene(): Promise<{ manager: SceneManager; scene: THREE.Scene }> {
+  async function createManagerWithScene(): Promise<{
+    manager: SceneManager; scene: THREE.Scene; camera: THREE.PerspectiveCamera;
+  }> {
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 200);
     const manager = new SceneManager(scene, camera);
@@ -134,7 +141,7 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     const ready = await manager.initPhysics();
     expect(ready).toBe(true);
     managers.push(manager);
-    return { manager, scene };
+    return { manager, scene, camera };
   }
 
   it("starts at dawn with one shadow key and one ambient fill", async () => {
@@ -267,6 +274,152 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     manager.setDayProgress(0);
     expect(background.getHex()).toBe(SKY_DAWN_BG);
     expect(stars.material.opacity).toBe(0);
+  });
+
+  it("rises and sets the visible sun while keeping the one key aligned with it", async () => {
+    const { manager, scene, camera } = await createManagerWithScene();
+    const sun = scene.getObjectByName("sun") as THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
+    const key = scene.children.find((child): child is THREE.DirectionalLight => child instanceof THREE.DirectionalLight)!;
+    camera.aspect = 9 / 16;
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
+    const projectedSun = new THREE.Vector3();
+    const expectInPortraitView = (maxY = 1): void => {
+      sun.getWorldPosition(projectedSun).project(camera);
+      expect(Math.abs(projectedSun.x)).toBeLessThan(1);
+      expect(projectedSun.y).toBeLessThanOrEqual(maxY);
+      expect(projectedSun.y).toBeGreaterThan(-1);
+    };
+    expect(sun.geometry.parameters.radius).toBe(2.8);
+    expect(sun.material.color.getHex()).toBe(SKY_SUN_DISC);
+    expect(sun.position.y).toBeCloseTo(0);
+    expect(sun.material.opacity).toBeGreaterThan(0.9);
+    expect(key.position.x).toBeLessThan(0);
+    expectInPortraitView();
+    const dawnX = sun.position.x;
+
+    manager.setDayProgress(0.35);
+    expect(sun.position.x).toBeGreaterThan(dawnX);
+    expect(sun.position.y).toBeGreaterThan(5.5);
+    expect(sun.position.y).toBeLessThan(7);
+    expect(sun.material.opacity).toBeGreaterThan(0.9);
+    expectInPortraitView(0.95);
+
+    manager.setDayProgress(0.68);
+    expect(sun.position.x).toBeGreaterThan(0);
+    expect(sun.position.y).toBeGreaterThan(0);
+    expect(sun.position.y).toBeLessThan(3);
+    expect(sun.material.color.getHex()).toBe(SKY_SUNSET_DISC);
+    expect(sun.material.opacity).toBeGreaterThan(0);
+    expect(key.position.x).toBeGreaterThan(0);
+    expectInPortraitView();
+
+    manager.setDayProgress(0.76);
+    expect(sun.position.y).toBeLessThan(0);
+    expect(sun.material.opacity).toBe(0);
+    expect(sun.visible).toBe(false);
+    manager.setDayProgress(1);
+    expect(scene.children.filter((child) => child instanceof THREE.Light)).toHaveLength(2);
+    manager.setDayProgress(0);
+    expect(sun.visible).toBe(true);
+    expect(sun.position.x).toBeCloseTo(dawnX);
+  });
+
+  it("uses one nine-lobe low-poly cloud batch and fades it by night", async () => {
+    const { manager, scene, camera } = await createManagerWithScene();
+    camera.aspect = 9 / 16;
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
+    const clouds = scene.getObjectByName("day-clouds") as THREE.InstancedMesh<THREE.IcosahedronGeometry, THREE.MeshBasicMaterial>;
+    expect(clouds).toBeInstanceOf(THREE.InstancedMesh);
+    expect(clouds.count).toBe(9);
+    expect(clouds.geometry).toBeInstanceOf(THREE.IcosahedronGeometry);
+    expect(clouds.geometry.parameters.detail).toBe(0);
+    expect(clouds.material.map).toBeNull();
+    expect(clouds.material.fog).toBe(false);
+    expect(clouds.material.depthWrite).toBe(false);
+    expect(clouds.material.color.getHex()).toBe(SKY_CLOUD_DAY);
+    const cloudMatrix = new THREE.Matrix4();
+    const cloudPosition = new THREE.Vector3();
+    const cloudRotation = new THREE.Quaternion();
+    const cloudScale = new THREE.Vector3();
+    const projectedCloud = new THREE.Vector3();
+    const centersInPortraitView = [0, 0, 0];
+    const clusterCenterXs: number[] = [];
+    for (let i = 0; i < clouds.count; i += 1) {
+      clouds.getMatrixAt(i, cloudMatrix);
+      cloudMatrix.decompose(cloudPosition, cloudRotation, cloudScale);
+      expect(cloudPosition.y).toBeGreaterThan(6);
+      expect(cloudPosition.y).toBeLessThan(9);
+      expect(Math.max(Math.abs(cloudPosition.x), Math.abs(cloudPosition.z))).toBeGreaterThan(ARENA_HALF_SIZE);
+      projectedCloud.copy(cloudPosition).project(camera);
+      if (i % 3 === 1) clusterCenterXs.push(projectedCloud.x);
+      if (Math.abs(projectedCloud.x) < 1 && Math.abs(projectedCloud.y) < 1) {
+        centersInPortraitView[Math.floor(i / 3)]! += 1;
+      }
+    }
+    for (const count of centersInPortraitView) expect(count).toBeGreaterThanOrEqual(1);
+    expect(clusterCenterXs[0]).toBeLessThan(-0.3);
+    expect(Math.abs(clusterCenterXs[1]!)).toBeLessThan(0.2);
+    expect(clusterCenterXs[2]).toBeGreaterThan(0.3);
+    const dawnOpacity = clouds.material.opacity;
+    manager.setDayProgress(0.32);
+    expect(clouds.material.opacity).toBeGreaterThan(dawnOpacity);
+    manager.setDayProgress(0.68);
+    expect(clouds.material.color.getHex()).toBe(SKY_CLOUD_SUNSET);
+    expect(clouds.material.opacity).toBeGreaterThan(0);
+    manager.setDayProgress(0.84);
+    expect(clouds.material.opacity).toBe(0);
+    expect(clouds.visible).toBe(false);
+    manager.setDayProgress(0);
+    expect(clouds.visible).toBe(true);
+    expect(clouds.material.opacity).toBeCloseTo(dawnOpacity);
+  });
+
+  it("turns shop porches on in the final minute and resets them for dawn", async () => {
+    const porch = vi.spyOn(AdsManager.prototype, "setPorchLighting");
+    try {
+      const { manager } = await createManagerWithScene();
+      expect(porch).toHaveBeenLastCalledWith(0);
+      manager.setDayProgress(2 / 3);
+      expect(porch).toHaveBeenLastCalledWith(0);
+      manager.setDayProgress(0.685);
+      const partial = porch.mock.lastCall?.[0] ?? 0;
+      expect(partial).toBeGreaterThan(0);
+      expect(partial).toBeLessThan(1);
+      manager.setDayProgress(0.72);
+      expect(porch).toHaveBeenLastCalledWith(1);
+      manager.setDayProgress(1);
+      expect(porch).toHaveBeenLastCalledWith(1);
+      manager.setDayProgress(0);
+      expect(porch).toHaveBeenLastCalledWith(0);
+
+      // A late join builds the shops at the already authoritative time.
+      const late = new SceneManager(new THREE.Scene(), new THREE.PerspectiveCamera());
+      late.setDayProgress(0.8);
+      late.build();
+      managers.push(late);
+      expect(porch).toHaveBeenLastCalledWith(1);
+    } finally {
+      porch.mockRestore();
+    }
+  });
+
+  it("releases sun and cloud resources with the scene", async () => {
+    const { manager, scene } = await createManagerWithScene();
+    const sun = scene.getObjectByName("sun") as THREE.Mesh;
+    const clouds = scene.getObjectByName("day-clouds") as THREE.InstancedMesh;
+    const sunGeometryDispose = vi.spyOn(sun.geometry, "dispose");
+    const sunMaterialDispose = vi.spyOn(sun.material as THREE.Material, "dispose");
+    const cloudGeometryDispose = vi.spyOn(clouds.geometry, "dispose");
+    const cloudMaterialDispose = vi.spyOn(clouds.material as THREE.Material, "dispose");
+    manager.dispose();
+    expect(sunGeometryDispose).toHaveBeenCalledOnce();
+    expect(sunMaterialDispose).toHaveBeenCalledOnce();
+    expect(cloudGeometryDispose).toHaveBeenCalledOnce();
+    expect(cloudMaterialDispose).toHaveBeenCalledOnce();
+    expect(scene.getObjectByName("sun")).toBeUndefined();
+    expect(scene.getObjectByName("day-clouds")).toBeUndefined();
   });
 
   it("drifts 6 dimmed fireflies as one InstancedMesh (blink subset + wander/hover)", async () => {

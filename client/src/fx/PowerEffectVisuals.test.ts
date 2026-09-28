@@ -31,10 +31,20 @@ describe("power effect visuals", () => {
     try {
       const badge = rig.children.find((child) => child instanceof THREE.Sprite);
       expect(badge?.visible).toBe(false);
+      expect(badge?.scale.x).toBeCloseTo(0.36);
+      expect(badge?.scale.y).toBeCloseTo(0.36);
+      // The 2m-tall capsule ends at rig y=1.0; the badge stays just above
+      // the head for the whole announcement instead of drifting off-screen.
+      expect((badge?.position.y ?? 0) - (badge?.scale.y ?? 0) / 2).toBeGreaterThan(1);
+      expect(badge?.position.y).toBeLessThan(1.8);
+      // Camera look-at is rig y=1.2, so the badge's lower edge leaves the
+      // crosshair clear even at the close charge zoom.
+      expect((badge?.position.y ?? 0) - (badge?.scale.y ?? 0) / 2).toBeGreaterThan(1.2);
       effects.showPickup("shield");
       expect(badge?.visible).toBe(true);
       effects.update(0.5);
       expect(badge?.visible).toBe(true);
+      expect(badge?.position.y).toBeCloseTo(1.55);
       effects.update(0.51);
       expect(badge?.visible).toBe(false);
       effects.showPickup("speed");

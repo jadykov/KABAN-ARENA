@@ -7,7 +7,7 @@
 - Guest flow, no auth: pick nick + press Play; empty nick falls back to `Guest-XXXX`; late join mid-match till round end.
 - Every round lasts 3 minutes; the highest score at the end wins (`server/src/config.ts`, `server/src/rooms/ArenaRoom.ts`).
 - Performance priority over graphics: stable ~60fps target on mid phones (mid Android 2021, iPhones 14/15/16).
-- Art: stylized low-poly arena with worn floor tiles, smooth bog pools, and four small platform shopfronts. The floating center banner has been removed.
+- Art: stylized low-poly arena with worn floor tiles, smooth bog pools, four distinct small platform shopfronts, a moving sun and light daytime clouds. The floating center banner has been removed.
 
 ## Stack
 
@@ -94,8 +94,8 @@
 - Charge throw: hold to charge, `CHARGE_MAX_S 1.0` -> power01 [0.5, 1.0]; `RELOAD_MS 2500`; FULL threshold 0.8; tap <0.08s never fires (`server/src/config.ts:40,50-51`, `client/src/config.ts:234`).
 - Ballistics: speed 11-20 by power, gravity 3.5 lob, chest-exit muzzle 0.7m along aim dir, torso offset +0.3 (ground spawn y 1.4); zero spray; recoil kick 0.4-0.8m.
 - Super core: center spawn every 45s, 15s life, blink last 3s, 1.7m pickup; buffs NEXT shot x2 (consumed even on miss).
-- Three neutral pickup points: each awards either speed x1.25 for 5s or a shield that absorbs 25 damage for up to 10s; respawn 8s. Both effects are server authoritative. A one-second overhead SVG badge announces the effect, with subtle shield and wind visuals while it lasts.
-- Scene light follows the server's three-minute round clock from morning through day and sunset to deep night. The player-facing interface is Russian.
+- Three neutral pickup points: each awards either speed x1.25 for 5s or a shield that absorbs 25 damage for up to 10s; each point respawns 30s after collection. Both effects are server authoritative. A one-second compact overhead SVG badge announces the effect, with subtle shield and wind visuals while it lasts.
+- Scene light follows the server's three-minute round clock from morning through day and sunset to deep night. The visible sun moves across the horizon, light cloud silhouettes fade by night, and shop porch lights glow during the final minute without adding light sources. The player-facing interface is Russian.
 - Trampolines: trigger band y 1.7, cooldown 0.5s. Swamp: 0.22 movement speed, no glide, 15% smaller radius than the old ice circles. Ice: 0.65 movement speed, low friction (0.07), quick input acceleration, gentle coast, and a 0.06 input deadzone for touch-stick drift.
 - Round loop C2: lobby countdown 3s, respawn 3s, invuln 2s; late join till round end; rematch reset 5s after end.
 - Room guards: human-entry-counted capacity (bots ignored), explicit `room-full` reject, `ensureBots` capped by `players.size < MAX_PLAYERS`.

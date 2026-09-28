@@ -12,6 +12,10 @@ export const SKY_DAY_BG = 0x91b8c5;
 export const SKY_DAY_FOG = 0x9ebcbf;
 export const SKY_SUNSET_BG = 0x675f71;
 export const SKY_SUNSET_FOG = 0x807985;
+export const SKY_SUN_DISC = 0xffe6ad;
+export const SKY_SUNSET_DISC = 0xffaa7a;
+export const SKY_CLOUD_DAY = 0xf1f2e6;
+export const SKY_CLOUD_SUNSET = 0xe8bba7;
 // Cool slate walking surface. The grout and faint floor stars add scale
 // without competing with players, pickups, or aim feedback.
 export const BASE_FLOOR = 0x536b7b;

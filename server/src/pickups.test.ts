@@ -60,7 +60,8 @@ function setMove(room: ArenaRoom, x: number, z: number, charging = false): void 
 }
 
 describe("neutral server pickups", () => {
-  it("replicates three neutral positions, chooses either effect, and respawns after eight seconds", async () => {
+  it("replicates three neutral positions, chooses either effect, and respawns each point after 30 seconds", async () => {
+    expect(POWERUP_RESPAWN_MS).toBe(30_000);
     const { room, player } = await playingRoom();
     expect(room.state.pickups.size).toBe(3);
     const events: Array<{ playerId: string; slotId: number; kind: string; seq: number }> = [];
@@ -87,6 +88,10 @@ describe("neutral server pickups", () => {
     expect(room.state.pickups.get("0")?.active).toBe(false);
     tick(room, 1);
     expect(room.state.pickups.get("0")?.active).toBe(true);
+    expect(room.state.pickups.get("1")?.active).toBe(false);
+    tick(room);
+    expect(room.state.pickups.get("1")?.active).toBe(true);
+    expect(room.state.pickups.get("2")?.active).toBe(false);
     player.x = ARENA_LAYOUT.pickups[0]!.x;
     player.z = ARENA_LAYOUT.pickups[0]!.z;
     room.pickupRandom = () => 0.9;

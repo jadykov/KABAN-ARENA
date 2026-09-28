@@ -81,7 +81,7 @@ export const ROUND_DURATION_MS = 180000; // 3 min
 export const REMATCH_DELAY_MS = 5000; // ended -> clean reset delay
 
 // Neutral arena pickups: every pickup independently grants one random effect.
-export const POWERUP_RESPAWN_MS = 8000;
+export const POWERUP_RESPAWN_MS = 30_000;
 export const POWERUP_PICKUP_RADIUS = 1.2;
 export const SHIELD_DURATION_MS = 10000;
 export const SHIELD_CAPACITY = 25;

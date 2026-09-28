@@ -4,8 +4,10 @@ import { HL_SHIELD, HL_CHARTREUSE_BRIGHT } from "../palette";
 export type PowerEffectKind = "shield" | "speed";
 
 const BADGE_SECONDS = 1;
-const BADGE_SIZE_M = 0.72;
-const BADGE_Y_M = 2.9;
+const BADGE_SIZE_M = 0.36;
+// The capsule crown is 1m above the rig origin. Keep the small badge just
+// clear of it so the follow camera sees it without losing it near the top.
+const BADGE_Y_M = 1.55;
 const SHIELD_RADIUS_M = 0.88;
 const SHIELD_PULSE_AMPLITUDE = 0.035;
 const SHIELD_PULSE_RATE = 2.4;
@@ -141,8 +143,6 @@ export class PowerEffectVisuals {
     if (this.badgeLeft > 0) {
       this.badgeLeft = Math.max(0, this.badgeLeft - deltaSeconds);
       this.badge.visible = this.badgeLeft > 0;
-      const rise = (BADGE_SECONDS - this.badgeLeft) * 0.12;
-      this.badge.position.y = BADGE_Y_M + rise;
     }
   }
 

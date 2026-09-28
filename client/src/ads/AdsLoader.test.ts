@@ -89,18 +89,26 @@ describe("AdsManager shop visuals and lifecycle", () => {
     ads.buildVisuals(scene);
     try {
       expect(ads.shopfrontCount).toBe(4);
-      expect(scene.children).toHaveLength(9); // four groups and five batches
+      expect(scene.children).toHaveLength(11); // four signs/groups and seven batches
       const batches = scene.children.filter((child): child is THREE.InstancedMesh => child instanceof THREE.InstancedMesh);
-      expect(batches.map((batch) => [batch.name, batch.count])).toEqual([
-        ["shop-static:facade", 4],
-        ["shop-static:glazing", 12],
-        ["shop-static:trim", 16],
-        ["shop-static:canopy", 4],
-        ["shop-static:accent", 4],
+      expect(batches.map((batch) => batch.name)).toEqual([
+        "shop-static:facade",
+        "shop-static:glazing",
+        "shop-static:trim",
+        "shop-static:canopy",
+        "shop-static:accent",
+        "shop-static:lamp",
+        "shop-static:glow",
       ]);
+      expect(batches.find((batch) => batch.name === "shop-static:facade")?.count).toBe(4);
+      expect(batches.find((batch) => batch.name === "shop-static:glazing")!.count).toBeGreaterThan(12);
+      expect(batches.find((batch) => batch.name === "shop-static:trim")!.count).toBeGreaterThan(50);
+      expect(batches.find((batch) => batch.name === "shop-static:lamp")!.count).toBeGreaterThanOrEqual(7);
+      expect(batches.find((batch) => batch.name === "shop-static:glow")!.visible).toBe(false);
       let renderableCount = 0;
       scene.traverse((child) => { if (child instanceof THREE.Mesh) renderableCount += 1; });
-      expect(renderableCount).toBe(13); // five batches + eight sign parts
+      expect(renderableCount).toBe(15); // seven batches + eight sign parts
+      expect(scene.children.some((child) => child instanceof THREE.Light)).toBe(false);
       expect(scene.getObjectByName("arena-banner")).toBeUndefined();
       expect(scene.getObjectByName("arena-banner-rig")).toBeUndefined();
       const shops = scene.children.filter((child) => child.name.startsWith("shopfront:"));
@@ -148,18 +156,80 @@ describe("AdsManager shop visuals and lifecycle", () => {
         const sy = shop.topY / 3;
         const w = shop.facadeWidth;
         checkInstance("facade", index, index, [0, 1.45 * sy, 0.025], [w, 2.72 * sy, 1]);
-        checkInstance("glazing", index * 3, index, [0, 0.87 * sy, 0.045], [w * 0.34, 1.48 * sy, 1]);
       });
-      const shop = getShopfrontTransforms()[2]!;
-      const sy = shop.topY / 3;
-      checkInstance("trim", 2 * 4 + 2, 2, [shop.facadeWidth * 0.34 * 0.32, 0.82 * sy, 0.07], [0.035, 0.12 * sy, 0.025]);
-      checkInstance("canopy", 2, 2, [0, 1.99 * sy, 0.21], [shop.facadeWidth * 1.03, 0.10 * sy, 0.42]);
-      checkInstance("accent", 2, 2, [0, 1.93 * sy, 0.425], [shop.facadeWidth * 1.03, 0.045 * sy, 0.035]);
+
+      const facadeBatch = scene.getObjectByName("shop-static:facade") as THREE.InstancedMesh;
+      const facadeColors = Array.from({ length: 4 }, (_, index) => {
+        const color = new THREE.Color();
+        facadeBatch.getColorAt(index, color);
+        return color.getHex();
+      });
+      expect(new Set(facadeColors).size).toBe(4);
+
+      const getLocalParts = (kind: string, shopIndex: number): Array<{ position: THREE.Vector3; scale: THREE.Vector3; rotation: THREE.Quaternion }> => {
+        const batch = scene.getObjectByName(`shop-static:${kind}`) as THREE.InstancedMesh;
+        const shop = shops[shopIndex]!;
+        shop.updateMatrixWorld(true);
+        const inverse = shop.matrixWorld.clone().invert();
+        const parts = [];
+        for (let index = 0; index < batch.count; index += 1) {
+          const matrix = new THREE.Matrix4();
+          batch.getMatrixAt(index, matrix);
+          const local = inverse.clone().multiply(matrix);
+          const position = new THREE.Vector3();
+          const rotation = new THREE.Quaternion();
+          const scale = new THREE.Vector3();
+          local.decompose(position, rotation, scale);
+          if (Math.abs(position.x) < 1.5 && Math.abs(position.z) < 0.65) {
+            parts.push({ position, scale, rotation });
+          }
+        }
+        return parts;
+      };
+      const canopyShapes = shops.map((_, index) => getLocalParts("canopy", index)
+        .map(({ position, scale }) => [position.y.toFixed(2), position.z.toFixed(2), scale.x.toFixed(2)].join(":"))
+        .join("|"));
+      expect(new Set(canopyShapes).size).toBe(4);
+      expect(getLocalParts("trim", 1).some(({ rotation }) => Math.abs(rotation.z) > 0.04)).toBe(true);
+      expect(getLocalParts("trim", 0).some(({ rotation }) => Math.abs(rotation.z) > 0.04)).toBe(false);
+      expect(getLocalParts("accent", 0).length).toBeGreaterThan(getLocalParts("accent", 1).length);
       expect(batches.every((batch) => batch.boundingSphere !== null)).toBe(true);
     } finally {
       ads.dispose(scene);
       expect(scene.children).toHaveLength(0);
     }
+  });
+
+  it("fades porch fixtures and entrance glow, clamps input, and resets after disposal", () => {
+    const scene = new THREE.Scene();
+    const ads = new AdsManager();
+    ads.setPorchLighting(0.4); // SceneManager may set progress before visuals exist.
+    ads.buildVisuals(scene);
+    const lamp = scene.getObjectByName("shop-static:lamp") as THREE.InstancedMesh<THREE.BoxGeometry, THREE.MeshStandardMaterial>;
+    const glow = scene.getObjectByName("shop-static:glow") as THREE.InstancedMesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+    expect(lamp.material.emissiveIntensity).toBeCloseTo(0.96, 6);
+    expect(glow.material.opacity).toBeCloseTo(0.208, 6);
+    expect(glow.visible).toBe(true);
+
+    ads.setPorchLighting(4);
+    expect(lamp.material.emissiveIntensity).toBeCloseTo(2.4, 6);
+    expect(glow.material.opacity).toBeCloseTo(0.52, 6);
+    ads.setPorchLighting(-3);
+    expect(lamp.material.emissiveIntensity).toBe(0);
+    expect(glow.material.opacity).toBe(0);
+    expect(glow.visible).toBe(false);
+    ads.setPorchLighting(Number.NaN);
+    expect(lamp.material.emissiveIntensity).toBe(0);
+
+    const glowTexture = glow.material.map!;
+    const textureDispose = vi.spyOn(glowTexture, "dispose");
+    ads.setPorchLighting(1);
+    ads.dispose(scene);
+    expect(textureDispose).toHaveBeenCalledTimes(1);
+    expect(scene.children).toHaveLength(0);
+    ads.buildVisuals(scene);
+    expect((scene.getObjectByName("shop-static:glow") as THREE.InstancedMesh).visible).toBe(false);
+    ads.dispose(scene);
   });
 
   it("shares repeated brand texture and disposes all resources", async () => {
