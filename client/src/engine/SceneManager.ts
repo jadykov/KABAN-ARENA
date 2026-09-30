@@ -84,7 +84,7 @@ import {
   TRAMPOLINE_TRIGGER_Y,
   WALL_FADE_OPACITY,
   WALL_GLASS_OPACITY,
-  WALL_HEIGHT,
+  WALL_VISUAL_HEIGHT,
 } from "../config";
 import { ArenaBuilder, getObstacleLayout, getPlatforms, getTrampolineAt, isOnIce, isOnSwamp } from "../arena/Arena";
 import { PowerUpPickups, PowerUpState } from "../arena/PowerUps";
@@ -2479,15 +2479,13 @@ export class SceneManager {
     const wasOutside = Math.abs(rawX) > limit || Math.abs(rawZ) > limit;
     this.camera.position.x = THREE.MathUtils.clamp(this.camera.position.x, -limit, limit);
     this.camera.position.z = THREE.MathUtils.clamp(this.camera.position.z, -limit, limit);
-    const lowBehindWall = this.camera.position.y < WALL_HEIGHT + 0.6
+    const lowBehindWall = this.camera.position.y < WALL_VISUAL_HEIGHT + 0.6
       && (Math.abs(this.camera.position.x) > ARENA_HALF_SIZE - 1
         || Math.abs(this.camera.position.z) > ARENA_HALF_SIZE - 1);
     if (wasOutside || lowBehindWall) {
       this.arena.setWallOpacity(WALL_FADE_OPACITY);
     } else {
-      // Glass rest state (Stage 4d.3): the walls idle at glass opacity, never
-      // opaque — the night sky stays visible through them. Fade (above) drops
-      // toward more-transparent only while the camera crowds a wall.
+      // Restore the sports wire/frame visibility after leaving the fence.
       this.arena.setWallOpacity(WALL_GLASS_OPACITY);
     }
     this.camera.lookAt(this.smoothCamLook);

@@ -178,9 +178,11 @@ export const KNOCKBACK_IMPULSE = 9;
 // Stage 3 arena (QD2-A neon-warehouse, QD5-A 6-8 low symmetric blocks).
 export const OBSTACLE_COUNT = ARENA_LAYOUT.obstacles.length;
 // Playtest round (owner: sense of open space): perimeter walls halved 3 -> 1.5
-// so the camera can see over them. All wall readers (Arena colliders and
-// neon strips, SceneManager lowBehindWall) derive from this constant.
+// so the camera can see over them. Physics retains this boundary height;
+// the taller decorative sports enclosure uses WALL_VISUAL_HEIGHT below.
 export const WALL_HEIGHT = 1.5;
+// Sports enclosure is taller visually; authoritative collision height stays unchanged.
+export const WALL_VISUAL_HEIGHT = 3.5;
 export const WALL_THICKNESS = 0.5;
 // Legacy single-radius aliases remain for existing tuning/tests. The actual
 // collision queries use each editable zone's own radius from ARENA_LAYOUT.
@@ -457,20 +459,10 @@ export const RAMP_SLAB_THICKNESS = 0.2;
 export const PLATFORM_CAP_DROP = 0.005;
 // Camera-wall occlusion: camera clamped inside HALF + this margin (wall line).
 export const CAMERA_WALL_MARGIN = 0.5;
-// Stage 4d.3 glass walls (feedback round: owner says the first 0.4 pass
-// still reads solid — diagnosis: 0.4 over dark violet BASE_WALL blocks ~60%
-// of the starlight, so the wall never reads as glass). Rest opacity is the
-// UPPER clamp (WALL_GLASS_OPACITY 0.2 — clearly see-through: stars + nebulae
-// read through from inside; the boundary still reads via the opaque neon top
-// strips + floor edge, which never fade); while the camera sits low/close
-// behind a wall the opacity eases toward the LOWER clamp (WALL_FADE_OPACITY
-// 0.1 — the fighter stays visible; the 0.25 floor could NOT stay because a
-// fade must be <= the glass rest, so the pair was re-derived honestly as
-// 0.1..0.2). Same geometry/material, zero extra draw calls, collision
-// unchanged. depthWrite stays off so far-sky depth never occludes.
+// Retain the camera fade API's original range. The sports wire and support
+// frame map it to half/full visibility; the low opaque board never fades.
 export const WALL_GLASS_OPACITY = 0.2;
-// Faded wall opacity while the camera sits low/close behind a wall (pairs
-// with WALL_GLASS_OPACITY above — must stay <= the glass rest).
+// Camera close to/behind the enclosure: half visibility for upper wire/frame.
 export const WALL_FADE_OPACITY = 0.1;
 // Stage 4d.3 ambient dressing (zero light cost, +4 draw calls total:
 // fireflies 1 InstancedMesh + NEBULA_COUNT sprites — see SceneManager

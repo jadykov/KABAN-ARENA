@@ -3,7 +3,6 @@ import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeom
 import {
   ARENA_HALF_SIZE,
   ICE_FRICTION,
-  PLATFORM_CAP_DROP,
   PLATFORM_FIGURES,
   PLAYER_FRICTION,
   RAMP_SLAB_THICKNESS,
@@ -13,36 +12,27 @@ import {
   WALL_GLASS_OPACITY,
   WALL_HEIGHT,
   WALL_THICKNESS,
+  WALL_VISUAL_HEIGHT,
 } from "../config";
 import { ARENA_LAYOUT } from "../layout";
 import type { PhysicsWorld } from "../physics/World";
 import {
   ACCENT_ICE_GLOW,
-  ACCENT_OBSTACLE_TINT,
   ACCENT_SWAMP_BUBBLE,
   ACCENT_SWAMP_BUBBLE_LIGHT,
   ACCENT_SWAMP_MUD,
   ACCENT_SWAMP_MUD_EDGE,
   ACCENT_SWAMP_MUD_LIGHT,
   ACCENT_STRIP,
-  ACCENT_STRIP_BASE,
-  BASE_CAP,
-  BASE_FIGURE_TINTS,
   BASE_FLOOR,
   BASE_FLOOR_GROUT,
   BASE_FLOOR_LIGHT,
   BASE_ICE,
   BASE_ICE_EDGE,
   BASE_ICE_FACET,
-  BASE_OBSTACLE,
-  BASE_OBSTACLE_EDGE,
-  BASE_OBSTACLE_TOP,
   BASE_PAD,
   BASE_PAD_RIM,
-  BASE_PLATFORM,
-  BASE_PLATFORM_TOP,
   BASE_TRAMPOLINE,
-  BASE_WALL,
   BASE_WALL_PLINTH,
   HL_CHARTREUSE,
   HL_CHARTREUSE_DEEP,
@@ -92,6 +82,9 @@ export interface SpawnSpec {
   x: number;
   z: number;
 }
+
+const FENCE_BOARD_HEIGHT = 0.6;
+const TRAMPOLINE_NIGHT_GAIN = 1.3;
 
 // The shared JSON stores topY; Rapier's centered box needs half-height hy.
 export function getObstacleLayout(): ObstacleSpec[] {
@@ -239,7 +232,7 @@ export function getFrictionAt(x: number, z: number): number {
 export class ArenaBuilder {
   private readonly disposables: Array<{ dispose(): void }> = [];
   private readonly actors: THREE.Object3D[] = [];
-  private wallMaterial: THREE.MeshStandardMaterial | null = null;
+  private readonly fenceMaterials: THREE.Material[] = [];
   private wallOpacity = WALL_GLASS_OPACITY;
   private swampBubbles: THREE.InstancedMesh | null = null;
   private swampBubbleTime = 0;
@@ -306,23 +299,23 @@ export class ArenaBuilder {
     // so the capsule passes over them freely and never gets stuck on a lip.
   }
 
-  // Camera-wall occlusion over GLASS walls (Stage 4d.3): the rest state is
-  // the glass opacity itself (WALL_GLASS_OPACITY — transparent, stars show
-  // through); while the camera sits low/close behind a wall the opacity
-  // eases toward WALL_FADE_OPACITY (more transparent so the fighter stays
-  // visible, still opaque enough to read the boundary — anti-cheat intent
-  // kept). Clamp band is [FADE, GLASS]; transparent flips only below 1
-  // (always true for glass — assigned every call, no per-frame churn beyond
-  // the two existing fields). No extra lights, no new materials per frame.
+  // Preserve SceneManager's existing camera fade API. The wire net is open
+  // geometry at rest; only its wires and frame fade near a low camera. The
+  // low solid board always remains opaque, like a real sports enclosure.
   public setWallOpacity(opacity: number): void {
     const clamped = Number.isFinite(opacity)
       ? Math.max(WALL_FADE_OPACITY, Math.min(WALL_GLASS_OPACITY, opacity))
       : WALL_GLASS_OPACITY;
     this.wallOpacity = clamped;
-    if (this.wallMaterial !== null) {
-      this.wallMaterial.transparent = true;
-      this.wallMaterial.opacity = clamped;
-      this.wallMaterial.needsUpdate = false;
+    const wireOpacity = clamped / WALL_GLASS_OPACITY;
+    for (const material of this.fenceMaterials) {
+      const transparent = wireOpacity < 1;
+      if (material.transparent !== transparent) {
+        material.transparent = transparent;
+        material.needsUpdate = true;
+      }
+      material.opacity = wireOpacity;
+      material.depthWrite = !transparent;
     }
   }
 
@@ -366,7 +359,7 @@ export class ArenaBuilder {
       scene.remove(actor);
     }
     this.actors.length = 0;
-    this.wallMaterial = null;
+    this.fenceMaterials.length = 0;
     this.wallOpacity = WALL_GLASS_OPACITY;
     this.swampBubbles = null;
     this.swampBubbleTime = 0;
@@ -406,163 +399,265 @@ export class ArenaBuilder {
   }
 
   private buildWalls(scene: THREE.Scene): void {
-    // Four glass walls as a single InstancedMesh (unit box scaled per
-    // instance — same geometry, 1 draw call, zero growth vs opaque walls).
-    // Transparent glass (WALL_GLASS_OPACITY rest) shows the night sky through
-    // (stars + nebulae behind stay visible); depthWrite off so the far sky
-    // never gets occluded by the wall depth regardless of sort order
-    // (opaque bodies still blend correctly — they render in the opaque pass
-    // first). Collision unchanged (buildColliders untouched).
     const half = ARENA_HALF_SIZE;
     const t = WALL_THICKNESS;
-    const geometry = this.track(new THREE.BoxGeometry(1, 1, 1));
-    const material = this.track(
-      new THREE.MeshStandardMaterial({
-        color: BASE_WALL,
-        roughness: 0.3,
-        metalness: 0.1,
-        transparent: true,
-        opacity: this.wallOpacity,
-        depthWrite: false,
-      }),
-    );
-    const walls = new THREE.InstancedMesh(geometry, material, 4);
-    this.wallMaterial = material;
-    // Glass stays transparent in every state (rest and faded differ only in
-    // opacity within [FADE, GLASS] — see setWallOpacity).
-    this.wallMaterial.transparent = true;
-    this.wallMaterial.opacity = this.wallOpacity;
-    const matrix = new THREE.Matrix4();
-    const transforms: Array<{ x: number; z: number; sx: number; sz: number }> = [
-      { x: 0, z: -half - t / 2, sx: (half + t) * 2, sz: t },
-      { x: 0, z: half + t / 2, sx: (half + t) * 2, sz: t },
-      { x: -half - t / 2, z: 0, sx: t, sz: (half + t) * 2 },
-      { x: half + t / 2, z: 0, sx: t, sz: (half + t) * 2 },
+    const length = (half + t) * 2;
+    const transforms = [
+      { x: 0, z: -half - t / 2, turn: 0 },
+      { x: 0, z: half + t / 2, turn: 0 },
+      { x: -half - t / 2, z: 0, turn: Math.PI / 2 },
+      { x: half + t / 2, z: 0, turn: Math.PI / 2 },
     ];
-    transforms.forEach((transform, index) => {
-      matrix.makeScale(transform.sx, WALL_HEIGHT, transform.sz);
-      matrix.setPosition(transform.x, WALL_HEIGHT / 2, transform.z);
-      walls.setMatrixAt(index, matrix);
-    });
-    walls.instanceMatrix.needsUpdate = true;
-    walls.castShadow = true;
-    walls.receiveShadow = true;
-    this.place(walls, scene);
-
-    // A low, opaque plinth makes the boundary legible without hiding the
-    // night sky through the existing transparent wall mesh.
-    const plinthGeometry = this.track(new THREE.BoxGeometry(1, 1, 1));
-    const plinthMaterial = this.track(new THREE.MeshStandardMaterial({
-      color: BASE_WALL_PLINTH, roughness: 0.92,
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    const boardParts = emptyColoredParts();
+    const frameParts = emptyColoredParts();
+    const transform = new THREE.Matrix4();
+    const local = new THREE.Matrix4();
+    const matrix = new THREE.Matrix4();
+    const boardColor = new THREE.Color(0xc2c4b2);
+    const baseColor = new THREE.Color(BASE_WALL_PLINTH);
+    const frameColor = new THREE.Color(0x71847b);
+    const netPositions: number[] = [];
+    const point = new THREE.Vector3();
+    const spacing = 0.25;
+    const lowY = FENCE_BOARD_HEIGHT + 0.06;
+    const highY = WALL_VISUAL_HEIGHT - 0.06;
+    const addBox = (parts: ColoredParts, color: THREE.Color,
+      x: number, y: number, width: number, height: number, depth: number): void => {
+      local.makeScale(width, height, depth).setPosition(x, y, 0);
+      matrix.multiplyMatrices(transform, local);
+      appendColoredGeometry(box, matrix, color, parts.positions, parts.normals, parts.colors);
+    };
+    for (const wall of transforms) {
+      transform.makeRotationY(wall.turn).setPosition(wall.x, 0, wall.z);
+      addBox(boardParts, boardColor, 0, FENCE_BOARD_HEIGHT / 2, length, FENCE_BOARD_HEIGHT, t);
+      addBox(boardParts, baseColor, 0, 0.065, length, 0.13, t + 0.008);
+      // Narrow flush joints make the continuous lower board look assembled.
+      const panels = Math.ceil(length / 3);
+      for (let panel = 0; panel <= panels; panel += 1) {
+        const x = -length / 2 + panel / panels * length;
+        addBox(frameParts, frameColor, x, WALL_VISUAL_HEIGHT / 2, 0.075, WALL_VISUAL_HEIGHT, 0.075);
+        if (panel > 0 && panel < panels) {
+          addBox(boardParts, baseColor, x, FENCE_BOARD_HEIGHT / 2, 0.018, FENCE_BOARD_HEIGHT - 0.09, t + 0.009);
+        }
+      }
+      for (const y of [FENCE_BOARD_HEIGHT + 0.0325, WALL_VISUAL_HEIGHT - 0.0325]) {
+        addBox(frameParts, frameColor, 0, y, length, 0.065, 0.065);
+      }
+      // Two clipped diagonal families form real open diamonds. There is no
+      // transparent sheet behind the wires, so the exterior remains visible.
+      for (const slope of [-1, 1]) {
+        for (let offset = -length / 2 - highY; offset <= length / 2 + highY; offset += spacing) {
+          const ends: Array<[number, number]> = [];
+          for (const y of [lowY, highY]) {
+            const x = offset + slope * (y - lowY);
+            if (x >= -length / 2 && x <= length / 2) ends.push([x, y]);
+          }
+          for (const x of [-length / 2, length / 2]) {
+            const y = lowY + (x - offset) / slope;
+            if (y > lowY && y < highY) ends.push([x, y]);
+          }
+          if (ends.length !== 2) continue;
+          for (const [x, y] of ends) {
+            point.set(x, y, 0).applyMatrix4(transform);
+            netPositions.push(point.x, point.y, point.z);
+          }
+        }
+      }
+    }
+    box.dispose();
+    const boards = new THREE.Mesh(this.track(coloredPartsGeometry(boardParts)), this.track(
+      new THREE.MeshStandardMaterial({ color: NEUTRAL_WHITE, vertexColors: true, roughness: 0.91 }),
+    ));
+    boards.name = "sports-fence-boards";
+    boards.receiveShadow = true;
+    boards.castShadow = true;
+    this.place(boards, scene);
+    const frameMaterial = this.track(new THREE.MeshStandardMaterial({
+      color: NEUTRAL_WHITE, vertexColors: true, roughness: 0.7, metalness: 0.2,
     }));
-    const plinths = new THREE.InstancedMesh(plinthGeometry, plinthMaterial, 4);
-    plinths.name = "wall-plinths";
-    transforms.forEach((transform, index) => {
-      matrix.makeScale(transform.sx, 0.17, transform.sz);
-      matrix.setPosition(transform.x, 0.085, transform.z);
-      plinths.setMatrixAt(index, matrix);
-    });
-    plinths.instanceMatrix.needsUpdate = true;
-    plinths.receiveShadow = true;
-    this.place(plinths, scene);
-
-    // Amber top strips follow the original wall footprint and light budget.
-    const stripGeometry = this.track(new THREE.BoxGeometry(1, 0.08, 1));
-    const stripMaterial = this.track(
-      new THREE.MeshStandardMaterial({
-        color: ACCENT_STRIP_BASE,
-        emissive: ACCENT_STRIP,
-        emissiveIntensity: 1.0,
-      }),
-    );
-    const strips = new THREE.InstancedMesh(stripGeometry, stripMaterial, 4);
-    transforms.forEach((transform, index) => {
-      matrix.makeScale(transform.sx, 1, transform.sz);
-      matrix.setPosition(transform.x, WALL_HEIGHT + 0.04, transform.z);
-      strips.setMatrixAt(index, matrix);
-    });
-    strips.instanceMatrix.needsUpdate = true;
-    this.place(strips, scene);
+    const frame = new THREE.Mesh(this.track(coloredPartsGeometry(frameParts)), frameMaterial);
+    frame.name = "sports-fence-frame";
+    frame.receiveShadow = true;
+    this.place(frame, scene);
+    const netGeometry = this.track(new THREE.BufferGeometry());
+    netGeometry.setAttribute("position", new THREE.Float32BufferAttribute(netPositions, 3));
+    netGeometry.computeBoundingSphere();
+    const netMaterial = this.track(new THREE.LineBasicMaterial({ color: 0x667a70 }));
+    const net = new THREE.LineSegments(netGeometry, netMaterial);
+    net.name = "sports-fence-diamond-net";
+    this.place(net, scene);
+    this.fenceMaterials.push(frameMaterial, netMaterial);
+    this.setWallOpacity(this.wallOpacity);
   }
 
   private buildObstacles(scene: THREE.Scene): void {
-    const specs = getObstacleLayout();
-    // Face colors are already lit material colors. A white material prevents
-    // the bright moss tops from being multiplied back into darkness.
-    const geometry = this.track(new RoundedBoxGeometry(1, 1, 1, 2, 0.055));
-    paintBoxFaceVertices(geometry, BASE_OBSTACLE_TOP, BASE_OBSTACLE);
-    const material = this.track(
-      new THREE.MeshStandardMaterial({
-        color: NEUTRAL_WHITE,
-        roughness: 0.94,
-        metalness: 0,
-        vertexColors: true,
-      }),
-    );
-    const blocks = new THREE.InstancedMesh(geometry, material, specs.length);
-    blocks.name = "arena-obstacles";
+    // The four 2m covers are shop stock: full wooden crates, mixed cartons,
+    // palletized timber, and a taped carton stack. All upper panels remain on
+    // the saved landing height; every detail fits the original solid volume.
+    const timber = emptyColoredParts();
+    const packaging = emptyColoredParts();
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    const coverMatrix = new THREE.Matrix4();
+    const local = new THREE.Matrix4();
     const matrix = new THREE.Matrix4();
-    const accent = new THREE.Color(ACCENT_OBSTACLE_TINT);
-    const plain = new THREE.Color(NEUTRAL_WHITE);
-    specs.forEach((spec, index) => {
-      matrix.makeScale(spec.hx * 2, spec.hy * 2, spec.hz * 2);
-      matrix.setPosition(spec.x, spec.hy, spec.z);
-      blocks.setMatrixAt(index, matrix);
-      // Alternating pale leaf tones keep all blocks in the same material family.
-      blocks.setColorAt(index, index % 2 === 0 ? plain : accent);
-    });
-    blocks.instanceMatrix.needsUpdate = true;
-    if (blocks.instanceColor !== null) {
-      blocks.instanceColor.needsUpdate = true;
-    }
-    blocks.castShadow = true;
-    blocks.receiveShadow = true;
-    this.place(blocks, scene);
-
-    // Thin inset paint on the existing top perimeter. The trim is visual
-    // only, so the authoritative cover footprints and heights remain exact.
-    const edgeGeometry = this.track(new RoundedBoxGeometry(1, 1, 1, 2, 0.07));
-    const edgeMaterial = this.track(new THREE.MeshStandardMaterial({
-      color: BASE_OBSTACLE_EDGE, roughness: 0.9,
-    }));
-    const edges = new THREE.InstancedMesh(edgeGeometry, edgeMaterial, specs.length * 4);
-    edges.name = "obstacle-top-edges";
-    let edgeIndex = 0;
-    for (const spec of specs) {
-      const y = spec.hy * 2 + 0.012;
-      const longX = Math.max(0.1, spec.hx * 2 - 0.12);
-      const longZ = Math.max(0.1, spec.hz * 2 - 0.12);
+    const wood = new THREE.Color(0xe1c294);
+    const darkWood = new THREE.Color(0xa48760);
+    const boardEdge = new THREE.Color(0x74603f);
+    const cartonColors = [0xac8658, 0xc69b6a, 0xba9061, 0xa88760].map((hex) => new THREE.Color(hex));
+    const tape = new THREE.Color(0xd2b78b);
+    const label = new THREE.Color(0xd8d5bf);
+    const ink = new THREE.Color(0x605546);
+    const addBox = (parts: ColoredParts, color: THREE.Color, x: number, y: number, z: number,
+      width: number, height: number, depth: number, angle = 0): void => {
+      local.makeRotationZ(angle).scale(new THREE.Vector3(width, height, depth)).setPosition(x, y, z);
+      matrix.multiplyMatrices(coverMatrix, local);
+      appendColoredGeometry(box, matrix, color, parts.positions, parts.normals, parts.colors);
+    };
+    const pallet = (base: number): void => {
+      for (const x of [-0.8, 0, 0.8]) {
+        for (const z of [-0.78, 0, 0.78]) {
+          addBox(timber, darkWood, x, base + 0.08, z, 0.24, 0.16, 0.3);
+        }
+      }
+      for (const z of [-0.83, 0, 0.83]) {
+        addBox(timber, wood, 0, base + 0.045, z, 2, 0.055, 0.28);
+      }
+      for (let plank = 0; plank < 6; plank += 1) {
+        const z = -1 + (plank + 0.5) * 2 / 6;
+        addBox(timber, plank % 2 ? darkWood : wood, 0, base + 0.19, z, 2, 0.06, 2 / 6 - 0.028);
+      }
+    };
+    const crate = (x: number, z: number, width: number, height: number, depth: number,
+      base: number, variant: number): void => {
+      // The solid backing sits behind its planks/straps, which remain inside
+      // the saved cover boundary. Visible detail must not be buried in a box.
+      addBox(timber, wood, x, base + height / 2, z, width - 0.044, height - 0.02, depth - 0.044);
+      const band = 0.075;
+      for (const sign of [-1, 1]) {
+        const frontZ = z + sign * (depth / 2 - 0.02);
+        const sideX = x + sign * (width / 2 - 0.02);
+        for (let seam = 1; seam < 4; seam += 1) {
+          const y = base + seam * height / 4;
+          addBox(timber, boardEdge, x, y, frontZ, width - 0.025, 0.012, 0.038);
+          addBox(timber, boardEdge, sideX, y, z, 0.038, 0.012, depth - 0.025);
+        }
+        for (const edge of [-1, 1]) {
+          addBox(timber, darkWood, x + edge * (width / 2 - band / 2), base + height / 2,
+            frontZ + sign * 0.0005, band, height, 0.038);
+          addBox(timber, darkWood, sideX + sign * 0.0005, base + height / 2,
+            z + edge * (depth / 2 - band / 2), 0.038, height, band);
+        }
+        if (variant % 2 === 0) {
+          const run = width - 0.24;
+          const rise = height - 0.24;
+          addBox(timber, darkWood, x, base + height / 2, frontZ + sign * 0.001,
+            Math.hypot(run, rise), 0.065, 0.038, sign * Math.atan2(rise, run));
+        }
+      }
+      // Planks and dark joints tile the same flush top, without coplanar
+      // overlays. Their shared saved height remains a safe landing surface.
+      const lidDepth = depth - 0.078;
+      const plankDepth = lidDepth / 5;
+      for (let plank = 0; plank < 5; plank += 1) {
+        addBox(timber, wood, x, base + height - 0.005,
+          z - lidDepth / 2 + (plank + 0.5) * plankDepth, width - 0.078, 0.01, plankDepth - 0.012);
+        if (plank > 0) {
+          addBox(timber, boardEdge, x, base + height - 0.005,
+            z - lidDepth / 2 + plank * plankDepth, width - 0.078, 0.01, 0.012);
+        }
+      }
+    };
+    const carton = (x: number, z: number, width: number, height: number, depth: number,
+      base: number, variant: number): void => {
+      const cardboard = cartonColors[variant % cartonColors.length]!;
+      addBox(packaging, cardboard, x, base + height / 2 + 0.003, z,
+        width - 0.018, height - 0.018, depth - 0.018);
+      // The thin lid keeps the old top exactly; a shallow gap below each
+      // stacked body separates the layers. Its central tape/fold is tiled
+      // into the lid so no two top faces compete for the same depth.
+      const lidHalfWidth = (width - 0.018 - 0.13) / 2;
       for (const side of [-1, 1]) {
-        matrix.makeScale(longX, 0.016, 0.035);
-        matrix.setPosition(spec.x, y, spec.z + side * (spec.hz - 0.055));
-        edges.setMatrixAt(edgeIndex++, matrix);
-        matrix.makeScale(0.035, 0.016, longZ);
-        matrix.setPosition(spec.x + side * (spec.hx - 0.055), y, spec.z);
-        edges.setMatrixAt(edgeIndex++, matrix);
+        addBox(packaging, cardboard, x + side * (0.065 + lidHalfWidth / 2),
+          base + height - 0.003, z, lidHalfWidth, 0.006, depth - 0.018);
+        addBox(packaging, tape, x + side * 0.0355, base + height - 0.003,
+          z, 0.059, 0.006, depth);
+      }
+      addBox(packaging, ink, x, base + height - 0.003, z, 0.012, 0.006, depth);
+      for (const sign of [-1, 1]) {
+        const faceZ = z + sign * (depth / 2 - 0.005);
+        addBox(packaging, tape, x, base + height / 2, faceZ, 0.13, height, 0.004);
+        addBox(packaging, label, x - width * 0.23, base + height * 0.62, faceZ,
+          width * 0.19, height * 0.22, 0.006);
+        for (let line = 0; line < 3; line += 1) {
+          addBox(packaging, ink, x - width * 0.23, base + height * (0.58 + line * 0.04),
+            faceZ + sign * 0.002, width * (line === 2 ? 0.08 : 0.13), 0.008, 0.004);
+        }
+      }
+    };
+    for (const [index, cover] of getObstacleLayout().slice(0, 4).entries()) {
+      coverMatrix.makeScale(cover.hx, cover.hy, cover.hz).setPosition(cover.x, 0, cover.z);
+      pallet(0);
+      if (index === 0) {
+        for (const x of [-0.505, 0.505]) {
+          crate(x, 0, 0.99, 0.89, 2, 0.22, 0);
+          crate(x, 0, 0.99, 0.89, 2, 1.11, 2);
+        }
+      } else if (index === 1) {
+        crate(0, 0, 2, 0.66, 2, 0.22, 1);
+        for (const x of [-0.505, 0.505]) {
+          for (const z of [-0.505, 0.505]) carton(x, z, 0.99, 1.12, 0.99, 0.88, x < 0 ? 1 : 2);
+        }
+      } else if (index === 2) {
+        pallet(0.22);
+        crate(0, -0.505, 2, 1.56, 0.99, 0.44, 0);
+        crate(0, 0.505, 2, 1.56, 0.99, 0.44, 1);
+      } else {
+        for (let layer = 0; layer < 2; layer += 1) {
+          for (let row = 0; row < 3; row += 1) {
+            for (const [column, x] of [-0.505, 0.505].entries()) {
+              carton(x, -1 + (row + 0.5) * 2 / 3, 0.99, 0.89, 2 / 3 - 0.018,
+                0.22 + layer * 0.89, row + layer + column);
+            }
+          }
+        }
       }
     }
-    edges.instanceMatrix.needsUpdate = true;
-    this.place(edges, scene);
+    box.dispose();
+    const woodTexture = this.track(createWoodTexture());
+    const timberMesh = new THREE.Mesh(this.track(coloredPartsGeometry(timber)), this.track(
+      new THREE.MeshStandardMaterial({
+        color: NEUTRAL_WHITE, map: woodTexture, vertexColors: true, roughness: 0.95,
+      }),
+    ));
+    timberMesh.name = "storage-timber";
+    const packagingMesh = new THREE.Mesh(this.track(coloredPartsGeometry(packaging)), this.track(
+      new THREE.MeshStandardMaterial({ color: NEUTRAL_WHITE, vertexColors: true, roughness: 1 }),
+    ));
+    packagingMesh.name = "storage-packaging";
+    for (const mesh of [timberMesh, packagingMesh]) {
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      this.place(mesh, scene);
+    }
   }
 
   private buildFlowerBeds(scene: THREE.Scene): void {
-    // Only the four saved low side covers receive a narrow bed at their outer
-    // edge. Most of each roof stays clear; all plants are purely decorative.
+    // The entire low cover is a planter: full-height masonry perimeter,
+    // broad soil surface at the saved standing height, low planting throughout.
     const beds = getObstacleLayout().slice(4, 8);
-    const soilGeometry = new RoundedBoxGeometry(1, 1, 1, 1, 0.1);
+    const box = new THREE.BoxGeometry(1, 1, 1);
     const greeneryGeometry = createFlowerStemGeometry();
-    // Static soil and leaves have identical material settings. Bake their
-    // transforms and original linear colors into one mesh to save a draw call.
-    const positions: number[] = [];
-    const normals: number[] = [];
-    const colors: number[] = [];
-    const soilColor = new THREE.Color(0x75644d);
+    const parts = emptyColoredParts();
+    const soilColor = new THREE.Color(0x695b45);
+    const borderColor = new THREE.Color(0xa9aa91);
+    const jointColor = new THREE.Color(0x8b8e79);
     const greeneryColor = new THREE.Color(0x71844b);
     const blossomGeometry = this.track(createBlossomGeometry());
     const blossomMaterial = this.track(new THREE.MeshStandardMaterial({
       color: NEUTRAL_WHITE, vertexColors: true, roughness: 0.95, side: THREE.DoubleSide,
     }));
-    const flowersPerBed = 5;
+    const flowersPerBed = 16;
     const blossoms = this.track(new THREE.InstancedMesh(
       blossomGeometry, blossomMaterial, beds.length * flowersPerBed,
     ));
@@ -572,46 +667,60 @@ export class ArenaBuilder {
     const position = new THREE.Vector3();
     const scale = new THREE.Vector3();
     const flowerColors = [new THREE.Color(0xe3bf70), new THREE.Color(0xd69991), new THREE.Color(0xe4dfc9)];
+    const addBox = (color: THREE.Color, x: number, y: number, z: number,
+      width: number, height: number, depth: number): void => {
+      matrix.makeScale(width, height, depth).setPosition(x, y, z);
+      appendColoredGeometry(box, matrix, color, parts.positions, parts.normals, parts.colors);
+    };
     beds.forEach((bed, bedIndex) => {
-      const width = Math.min(1.48, bed.hx * 2 - 0.3);
-      const depth = Math.min(0.34, bed.hz * 0.45);
-      const z = bed.z + Math.sign(bed.z) * (bed.hz - depth / 2 - 0.13);
       const topY = bed.hy * 2;
-      matrix.makeScale(width, 0.05, depth);
-      matrix.setPosition(bed.x, topY + 0.025, z);
-      appendColoredGeometry(soilGeometry, matrix, soilColor, positions, normals, colors);
+      const rim = Math.min(0.1, bed.hx * 0.12, bed.hz * 0.12);
+      const width = bed.hx * 2;
+      const depth = bed.hz * 2;
+      addBox(soilColor, bed.x, topY / 2, bed.z, width - rim * 2, topY, depth - rim * 2);
+      for (const side of [-1, 1]) {
+        addBox(borderColor, bed.x, topY / 2, bed.z + side * (bed.hz - rim / 2), width, topY, rim);
+        addBox(borderColor, bed.x + side * (bed.hx - rim / 2), topY / 2, bed.z,
+          rim, topY, depth - rim * 2);
+        // Restrained blockwork joints stay on the planter faces, below its top.
+        for (let seam = 1; seam < 4; seam += 1) {
+          addBox(jointColor, bed.x - bed.hx + seam * width / 4, topY / 2,
+            bed.z + side * (bed.hz - 0.004), 0.018, topY - 0.1, 0.008);
+          addBox(jointColor, bed.x + side * (bed.hx - 0.004), topY / 2,
+            bed.z - bed.hz + seam * depth / 4, 0.008, topY - 0.1, 0.018);
+        }
+      }
       for (let flower = 0; flower < flowersPerBed; flower += 1) {
         const index = bedIndex * flowersPerBed + flower;
         const variation = hash2(flower + 31, bedIndex + 5);
-        const height = 0.14 + variation * 0.075;
+        const height = 0.13 + variation * 0.085;
+        const column = flower % 4;
+        const row = Math.floor(flower / 4);
         position.set(
-          bed.x + (flower / (flowersPerBed - 1) - 0.5) * width * 0.82,
-          topY + 0.05,
-          z + (hash2(flower + 7, bedIndex + 11) - 0.5) * depth * 0.62,
+          bed.x + (column / 3 - 0.5) * (width - rim * 2) * 0.8 + (variation - 0.5) * 0.08,
+          topY,
+          bed.z + (row / 3 - 0.5) * (depth - rim * 2) * 0.8
+            + (hash2(flower + 7, bedIndex + 11) - 0.5) * 0.08,
         );
         rotation.setFromAxisAngle(new THREE.Vector3(0, 1, 0), variation * Math.PI * 2);
-        scale.set(0.8 + variation * 0.3, height, 0.8 + variation * 0.3);
+        scale.set(0.85 + variation * 0.3, height, 0.85 + variation * 0.3);
         matrix.compose(position, rotation, scale);
-        appendColoredGeometry(greeneryGeometry, matrix, greeneryColor, positions, normals, colors);
+        appendColoredGeometry(greeneryGeometry, matrix, greeneryColor, parts.positions, parts.normals, parts.colors);
         position.y += height;
-        scale.setScalar(0.8 + variation * 0.3);
+        scale.setScalar(0.7 + variation * 0.25);
         matrix.compose(position, rotation, scale);
         blossoms.setMatrixAt(index, matrix);
         blossoms.setColorAt(index, flowerColors[(flower + bedIndex) % flowerColors.length]!);
       }
     });
-    soilGeometry.dispose();
+    box.dispose();
     greeneryGeometry.dispose();
-    const bedGeometry = this.track(new THREE.BufferGeometry());
-    bedGeometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    bedGeometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
-    bedGeometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-    bedGeometry.computeBoundingSphere();
     const bedMaterial = this.track(new THREE.MeshStandardMaterial({
       color: NEUTRAL_WHITE, vertexColors: true, roughness: 1, side: THREE.DoubleSide,
     }));
-    const soilAndGreenery = new THREE.Mesh(bedGeometry, bedMaterial);
+    const soilAndGreenery = new THREE.Mesh(this.track(coloredPartsGeometry(parts)), bedMaterial);
     soilAndGreenery.name = "side-flower-beds";
+    soilAndGreenery.castShadow = true;
     blossoms.instanceMatrix.needsUpdate = true;
     for (const mesh of [soilAndGreenery, blossoms]) {
       mesh.receiveShadow = true;
@@ -621,62 +730,56 @@ export class ArenaBuilder {
   }
 
   private buildPlatforms(scene: THREE.Scene): void {
-    // Elevated shops: one InstancedMesh for all figure volumes (warm-lit
-    // moss tops and cooler shaded side faces, per-instance pale tint so the
-    // four figures read as distinct), plus one thin inset cap plate per
-    // figure (tiered prism look, top 5mm below the collider top so the faces
-    // never z-fight — the capsule stands on the figure box). No extra lights.
+    // The authoritative shop volumes provide the same unobstructed flat roof.
+    // Neutral membrane and flush metal flashing replace the old green top.
     const platforms = getPlatforms();
     const topGeometry = this.track(new RoundedBoxGeometry(1, 1, 1, 2, 0.045));
-    paintBoxFaceVertices(topGeometry, BASE_PLATFORM_TOP, BASE_PLATFORM);
-    const topMaterial = this.track(
-      new THREE.MeshStandardMaterial({
-        color: NEUTRAL_WHITE,
-        roughness: 0.94,
-        metalness: 0,
-        vertexColors: true,
-      }),
-    );
-    const tops = new THREE.InstancedMesh(topGeometry, topMaterial, platforms.length);
+    paintBoxFaceVertices(topGeometry, 0x929997, 0xd5d4c8);
+    const roofTexture = this.track(createRoofTexture());
+    const topMaterial = this.track(new THREE.MeshStandardMaterial({
+      color: NEUTRAL_WHITE, map: roofTexture, roughness: 0.97, metalness: 0, vertexColors: true,
+    }));
+    const tops = this.track(new THREE.InstancedMesh(topGeometry, topMaterial, platforms.length));
     tops.name = "platform-volumes";
     const matrix = new THREE.Matrix4();
-    // Four gently varied leaf tints preserve each shop's silhouette.
-    const accents = [
-      new THREE.Color(BASE_FIGURE_TINTS[0] ?? NEUTRAL_WHITE),
-      new THREE.Color(BASE_FIGURE_TINTS[1] ?? NEUTRAL_WHITE),
-      new THREE.Color(BASE_FIGURE_TINTS[2] ?? NEUTRAL_WHITE),
-      new THREE.Color(BASE_FIGURE_TINTS[3] ?? NEUTRAL_WHITE),
-    ];
+    const accents = [0xf7f8f5, 0xffffff, 0xecefee, 0xf5f3ed].map((hex) => new THREE.Color(hex));
     platforms.forEach((platform, index) => {
       matrix.makeScale(platform.hx * 2, platform.topY, platform.hz * 2);
       matrix.setPosition(platform.x, platform.topY / 2, platform.z);
       tops.setMatrixAt(index, matrix);
-      tops.setColorAt(index, accents[index % accents.length] ?? new THREE.Color(NEUTRAL_WHITE));
+      tops.setColorAt(index, accents[index]!);
     });
     tops.instanceMatrix.needsUpdate = true;
-    if (tops.instanceColor !== null) {
-      tops.instanceColor.needsUpdate = true;
-    }
+    if (tops.instanceColor !== null) tops.instanceColor.needsUpdate = true;
     tops.castShadow = true;
     tops.receiveShadow = true;
     this.place(tops, scene);
-
-    // Flush tier caps: thin inset slabs whose top face sits PLATFORM_CAP_DROP
-    // below topY (Stage 4d.2 z-fighting fix — never coplanar with the figure
-    // top face; 5mm is visually imperceptible). No collider needed — the
-    // figure box already tops out there.
-    const capMaterial = this.track(
-      new THREE.MeshStandardMaterial({ color: BASE_CAP, roughness: 0.6, metalness: 0.25 }),
-    );
+    // Flashing sits flush with topY and is only 3cm thick. No rails, parapets,
+    // roof equipment or raised seams obstruct movement or ladder exits.
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    const flashing = emptyColoredParts();
+    const metal = new THREE.Color(0xb8bcb6);
     for (const platform of platforms) {
-      const capHeight = 0.1;
-      const capGeometry = this.track(new THREE.BoxGeometry(platform.hx * 2 * 0.7, capHeight, platform.hz * 2 * 0.7));
-      const cap = new THREE.Mesh(capGeometry, capMaterial);
-      cap.position.set(platform.x, platform.topY - capHeight / 2 - PLATFORM_CAP_DROP, platform.z);
-      cap.castShadow = false;
-      cap.receiveShadow = true;
-      this.place(cap, scene);
+      const inset = 0.015;
+      const stripWidth = 0.055;
+      for (const side of [-1, 1]) {
+        matrix.makeScale(platform.hx * 2 - inset * 2, 0.03, stripWidth);
+        matrix.setPosition(platform.x, platform.topY - 0.015,
+          platform.z + side * (platform.hz - inset - stripWidth / 2));
+        appendColoredGeometry(box, matrix, metal, flashing.positions, flashing.normals, flashing.colors);
+        matrix.makeScale(stripWidth, 0.03, platform.hz * 2 - inset * 2 - stripWidth * 2);
+        matrix.setPosition(platform.x + side * (platform.hx - inset - stripWidth / 2),
+          platform.topY - 0.015, platform.z);
+        appendColoredGeometry(box, matrix, metal, flashing.positions, flashing.normals, flashing.colors);
+      }
     }
+    box.dispose();
+    const flashingMesh = new THREE.Mesh(this.track(coloredPartsGeometry(flashing)), this.track(
+      new THREE.MeshStandardMaterial({ color: NEUTRAL_WHITE, vertexColors: true, roughness: 0.73, metalness: 0.22 }),
+    ));
+    flashingMesh.name = "shop-roof-flashings";
+    flashingMesh.receiveShadow = true;
+    this.place(flashingMesh, scene);
 
     // Open wooden ladders follow the exact original slab transforms. Rails and
     // rungs share one low-poly timber batch; their tops stay on the unchanged
@@ -870,7 +973,8 @@ export class ArenaBuilder {
     const glowTexture = this.track(createGroundGlowTexture());
     const rimGeometry = this.track(new THREE.RingGeometry(0.82, 0.87, 40));
     const rimMaterial = this.track(new THREE.MeshBasicMaterial({
-      color: HL_CHARTREUSE, transparent: true, depthWrite: false,
+      color: new THREE.Color(HL_CHARTREUSE).multiplyScalar(TRAMPOLINE_NIGHT_GAIN),
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide, toneMapped: false,
     }));
     const rims = this.track(new THREE.InstancedMesh(rimGeometry, rimMaterial, zones.length));
@@ -888,7 +992,7 @@ export class ArenaBuilder {
       matrix.copy(flatRotation).scale(new THREE.Vector3(zone.radius, zone.radius, 1));
       matrix.setPosition(zone.x, 0.365, zone.z);
       rims.setMatrixAt(index, matrix);
-      matrix.copy(flatRotation).scale(new THREE.Vector3(4.6, 4.6, 1));
+      matrix.copy(flatRotation).scale(new THREE.Vector3(5.05, 5.05, 1));
       matrix.setPosition(zone.x, 0.032, zone.z);
       ground.setMatrixAt(index, matrix);
     });
@@ -919,8 +1023,8 @@ export class ArenaBuilder {
     });
     const effects = [
       { mesh: rims, material: rimMaterial, opacity: 0.92 },
-      { mesh: ground, material: groundMaterial, opacity: 0.14 },
-      { mesh: faces, material: faceMaterial, opacity: 0.16 },
+      { mesh: ground, material: groundMaterial, opacity: 0.14 * TRAMPOLINE_NIGHT_GAIN },
+      { mesh: faces, material: faceMaterial, opacity: 0.16 * TRAMPOLINE_NIGHT_GAIN },
     ];
     for (const effect of effects) {
       effect.mesh.instanceMatrix.needsUpdate = true;
@@ -1049,10 +1153,22 @@ function createFloorTexture(): THREE.DataTexture {
 }
 
 function createWoodTexture(): THREE.DataTexture {
-  return makeRgbTexture(64, (x, y) => {
+  const texture = makeRgbTexture(64, (x, y) => {
     const grain = Math.sin(y * 0.62 + Math.sin(x * 0.09) * 1.7);
     const weathering = Math.sin(x * 0.07 + y * 0.15) * 0.05;
     return mixHex(0x806344, 0xb39366, 0.45 + grain * 0.065 + weathering);
+  });
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  return texture;
+}
+
+function createRoofTexture(): THREE.DataTexture {
+  // Long membrane-sheet seams are flat albedo marks, not raised geometry.
+  return makeRgbTexture(128, (x, y) => {
+    const grain = (hash2(x + 61, y + 17) - 0.5) * 0.065;
+    const seam = Math.min(Math.abs(x - 43), Math.abs(x - 86)) < 1.5;
+    return mixHex(0xd0d2cd, 0xe8e9e5, seam ? 0.05 : 0.63 + grain);
   });
 }
 
@@ -1098,6 +1214,37 @@ function appendColoredGeometry(
     normals.push(normal.x, normal.y, normal.z);
     colors.push(color.r, color.g, color.b);
   }
+}
+
+interface ColoredParts {
+  positions: number[];
+  normals: number[];
+  colors: number[];
+}
+
+function emptyColoredParts(): ColoredParts {
+  return { positions: [], normals: [], colors: [] };
+}
+
+function coloredPartsGeometry(parts: ColoredParts): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(parts.positions, 3));
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute(parts.normals, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(parts.colors, 3));
+  // Box faces have a common simple grain scale; repeatable local UVs keep the
+  // timber batched even after all instance transforms are baked into vertices.
+  const uvs: number[] = [];
+  for (let i = 0; i < parts.positions.length; i += 3) {
+    const x = parts.positions[i]!;
+    const y = parts.positions[i + 1]!;
+    const z = parts.positions[i + 2]!;
+    const nx = Math.abs(parts.normals[i]!);
+    const ny = Math.abs(parts.normals[i + 1]!);
+    uvs.push(nx > 0.5 ? z : x, ny > 0.5 ? z : y);
+  }
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.computeBoundingSphere();
+  return geometry;
 }
 
 function createFlowerStemGeometry(): THREE.BufferGeometry {

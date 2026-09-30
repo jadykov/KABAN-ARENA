@@ -9,10 +9,15 @@ interface BoxPart {
 
 interface House {
   x: number; z: number; width: number; depth: number; height: number;
-  wall: number; roof: number;
+  wall: number; roof: number; trim: number;
+  roofShape: "gable" | "hip" | "shed"; roofRise: number;
+  entry: number; canopy?: boolean;
+  windows: Array<{ x: number; y: number; width: number; height: number; lit?: boolean }>;
+  wing?: { x: number; width: number; depth: number; height: number };
+  chimney?: number;
 }
 
-// Ground and buildings live in world space outside the glass boundary. The
+// Ground and buildings live in world space outside the arena boundary. The
 // backdrop never moves with the camera, adds no colliders, casts no shadows,
 // and uses the arena's existing lights/fog. Five batches cover the whole yard.
 export class SuburbanEnvironment {
@@ -39,7 +44,7 @@ export class SuburbanEnvironment {
     this.eveningAmount = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0;
     if (this.windowGlow !== null) {
       this.windowGlow.visible = this.eveningAmount > 0;
-      (this.windowGlow.material as THREE.MeshBasicMaterial).opacity = 0.36 * this.eveningAmount;
+      (this.windowGlow.material as THREE.MeshBasicMaterial).opacity = 0.68 * this.eveningAmount;
     }
   }
 
@@ -99,18 +104,68 @@ export class SuburbanEnvironment {
   private buildNeighborhood(): void {
     const h = ARENA_HALF_SIZE;
     const houses: House[] = [
-      { x: -14, z: -h - 25, width: 10, depth: 6, height: 5.6, wall: 0xd5c7ad, roof: 0x7c6d61 },
-      { x: 17, z: -h - 29, width: 12, depth: 7, height: 7.2, wall: 0xb5c2bf, roof: 0x5e7478 },
-      { x: -h - 25, z: -14, width: 9, depth: 6.5, height: 6.7, wall: 0xbfc3b4, roof: 0x687368 },
-      { x: -h - 29, z: 20, width: 11, depth: 7, height: 5.8, wall: 0xd0bca6, roof: 0x8c7568 },
-      { x: h + 27, z: -17, width: 11, depth: 7, height: 6.8, wall: 0xc3c4bb, roof: 0x637479 },
-      { x: h + 23, z: 16, width: 8.5, depth: 6, height: 5.3, wall: 0xd7c9b1, roof: 0x89776a },
-      { x: -17, z: h + 28, width: 11, depth: 7, height: 7, wall: 0xb9c4bd, roof: 0x697975 },
-      { x: 16, z: h + 24, width: 10, depth: 6, height: 5.8, wall: 0xc8b8a5, roof: 0x7f6d65 },
+      { x: -14, z: -h - 25, width: 8.6, depth: 6.1, height: 3.8,
+        wall: 0xd5c7ad, roof: 0x7c6d61, trim: 0xe0d8c7, roofShape: "gable", roofRise: 2.1,
+        entry: 0.3, chimney: -2.2, windows: [
+          { x: -2.55, y: 2.1, width: 1.35, height: 1.35, lit: true },
+          { x: 2.55, y: 2.1, width: 1.7, height: 1.35 },
+        ] },
+      { x: 17, z: -h - 29, width: 11.8, depth: 7.3, height: 6.7,
+        wall: 0xb5c2bf, roof: 0x5e7478, trim: 0xd6d7cc, roofShape: "hip", roofRise: 1.7,
+        entry: 3.9, canopy: true, windows: [
+          { x: -3.4, y: 1.9, width: 2, height: 1.45 },
+          { x: 0.2, y: 1.9, width: 2, height: 1.45, lit: true },
+          { x: -3.4, y: 4.85, width: 1.35, height: 1.6, lit: true },
+          { x: 0.2, y: 4.85, width: 1.35, height: 1.6 },
+          { x: 3.9, y: 4.85, width: 1.35, height: 1.6 },
+        ] },
+      { x: -h - 25, z: -14, width: 7.8, depth: 7.1, height: 6.3,
+        wall: 0xbfc3b4, roof: 0x687368, trim: 0xdbddce, roofShape: "gable", roofRise: 1.85,
+        entry: -2.3, windows: [
+          { x: 1.25, y: 1.95, width: 2.15, height: 1.4 },
+          { x: -2.1, y: 4.75, width: 1.1, height: 1.6 },
+          { x: 1.25, y: 4.75, width: 1.55, height: 1.6, lit: true },
+        ] },
+      { x: -h - 29, z: 20, width: 10.1, depth: 6.6, height: 4.1,
+        wall: 0xc2a58f, roof: 0x8c7568, trim: 0xd8c8b6, roofShape: "hip", roofRise: 1.4,
+        entry: -3.45, canopy: true, wing: { x: 6.4, width: 3.1, depth: 5.1, height: 2.8 }, windows: [
+          { x: -0.8, y: 2.2, width: 1.6, height: 1.35, lit: true },
+          { x: 2.75, y: 2.2, width: 2.1, height: 1.35 },
+        ] },
+      { x: h + 27, z: -17, width: 10.7, depth: 7.2, height: 6.5,
+        wall: 0xc3c4bb, roof: 0x637479, trim: 0xe1dfd2, roofShape: "shed", roofRise: 1.05,
+        entry: 0, canopy: true, windows: [
+          { x: -3.4, y: 1.9, width: 1.7, height: 1.4, lit: true },
+          { x: 3.4, y: 1.9, width: 1.7, height: 1.4 },
+          { x: -3.4, y: 4.75, width: 1.7, height: 1.4 },
+          { x: 0, y: 4.75, width: 1.25, height: 1.4 },
+          { x: 3.4, y: 4.75, width: 1.7, height: 1.4, lit: true },
+        ] },
+      { x: h + 23, z: 16, width: 7.1, depth: 6.1, height: 3.65,
+        wall: 0xd7c9b1, roof: 0x89776a, trim: 0xe5ddcd, roofShape: "gable", roofRise: 1.5,
+        entry: 2.15, wing: { x: -4.6, width: 2.6, depth: 4.5, height: 2.55 }, windows: [
+          { x: -1.55, y: 2, width: 2.25, height: 1.25, lit: true },
+        ] },
+      { x: -17, z: h + 28, width: 11.4, depth: 7.7, height: 6.8,
+        wall: 0xb9c4bd, roof: 0x697975, trim: 0xdde1d5, roofShape: "hip", roofRise: 1.2,
+        entry: -0.35, canopy: true, windows: [
+          { x: -3.6, y: 2, width: 1.6, height: 1.55 },
+          { x: 3.5, y: 2, width: 1.9, height: 1.55, lit: true },
+          { x: -3.6, y: 4.95, width: 1.6, height: 1.55, lit: true },
+          { x: -0.35, y: 4.95, width: 1.25, height: 1.55 },
+          { x: 3.5, y: 4.95, width: 1.9, height: 1.55 },
+        ] },
+      { x: 16, z: h + 24, width: 9.8, depth: 6.4, height: 4.5,
+        wall: 0xbba78f, roof: 0x7f6d65, trim: 0xdbd0bd, roofShape: "shed", roofRise: 0.85,
+        entry: -3.5, chimney: 2.7, windows: [
+          { x: -0.8, y: 2.35, width: 1.3, height: 1.65 },
+          { x: 2.65, y: 2.35, width: 1.8, height: 1.65, lit: true },
+        ] },
     ];
     const parts: BoxPart[] = [];
     const windows: BoxPart[] = [];
-    const roofTransforms: Array<{ house: House; yaw: number }> = [];
+    const roofPositions: number[] = [];
+    const roofColors: number[] = [];
     for (const house of houses) {
       const yaw = Math.atan2(-house.x, -house.z);
       const add = (x: number, y: number, z: number, width: number, height: number, depth: number, color: number): BoxPart => {
@@ -124,22 +179,39 @@ export class SuburbanEnvironment {
       };
       add(0, house.height / 2, 0, house.width, house.height, house.depth, house.wall);
       add(0, 0.17, 0, house.width + 0.12, 0.34, house.depth + 0.12, 0x8a8e84);
-      add(0, house.height - 0.12, 0, house.width + 0.2, 0.20, house.depth + 0.2, 0xd5d1c4);
-      // Larger dark glazing and slender pale surrounds read as contemporary
-      // houses, without tiny posters/objects competing with the arena.
-      const levels = house.height > 6 ? [1.9, 4.55] : [2.7];
-      for (const y of levels) {
-        for (const x of [-house.width * 0.3, 0, house.width * 0.3]) {
-          add(x, y, house.depth / 2 + 0.04, 1.55, 1.65, 0.12, 0xd9d8cb);
-          const pane = add(x, y, house.depth / 2 + 0.11, 1.28, 1.38, 0.035, 0x51656a);
-          // A few quiet windows glow in the last minute. Their thin overlay
-          // shares one material and cannot illuminate or shadow gameplay.
-          if (x !== 0) windows.push({ ...pane, z: pane.z + 0.025 * Math.cos(yaw), x: pane.x + 0.025 * Math.sin(yaw) });
-        }
+      add(0, house.height - 0.08, 0, house.width + 0.2, 0.16, house.depth + 0.2, house.trim);
+      // Entries occupy a real gap in each window rhythm. Wider living-room
+      // panes, narrower upstairs windows and occasional wings vary the facade.
+      for (const window of house.windows) {
+        const { x, y, width, height } = window;
+        add(x, y, house.depth / 2 + 0.04, width + 0.24, height + 0.24, 0.12, house.trim);
+        const pane = add(x, y, house.depth / 2 + 0.115, width, height, 0.035, 0x465d63);
+        add(x, y - height / 2 - 0.13, house.depth / 2 + 0.15, width + 0.32, 0.09, 0.3, house.trim);
+        if (width >= 1.9) add(x, y, house.depth / 2 + 0.17, 0.065, height, 0.045, house.trim);
+        if (window.lit) windows.push({ ...pane, depth: 0.01,
+          z: pane.z + 0.025 * Math.cos(yaw), x: pane.x + 0.025 * Math.sin(yaw),
+          color: windows.length % 3 === 0 ? 0xfff2d8 : 0xeedab8 });
       }
-      add(house.width * 0.10, 1.02, house.depth / 2 + 0.07, 1.1, 2.04, 0.10, 0x6f7d79);
-      add(house.width * 0.10, 2.14, house.depth / 2 + 0.42, 1.8, 0.12, 0.95, 0x9b9d91);
-      roofTransforms.push({ house, yaw });
+      add(house.entry, 1.04, house.depth / 2 + 0.07, 1.05, 2.08, 0.10, 0x68746e);
+      add(house.entry, 0.13, house.depth / 2 + 0.38, 1.55, 0.26, 0.8, 0x98998c);
+      if (house.canopy) add(house.entry, 2.27, house.depth / 2 + 0.45, 1.75, 0.13, 1.05, house.roof);
+      if (house.height > 6) add(0, 3.25, house.depth / 2 + 0.035, house.width, 0.10, 0.10, house.trim);
+      if (house.chimney !== undefined) {
+        add(house.chimney, house.height + house.roofRise * 0.8, -house.depth * 0.18,
+          0.6, 1.5, 0.55, 0x968b7c);
+      }
+      this.appendRoof(roofPositions, roofColors, house, yaw);
+      if (house.wing !== undefined) {
+        const wing = house.wing;
+        add(wing.x, wing.height / 2, 0, wing.width, wing.height, wing.depth, house.wall);
+        add(wing.x, 0.17, 0, wing.width + 0.12, 0.34, wing.depth + 0.12, 0x8a8e84);
+        add(wing.x, wing.height - 0.05, 0, wing.width + 0.25, 0.15, wing.depth + 0.2, house.trim);
+        add(wing.x, 1.4, wing.depth / 2 + 0.05, wing.width * 0.67, 2.05, 0.12, 0x8a9188);
+        this.appendRoof(roofPositions, roofColors, {
+          ...house, x: house.x + wing.x * Math.cos(yaw), z: house.z - wing.x * Math.sin(yaw),
+          width: wing.width, depth: wing.depth, height: wing.height, roofShape: "shed", roofRise: 0.5,
+        }, yaw);
+      }
     }
     const trees = [
       [-h - 11, -24, 6.5], [-h - 17, -7, 7.3], [-h - 13, 11, 5.9], [-h - 17, 29, 7.0],
@@ -157,12 +229,13 @@ export class SuburbanEnvironment {
     boxes.name = "suburban-houses-and-trunks";
     this.group.add(boxes);
 
-    const roofGeometry = this.track(this.makeRoofGeometry());
-    const roofParts = roofTransforms.map(({ house, yaw }) => ({
-      x: house.x, y: house.height, z: house.z, width: house.width + 0.6,
-      height: 1.45, depth: house.depth + 0.6, yaw, color: house.roof,
-    }));
-    const roofs = this.makeInstances(roofGeometry, surface, roofParts);
+    // Different roof forms share one static batch rather than extra draw calls.
+    const roofGeometry = this.track(new THREE.BufferGeometry());
+    roofGeometry.setAttribute("position", new THREE.Float32BufferAttribute(roofPositions, 3));
+    roofGeometry.setAttribute("color", new THREE.Float32BufferAttribute(roofColors, 3));
+    roofGeometry.computeVertexNormals();
+    const roofMaterial = this.track(new THREE.MeshLambertMaterial({ vertexColors: true }));
+    const roofs = new THREE.Mesh(roofGeometry, roofMaterial);
     roofs.name = "suburban-roofs";
     this.group.add(roofs);
 
@@ -178,9 +251,9 @@ export class SuburbanEnvironment {
     leaves.name = "suburban-trees";
     this.group.add(leaves);
     const glow = this.track(new THREE.MeshBasicMaterial({
-      color: 0xe9c28e, transparent: true, opacity: 0, depthWrite: false,
+      color: 0xffcf8d, transparent: true, opacity: 0, depthWrite: false, toneMapped: false,
     }));
-    this.windowGlow = this.makeInstances(boxGeometry, glow, windows.map((part) => ({ ...part, color: 0xffffff })));
+    this.windowGlow = this.makeInstances(boxGeometry, glow, windows);
     this.windowGlow.name = "suburban-window-glow";
     this.group.add(this.windowGlow);
   }
@@ -206,16 +279,31 @@ export class SuburbanEnvironment {
     return mesh;
   }
 
-  private makeRoofGeometry(): THREE.BufferGeometry {
-    const vertices = [
-      [-0.5, 0, -0.5], [0.5, 0, -0.5], [0.5, 0, 0.5], [-0.5, 0, 0.5],
-      [0, 1, -0.5], [0, 1, 0.5],
-    ];
-    const triangles = [0, 4, 1, 3, 2, 5, 0, 3, 5, 0, 5, 4, 1, 4, 5, 1, 5, 2];
-    const positions = triangles.flatMap((index) => vertices[index]!);
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    geometry.computeVertexNormals();
-    return geometry;
+  private appendRoof(positions: number[], colors: number[], house: House, yaw: number): void {
+    const vertices = [[-0.5, 0, -0.5], [0.5, 0, -0.5], [0.5, 0, 0.5], [-0.5, 0, 0.5]];
+    let triangles: number[];
+    if (house.roofShape === "gable") {
+      vertices.push([0, 1, -0.5], [0, 1, 0.5]);
+      triangles = [0, 4, 1, 3, 2, 5, 0, 3, 5, 0, 5, 4, 1, 4, 5, 1, 5, 2];
+    } else if (house.roofShape === "hip") {
+      vertices.push([-0.25, 1, 0], [0.25, 1, 0]);
+      triangles = [0, 4, 5, 0, 5, 1, 3, 2, 5, 3, 5, 4, 0, 3, 4, 1, 5, 2];
+    } else {
+      vertices[0]![1] = 0.75;
+      vertices[1]![1] = 0.75;
+      vertices.push([-0.5, 1, -0.5], [0.5, 1, -0.5], [0.5, 0.25, 0.5], [-0.5, 0.25, 0.5]);
+      triangles = [4, 7, 6, 4, 6, 5, 0, 1, 2, 0, 2, 3,
+        0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7, 0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2];
+    }
+    const color = new THREE.Color(house.roof);
+    for (const index of triangles) {
+      const vertex = vertices[index]!;
+      const x = vertex[0]! * (house.width + 0.6);
+      const z = vertex[2]! * (house.depth + 0.6);
+      positions.push(house.x + x * Math.cos(yaw) + z * Math.sin(yaw),
+        house.height + vertex[1]! * house.roofRise,
+        house.z - x * Math.sin(yaw) + z * Math.cos(yaw));
+      colors.push(color.r, color.g, color.b);
+    }
   }
 }

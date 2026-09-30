@@ -33,7 +33,7 @@ export const BALL_NEUTRAL_BASE = BALL_BASE;
 // widest radius. These legacy names now describe parts, not nested spheres.
 // Its 0.88m span is only 1.26x the ordinary pickup's 0.70m span.
 export const SUPER_CORE_OUTER_RADIUS = 0.44;
-export const SUPER_CORE_INNER_RADIUS = 0.27;
+export const SUPER_CORE_INNER_RADIUS = 0.31;
 // Fired SUPER ball visual scale (group scale multiplier vs a normal core).
 export const SUPER_BALL_SCALE = 2;
 // Ball snapshot smoothing: exponential lerp rate (1/s) toward the latest
@@ -788,17 +788,17 @@ export class BallsPool {
   }
 }
 
-// A bevelled hexagonal crystal with flat ends, rather than the old pointed
-// white diamond. Flat face normals preserve its silhouette from above and
-// the side; restrained facet tints remain visible when the sun goes down.
+// A compact cut diamond: a broad six-facet girdle between two narrow tips.
+// Facet normals and emission retain the cut even when the sun goes down.
 function makeSuperCrystalGeometry(): THREE.BufferGeometry {
   const positions: number[] = [];
   const colors: number[] = [];
+  const uvs: number[] = [];
   const rings = [
-    { radius: 0.12, y: -0.30 },
-    { radius: SUPER_CORE_INNER_RADIUS, y: -0.13 },
-    { radius: SUPER_CORE_INNER_RADIUS, y: 0.17 },
-    { radius: 0.10, y: 0.34 },
+    { radius: 0.018, y: -0.30 },
+    { radius: SUPER_CORE_INNER_RADIUS, y: -0.02 },
+    { radius: SUPER_CORE_INNER_RADIUS * 0.87, y: 0.10 },
+    { radius: 0.024, y: 0.52 },
   ];
   const sides = 6;
   const shades = [1, 0.80, 0.94, 0.76, 0.88, 0.98];
@@ -806,9 +806,14 @@ function makeSuperCrystalGeometry(): THREE.BufferGeometry {
     const angle = side * Math.PI * 2 / sides;
     return [Math.cos(angle) * radius, y, Math.sin(angle) * radius];
   };
-  const triangle = (a: readonly number[], b: readonly number[], c: readonly number[], shade: number): void => {
+  const triangle = (a: readonly number[], b: readonly number[], c: readonly number[], shade: number, side: number): void => {
     positions.push(...a, ...b, ...c);
-    for (let i = 0; i < 3; i += 1) colors.push(shade, shade, shade);
+    for (const point of [a, b, c]) {
+      colors.push(shade, shade, shade);
+      // Each face samples its own emission column; height reveals the white
+      // heart while the points keep their saturated chartreuse color.
+      uvs.push((side + 0.5) / sides, ((point[1] ?? 0) + 0.30) / 0.82);
+    }
   };
   for (let side = 0; side < sides; side += 1) {
     const shade = shades[side] ?? 1;
@@ -820,31 +825,85 @@ function makeSuperCrystalGeometry(): THREE.BufferGeometry {
       const b = vertex(lower.radius, lower.y, side + 1);
       const c = vertex(upper.radius, upper.y, side + 1);
       const d = vertex(upper.radius, upper.y, side);
-      triangle(a, d, b, shade);
-      triangle(b, d, c, shade);
+      triangle(a, d, b, shade, side);
+      triangle(b, d, c, shade, side);
     }
     const bottom = rings[0];
     const top = rings[rings.length - 1];
     if (bottom !== undefined && top !== undefined) {
-      triangle([0, bottom.y, 0], vertex(bottom.radius, bottom.y, side), vertex(bottom.radius, bottom.y, side + 1), shade);
-      triangle([0, top.y, 0], vertex(top.radius, top.y, side + 1), vertex(top.radius, top.y, side), shade);
+      triangle([0, bottom.y, 0], vertex(bottom.radius, bottom.y, side), vertex(bottom.radius, bottom.y, side + 1), shade, side);
+      triangle([0, top.y, 0], vertex(top.radius, top.y, side + 1), vertex(top.radius, top.y, side), shade, side);
     }
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
   geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
   geometry.computeVertexNormals();
   return geometry;
 }
 
+function makeSuperEmissionTexture(): THREE.DataTexture {
+  const width = 6;
+  const height = 32;
+  const data = new Uint8Array(width * height * 4);
+  const shades = [1, 0.68, 0.94, 0.60, 0.78, 0.98];
+  for (let y = 0; y < height; y += 1) {
+    const localY = y / (height - 1) * 0.82 - 0.30;
+    const heart = Math.exp(-Math.pow((localY - 0.045) / 0.22, 2));
+    for (let x = 0; x < width; x += 1) {
+      const index = (y * width + x) * 4;
+      const shade = shades[x] ?? 1;
+      data[index] = Math.round((145 + 103 * heart) * shade);
+      data[index + 1] = Math.round((207 + 48 * heart) * shade);
+      data[index + 2] = Math.round((35 + 191 * heart) * shade);
+      data[index + 3] = 255;
+    }
+  }
+  const texture = new THREE.DataTexture(data, width, height);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+// Dedicated SUPER texture: real radial alpha in both browser and headless
+// paths, independent of the ball-pool trail/puff texture and its fallback.
+function makeSuperGlowTexture(): THREE.DataTexture {
+  const size = 64;
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const radius = Math.hypot((x + 0.5) / size * 2 - 1, (y + 0.5) / size * 2 - 1);
+      const edge = Math.max(0, Math.min(1, (1 - radius) / 0.22));
+      const fade = edge * edge * (3 - 2 * edge);
+      const index = (y * size + x) * 4;
+      data[index] = 255;
+      data[index + 1] = 255;
+      data[index + 2] = 255;
+      data[index + 3] = Math.round(255 * Math.exp(-4.2 * radius * radius) * fade);
+    }
+  }
+  const texture = new THREE.DataTexture(data, size, size);
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
+
 // Universal SUPER pickup silhouette: a luminous energy crystal seated in a
-// short satin-metal collar. Just two solid meshes, no texture/halo/light.
+// short satin-metal collar. Two small additive halos and a fixed ground
+// decal suggest light spilling out without adding lights or postprocessing.
 // The existing x2 power grant stays server-owned; the item is also suitable
 // for future super effects without depicting a specific projectile.
 export class SuperCore {
   private readonly scene: THREE.Scene;
   private readonly group = new THREE.Group();
+  private readonly groundSpill: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   private readonly crystalMaterial: THREE.MeshStandardMaterial;
+  private readonly haloMaterial: THREE.SpriteMaterial;
+  private readonly heartMaterial: THREE.SpriteMaterial;
   private readonly disposables: Array<{ dispose(): void }> = [];
   private active = false;
   private spinTime = 0;
@@ -853,12 +912,14 @@ export class SuperCore {
     this.scene = scene;
     this.group.name = "super-core";
     const crystalGeometry = makeSuperCrystalGeometry();
+    const emissionTexture = makeSuperEmissionTexture();
     this.crystalMaterial = new THREE.MeshStandardMaterial({
-      color: SUPER_BALL_COLOR,
-      emissive: SUPER_BALL_COLOR,
-      emissiveIntensity: 0.32,
-      roughness: 0.28,
-      metalness: 0.14,
+      color: 0xbadf73,
+      emissive: 0xffffff,
+      emissiveMap: emissionTexture,
+      emissiveIntensity: 0.95,
+      roughness: 0.18,
+      metalness: 0.08,
       vertexColors: true,
       flatShading: true,
     });
@@ -885,30 +946,72 @@ export class SuperCore {
     const collar = new THREE.Mesh(collarGeometry, collarMaterial);
     collar.name = "super-core-collar";
     this.group.add(collar);
-    this.disposables.push(crystalGeometry, this.crystalMaterial, collarGeometry, collarMaterial);
+    const glowTexture = makeSuperGlowTexture();
+    this.haloMaterial = new THREE.SpriteMaterial({
+      map: glowTexture, color: SUPER_BALL_COLOR, opacity: 0.62,
+      blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+    });
+    const halo = new THREE.Sprite(this.haloMaterial);
+    halo.name = "super-core-halo";
+    halo.position.y = 0.10;
+    halo.scale.set(2.25, 2.25, 1);
+    this.group.add(halo);
+    this.heartMaterial = new THREE.SpriteMaterial({
+      map: glowTexture, color: 0xf3ffe1, opacity: 0.42,
+      blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+    });
+    const heart = new THREE.Sprite(this.heartMaterial);
+    heart.name = "super-core-heart-glow";
+    heart.position.y = 0.07;
+    heart.scale.set(1.08, 1.08, 1);
+    this.group.add(heart);
+    const groundGeometry = new THREE.PlaneGeometry(5.4, 5.4);
+    const groundMaterial = new THREE.MeshBasicMaterial({
+      map: glowTexture, color: SUPER_BALL_COLOR, opacity: 0.42,
+      transparent: true, blending: THREE.AdditiveBlending,
+      depthWrite: false, toneMapped: false,
+    });
+    this.groundSpill = new THREE.Mesh(groundGeometry, groundMaterial);
+    this.groundSpill.name = "super-core-ground-spill";
+    this.groundSpill.rotation.x = -Math.PI / 2;
+    // Floor is y=0; ice and swamp overlays are y=.02/.025. Keep the glow
+    // just above all three, at world ground height rather than crystal Y.
+    this.groundSpill.position.y = 0.065;
+    this.groundSpill.visible = false;
+    this.disposables.push(
+      crystalGeometry, this.crystalMaterial, emissionTexture, collarGeometry, collarMaterial,
+      glowTexture, this.haloMaterial, this.heartMaterial, groundGeometry, groundMaterial,
+    );
     this.group.visible = false;
     this.group.position.set(0, 1.2, 0);
     this.scene.add(this.group);
+    this.scene.add(this.groundSpill);
   }
 
   public render(superSnapshot: NetSuperSnapshot | null, nowMs: number): void {
     if (superSnapshot === null || !superSnapshot.active) {
       this.group.visible = false;
+      this.groundSpill.visible = false;
       this.active = false;
       this.spinTime = 0;
       this.group.rotation.set(0, 0, 0);
       this.group.position.y = 1.2;
-      this.crystalMaterial.emissiveIntensity = 0.32;
+      this.crystalMaterial.emissiveIntensity = 0.95;
+      this.haloMaterial.opacity = 0.62;
+      this.heartMaterial.opacity = 0.42;
+      this.groundSpill.material.opacity = 0.42;
       return;
     }
     this.active = true;
     this.group.visible = true;
     this.group.position.set(superSnapshot.x, 1.2, superSnapshot.z);
+    this.groundSpill.position.set(superSnapshot.x, 0.065, superSnapshot.z);
     const remainingMs = superSnapshot.expiresAt - nowMs;
     if (remainingMs < SUPER_BLINK_S * 1000) {
       // Blink: visible toggle at ~5Hz for the last 3s.
       this.group.visible = Math.floor(nowMs / 200) % 2 === 0;
     }
+    this.groundSpill.visible = this.group.visible;
   }
 
   public update(deltaSeconds: number): void {
@@ -918,12 +1021,17 @@ export class SuperCore {
     this.spinTime += deltaSeconds;
     this.group.rotation.y += deltaSeconds * 0.55;
     this.group.position.y = 1.2 + Math.sin(this.spinTime * 1.6) * 0.06;
-    this.crystalMaterial.emissiveIntensity = 0.32 + Math.sin(this.spinTime * 1.4) * 0.055;
+    const pulse = Math.sin(this.spinTime * 1.4);
+    this.crystalMaterial.emissiveIntensity = 0.95 + pulse * 0.08;
+    this.haloMaterial.opacity = 0.62 + pulse * 0.05;
+    this.heartMaterial.opacity = 0.42 + pulse * 0.035;
+    this.groundSpill.material.opacity = 0.42 + pulse * 0.035;
   }
 
   public dispose(): void {
     this.render(null, 0);
     this.scene.remove(this.group);
+    this.scene.remove(this.groundSpill);
     for (const resource of this.disposables) resource.dispose();
     this.disposables.length = 0;
     this.group.clear();

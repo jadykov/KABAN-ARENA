@@ -137,18 +137,12 @@ describe("SceneManager camera clamp + wall fade", () => {
     expect(Math.abs(camera.z)).toBeLessThanOrEqual(limit + 1e-6);
   });
 
-  it("rests glass at 0.2, fades toward 0.1 when occluded", async () => {
-    // 4d.3 feedback round: the first 0.4 pass still read solid (0.4 over dark
-    // violet blocks ~60% of starlight), so the pair was re-derived as
-    // 0.1..0.2 — clearly glass at rest, more transparent on occlusion. The
-    // fade floor MUST stay <= the glass rest (a fade more opaque than rest
-    // would invert the semantics); boundary readability near camera now
-    // rides on the opaque neon top strips + floor edge, which never fade.
+  it("keeps the camera fade range and reduces it when the enclosure occludes", async () => {
     expect(WALL_GLASS_OPACITY).toBe(0.2);
     expect(WALL_FADE_OPACITY).toBe(0.1);
     expect(WALL_FADE_OPACITY).toBeLessThanOrEqual(WALL_GLASS_OPACITY);
     const manager = await createManager();
-    // Open arena center: camera well inside, walls at glass rest opacity.
+    // Open arena center: upper fence at normal visibility.
     manager.teleportSelf(0, 0);
     manager.update(FRAME, NO_MOVE, NO_LOOK);
     expect(manager.getWallOpacity()).toBeCloseTo(WALL_GLASS_OPACITY, 10);
@@ -164,7 +158,7 @@ describe("SceneManager camera clamp + wall fade", () => {
   });
 });
 
-describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", () => {
+describe("SceneManager enclosure, nebulae and fireflies", () => {
   async function createManagerWithScene(): Promise<{
     manager: SceneManager; scene: THREE.Scene; camera: THREE.PerspectiveCamera;
   }> {
@@ -191,38 +185,32 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     expect(directional[0]!.shadow.mapSize.y).toBeLessThanOrEqual(SHADOW_MAP_SIZE);
   });
 
-  it("renders the 4 walls as transparent glass at the glass rest opacity", async () => {
-    expect(WALL_GLASS_OPACITY).toBe(0.2);
-    const { scene } = await createManagerWithScene();
-    // Walls are the only TRANSPARENT 4-count InstancedMesh on a unit box
-    // (platform tops share the 4-count unit-box shape but stay opaque;
-    // strips use a flat 0.08-high box, obstacles come in 8s).
-    const walls: THREE.InstancedMesh[] = [];
-    scene.traverse((child: THREE.Object3D) => {
-      if (child instanceof THREE.InstancedMesh && child.count === 4) {
-        const geometry = child.geometry;
-        const material = child.material as THREE.MeshStandardMaterial;
-        if (
-          geometry instanceof THREE.BoxGeometry
-          && geometry.parameters.width === 1
-          && geometry.parameters.height === 1
-          && material.transparent === true
-        ) {
-          walls.push(child);
-        }
-      }
-    });
-    expect(walls).toHaveLength(1);
-    const wall = walls[0];
-    if (wall === undefined) {
-      return;
+  it("fades the open wire enclosure by the camera while keeping its low board opaque", async () => {
+    const { manager, scene } = await createManagerWithScene();
+    const boards = scene.getObjectByName("sports-fence-boards") as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+    const frame = scene.getObjectByName("sports-fence-frame") as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+    const net = scene.getObjectByName("sports-fence-diamond-net") as THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>;
+    expect(boards).toBeInstanceOf(THREE.Mesh);
+    expect(frame).toBeInstanceOf(THREE.Mesh);
+    expect(net).toBeInstanceOf(THREE.LineSegments);
+    manager.teleportSelf(0, 0);
+    manager.update(FRAME, NO_MOVE, NO_LOOK);
+    for (const material of [frame.material, net.material]) {
+      expect(material.opacity).toBe(1);
     }
-    const material = wall.material as THREE.MeshStandardMaterial;
-    expect(material.transparent).toBe(true);
-    expect(material.opacity).toBeCloseTo(WALL_GLASS_OPACITY, 10);
-    // depthWrite off: the far sky (stars/nebulae) is never occluded by wall
-    // depth regardless of transparent sort order.
-    expect(material.depthWrite).toBe(false);
+    manager.teleportSelf(ARENA_HALF_SIZE, ARENA_HALF_SIZE);
+    for (let i = 0; i < 120; i += 1) manager.update(FRAME, NO_MOVE, NO_LOOK);
+    for (const material of [frame.material, net.material]) {
+      expect(material.opacity).toBeCloseTo(WALL_FADE_OPACITY / WALL_GLASS_OPACITY, 10);
+      expect(material.transparent).toBe(true);
+      expect(material.depthWrite).toBe(false);
+    }
+    expect(boards.material.transparent).toBe(false);
+    expect(boards.material.opacity).toBe(1);
+    manager.teleportSelf(0, 0);
+    for (let i = 0; i < 120; i += 1) manager.update(FRAME, NO_MOVE, NO_LOOK);
+    for (const material of [frame.material, net.material]) expect(material.opacity).toBe(1);
+    expect(boards.material.opacity).toBe(1);
   });
 
   it("hangs 3 additive nebula sprites behind/above the walls (no new lights)", async () => {
@@ -241,7 +229,7 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
       expect(material.opacity).toBeLessThanOrEqual(0.22);
       expect(material.depthWrite).toBe(false);
       expect(material.fog).toBe(false);
-      // Outside the arena and above the walls: seen THROUGH the glass.
+      // Outside the arena: seen through the open wire enclosure.
       expect(Math.max(Math.abs(sprite.position.x), Math.abs(sprite.position.z))).toBeGreaterThan(
         ARENA_HALF_SIZE,
       );
@@ -863,8 +851,8 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
 
   it("synchronizes trampoline spill and suburban windows to server time on late build and round reset", () => {
     const batches = [
-      ["trampoline-night-rims", 0.92], ["trampoline-ground-spill", 0.14],
-      ["trampoline-block-spill", 0.16], ["suburban-window-glow", 0.36],
+      ["trampoline-night-rims", 0.92], ["trampoline-ground-spill", 0.14 * 1.30],
+      ["trampoline-block-spill", 0.16 * 1.30], ["suburban-window-glow", 0.68],
     ] as const;
     for (const elapsed of [0, 105, 119.999, 120, 121, 123.15, 126.3, 180]) {
       const scene = new THREE.Scene();

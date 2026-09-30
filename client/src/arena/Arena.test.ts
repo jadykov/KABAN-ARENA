@@ -7,7 +7,6 @@ import {
   MOVE_SPEED,
   OBSTACLE_COUNT,
   PHYSICS_GRAVITY_Y,
-  PLATFORM_CAP_DROP,
   PLATFORM_FIGURES,
   PLAYER_FRICTION,
   PLAYER_LINEAR_DAMPING,
@@ -16,6 +15,10 @@ import {
   SWAMP_RADIUS,
   TRAMPOLINE_IMPULSE,
   TRAMPOLINE_PAD_DIM,
+  WALL_FADE_OPACITY,
+  WALL_GLASS_OPACITY,
+  WALL_HEIGHT,
+  WALL_VISUAL_HEIGHT,
 } from "../config";
 import type { PhysicsWorld } from "../physics/World";
 import {
@@ -33,6 +36,7 @@ import {
   isOnSwamp,
 } from "./Arena";
 import { ARENA_LAYOUT } from "../layout";
+import { HL_CHARTREUSE } from "../palette";
 
 interface RecordedBox {
   hx: number;
@@ -220,10 +224,7 @@ describe("swamp, ice, and trampolines", () => {
     const floor = scene.getObjectByName("arena-floor") as THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>;
     const ice = scene.getObjectByName("ice-zones") as THREE.InstancedMesh;
     const pads = scene.getObjectByName("trampoline-pads") as THREE.InstancedMesh;
-    const edges = scene.getObjectByName("obstacle-top-edges") as THREE.InstancedMesh;
-    const blocks = scene.getObjectByName("arena-obstacles") as THREE.InstancedMesh;
     const platforms = scene.getObjectByName("platform-volumes") as THREE.InstancedMesh;
-    const plinths = scene.getObjectByName("wall-plinths") as THREE.InstancedMesh;
     const textures = [
       floor.material.map!,
       (ice.material as THREE.MeshStandardMaterial).map!,
@@ -242,16 +243,12 @@ describe("swamp, ice, and trampolines", () => {
       expect(new Set([16, 24, 32, 40, 48, 56, 64, 72, 80, 88]
         .map((y) => floorPixel(1, y))).size).toBeGreaterThan(2);
       expect(floorPixel(60, 60)).not.toBe(floorPixel(188, 60));
-      expect(edges.count).toBe(getObstacleLayout().length * 4);
-      // Beveled render meshes soften corners without touching the box/rotated
-      // box colliders checked below. Shared instancing keeps draw calls flat.
-      for (const mesh of [blocks, platforms, edges]) {
-        const normals = mesh.geometry.getAttribute("normal");
-        expect(normals.count).toBeGreaterThan(24);
-        expect(Array.from({ length: normals.count }, (_, i) => i).some((i) =>
-          Math.abs(normals.getX(i)) > 0.1 && Math.abs(normals.getY(i)) > 0.1)).toBe(true);
-      }
-      expect(plinths.count).toBe(4);
+      const normals = platforms.geometry.getAttribute("normal");
+      expect(normals.count).toBeGreaterThan(24);
+      expect(Array.from({ length: normals.count }, (_, i) => i).some((i) =>
+        Math.abs(normals.getX(i)) > 0.1 && Math.abs(normals.getY(i)) > 0.1)).toBe(true);
+      expect(scene.getObjectByName("arena-obstacles")).toBeUndefined();
+      expect(scene.getObjectByName("obstacle-top-edges")).toBeUndefined();
       expect(scene.children.filter((child) => child instanceof THREE.Light)).toHaveLength(0);
     } finally {
       builder.dispose(scene);
@@ -473,7 +470,7 @@ describe("open ladders, quiet paving, flowers, and trampoline evening light", ()
     }
   });
 
-  it("places low flower beds only on saved covers 4–7 and leaves most of each roof clear", () => {
+  it("turns all four low covers into full planters with flush soil and planting across the footprint", () => {
     const scene = new THREE.Scene();
     const builder = new ArenaBuilder();
     builder.buildVisuals(scene);
@@ -481,64 +478,57 @@ describe("open ladders, quiet paving, flowers, and trampoline evening light", ()
       const beds = scene.getObjectByName("side-flower-beds") as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
       const blossoms = scene.getObjectByName("side-flower-blossoms") as THREE.InstancedMesh;
       expect(beds).toBeInstanceOf(THREE.Mesh);
-      expect(beds).not.toBeInstanceOf(THREE.InstancedMesh);
-      expect(scene.getObjectByName("side-flower-greenery")).toBeUndefined();
       expect(beds.material.vertexColors).toBe(true);
-      expect(beds.material.color.getHex()).toBe(0xffffff);
       expect(beds.material.roughness).toBe(1);
-      expect(blossoms.count).toBe(20);
-      const bedPositions = beds.geometry.getAttribute("position");
-      const bedColors = beds.geometry.getAttribute("color");
-      const bedNormals = beds.geometry.getAttribute("normal");
-      expect(bedPositions.count / 3).toBe(752);
-      const soilColor = new THREE.Color(0x75644d);
-      const greeneryColor = new THREE.Color(0x71844b);
+      expect(blossoms.count).toBe(64);
+      const positions = beds.geometry.getAttribute("position");
+      const colors = beds.geometry.getAttribute("color");
+      const soilColor = new THREE.Color(0x695b45);
+      const stemColor = new THREE.Color(0x71844b);
+      const point = new THREE.Vector3();
       const matrix = new THREE.Matrix4();
-      const position = new THREE.Vector3();
-      const scale = new THREE.Vector3();
-      const rotation = new THREE.Quaternion();
+      const raycaster = new THREE.Raycaster();
+      scene.updateMatrixWorld(true);
       for (const [index, cover] of getObstacleLayout().slice(4, 8).entries()) {
         const soilBounds = new THREE.Box3();
-        const greeneryBounds = new THREE.Box3();
-        let soilVertices = 0;
-        let greeneryVertices = 0;
-        for (let vertex = 0; vertex < bedPositions.count; vertex += 1) {
-          position.fromBufferAttribute(bedPositions, vertex);
-          if (Math.abs(position.x - cover.x) > cover.hx || Math.abs(position.z - cover.z) > cover.hz) continue;
-          const color = new THREE.Color().fromBufferAttribute(bedColors, vertex);
-          if (Math.abs(color.r - soilColor.r) < 0.00001) {
-            expect(color.g).toBeCloseTo(soilColor.g, 6);
-            expect(color.b).toBeCloseTo(soilColor.b, 6);
-            soilBounds.expandByPoint(position);
-            soilVertices += 1;
-          } else {
-            expect(color.r).toBeCloseTo(greeneryColor.r, 6);
-            expect(color.g).toBeCloseTo(greeneryColor.g, 6);
-            expect(color.b).toBeCloseTo(greeneryColor.b, 6);
-            greeneryBounds.expandByPoint(position);
-            greeneryVertices += 1;
-          }
-          expect(new THREE.Vector3().fromBufferAttribute(bedNormals, vertex).length()).toBeCloseTo(1, 5);
+        const borderBounds = new THREE.Box3();
+        for (let vertex = 0; vertex < positions.count; vertex += 1) {
+          point.fromBufferAttribute(positions, vertex);
+          if (Math.abs(point.x - cover.x) > cover.hx + 0.00001
+            || Math.abs(point.z - cover.z) > cover.hz + 0.00001) continue;
+          const color = new THREE.Color().fromBufferAttribute(colors, vertex);
+          if ((color.r - soilColor.r) ** 2 + (color.g - soilColor.g) ** 2 + (color.b - soilColor.b) ** 2 < 1e-10) soilBounds.expandByPoint(point);
+          else if ((color.r - stemColor.r) ** 2 + (color.g - stemColor.g) ** 2 + (color.b - stemColor.b) ** 2 >= 1e-10) borderBounds.expandByPoint(point);
+          expect(point.y).toBeGreaterThanOrEqual(-0.00001);
+          expect(point.y).toBeLessThan(cover.hy * 2 + 0.3);
         }
-        expect(soilVertices).toBe(324);
-        expect(greeneryVertices).toBe(240);
-        const bedSize = soilBounds.getSize(new THREE.Vector3());
-        const bedCenter = soilBounds.getCenter(new THREE.Vector3());
-        expect(bedCenter.x).toBeCloseTo(cover.x, 5);
-        expect(soilBounds.min.y).toBeCloseTo(cover.hy * 2, 5);
-        expect(soilBounds.max.y).toBeCloseTo(cover.hy * 2 + 0.05, 5);
-        expect(Math.abs(bedCenter.z - cover.z) + bedSize.z / 2).toBeLessThan(cover.hz);
-        expect(bedSize.x * bedSize.z / (cover.hx * cover.hz * 4)).toBeLessThan(0.15);
-        expect(Math.abs(bedCenter.z - cover.z)).toBeGreaterThan(cover.hz * 0.5);
-        expect(greeneryBounds.min.y).toBeCloseTo(cover.hy * 2 + 0.05, 5);
-        expect(greeneryBounds.max.y).toBeLessThan(cover.hy * 2 + 0.3);
-        for (let flower = index * 5; flower < index * 5 + 5; flower += 1) {
+        const soilSize = soilBounds.getSize(new THREE.Vector3());
+        expect(soilSize.x * soilSize.z / (cover.hx * cover.hz * 4)).toBeGreaterThan(0.8);
+        expect(soilBounds.min.y).toBeCloseTo(0, 5);
+        expect(soilBounds.max.y).toBeCloseTo(cover.hy * 2, 5);
+        expect(borderBounds.min.toArray()).toEqual([cover.x - cover.hx, 0, cover.z - cover.hz]);
+        expect(borderBounds.max.toArray()).toEqual([cover.x + cover.hx, cover.hy * 2, cover.z + cover.hz]);
+        const flowerBounds = new THREE.Box3();
+        for (let flower = index * 16; flower < index * 16 + 16; flower += 1) {
           blossoms.getMatrixAt(flower, matrix);
-          matrix.decompose(position, rotation, scale);
-          expect(Math.abs(position.x - cover.x) + 0.1 * scale.x).toBeLessThan(cover.hx);
-          expect(Math.abs(position.z - cover.z) + 0.1 * scale.z).toBeLessThan(cover.hz);
-          expect(position.y).toBeGreaterThan(cover.hy * 2);
-          expect(position.y + 0.025 * scale.y).toBeLessThan(cover.hy * 2 + 0.3);
+          point.setFromMatrixPosition(matrix);
+          flowerBounds.expandByPoint(point);
+          expect(Math.abs(point.x - cover.x)).toBeLessThan(cover.hx - 0.12);
+          expect(Math.abs(point.z - cover.z)).toBeLessThan(cover.hz - 0.12);
+          expect(point.y).toBeGreaterThan(cover.hy * 2);
+          expect(point.y).toBeLessThan(cover.hy * 2 + 0.3);
+        }
+        const flowerSize = flowerBounds.getSize(new THREE.Vector3());
+        expect(flowerSize.x).toBeGreaterThan(cover.hx * 1.3);
+        expect(flowerSize.z).toBeGreaterThan(cover.hz * 1.3);
+        // The soil is a broad continuous surface at the collider's old top.
+        for (const x of [-0.55, 0, 0.55]) {
+          for (const z of [-0.55, 0, 0.55]) {
+            raycaster.set(new THREE.Vector3(cover.x + x, cover.hy * 2 + 0.001, cover.z + z), new THREE.Vector3(0, -1, 0));
+            const hit = raycaster.intersectObject(beds)[0];
+            expect(hit).toBeDefined();
+            expect(hit!.point.y).toBeCloseTo(cover.hy * 2, 5);
+          }
         }
       }
       const { boxes, rotated, physics } = createRecordingPhysics();
@@ -558,8 +548,8 @@ describe("open ladders, quiet paving, flowers, and trampoline evening light", ()
     try {
       const effects = [
         { mesh: scene.getObjectByName("trampoline-night-rims") as THREE.InstancedMesh, opacity: 0.92, count: 2 },
-        { mesh: scene.getObjectByName("trampoline-ground-spill") as THREE.InstancedMesh, opacity: 0.14, count: 2 },
-        { mesh: scene.getObjectByName("trampoline-block-spill") as THREE.InstancedMesh, opacity: 0.16, count: 4 },
+        { mesh: scene.getObjectByName("trampoline-ground-spill") as THREE.InstancedMesh, opacity: 0.14 * 1.3, count: 2 },
+        { mesh: scene.getObjectByName("trampoline-block-spill") as THREE.InstancedMesh, opacity: 0.16 * 1.3, count: 4 },
       ];
       for (const effect of effects) {
         expect(effect.mesh.count).toBe(effect.count);
@@ -658,10 +648,10 @@ describe("open ladders, quiet paving, flowers, and trampoline evening light", ()
       triangles += (mesh.geometry.getIndex()?.count ?? mesh.geometry.getAttribute("position").count) / 3
         * (mesh instanceof THREE.InstancedMesh ? mesh.count : 1);
     }
-    // Six batches replace two old ramp batches: +1 daytime / +4 nighttime
-    // draw calls, with a small triangle budget and just two 64px maps.
+    // Whole planters use the same two batches as their previous strips;
+    // more low planting still fits a modest triangle budget.
     expect(meshes).toHaveLength(6);
-    expect(triangles).toBeLessThan(2800);
+    expect(triangles).toBeLessThan(4500);
     const spies = [...resources].map((resource) => vi.spyOn(resource, "dispose"));
     const oldRimMaterial = meshes[3]!.material as THREE.MeshBasicMaterial;
     builder.dispose(scene);
@@ -683,6 +673,254 @@ describe("open ladders, quiet paving, flowers, and trampoline evening light", ()
     builder.dispose(scene);
     builder.dispose(scene);
     expect(scene.children).toHaveLength(0);
+  });
+});
+
+describe("shop storage and sports enclosure", () => {
+  it("builds four distinct palletized covers within their old volumes with continuous landing tops", () => {
+    const scene = new THREE.Scene();
+    const builder = new ArenaBuilder();
+    builder.buildVisuals(scene);
+    try {
+      const timber = scene.getObjectByName("storage-timber") as THREE.Mesh;
+      const cartons = scene.getObjectByName("storage-packaging") as THREE.Mesh;
+      expect(timber).toBeInstanceOf(THREE.Mesh);
+      expect(cartons).toBeInstanceOf(THREE.Mesh);
+      expect(timber).not.toBeInstanceOf(THREE.InstancedMesh);
+      expect((timber.material as THREE.MeshStandardMaterial).map).toBeInstanceOf(THREE.DataTexture);
+      const counts: string[] = [];
+      const point = new THREE.Vector3();
+      const raycaster = new THREE.Raycaster();
+      scene.updateMatrixWorld(true);
+      for (const cover of getObstacleLayout().slice(0, 4)) {
+        const bounds = new THREE.Box3();
+        const coverCounts: number[] = [];
+        for (const mesh of [timber, cartons]) {
+          const positions = mesh.geometry.getAttribute("position");
+          let vertices = 0;
+          for (let vertex = 0; vertex < positions.count; vertex += 1) {
+            point.fromBufferAttribute(positions, vertex);
+            if (Math.abs(point.x - cover.x) > cover.hx + 0.00001
+              || Math.abs(point.z - cover.z) > cover.hz + 0.00001) continue;
+            vertices += 1;
+            bounds.expandByPoint(point);
+            expect(point.y).toBeGreaterThanOrEqual(-0.00001);
+            expect(point.y).toBeLessThanOrEqual(cover.hy * 2 + 0.00001);
+          }
+          coverCounts.push(vertices);
+        }
+        counts.push(coverCounts.join(","));
+        expect(bounds.min.x).toBeCloseTo(cover.x - cover.hx, 5);
+        expect(bounds.max.x).toBeCloseTo(cover.x + cover.hx, 5);
+        expect(Math.abs(bounds.min.z - (cover.z - cover.hz))).toBeLessThan(0.02);
+        expect(Math.abs(bounds.max.z - (cover.z + cover.hz))).toBeLessThan(0.02);
+        expect(bounds.max.y).toBeCloseTo(cover.hy * 2, 5);
+        for (const x of [-0.7, -0.23, 0.23, 0.7]) {
+          for (const z of [-0.7, -0.23, 0.23, 0.7]) {
+            raycaster.set(new THREE.Vector3(cover.x + x, cover.hy * 2 + 0.5, cover.z + z), new THREE.Vector3(0, -1, 0));
+            const hit = raycaster.intersectObjects([timber, cartons])[0];
+            expect(hit).toBeDefined();
+            expect(hit!.point.y).toBeCloseTo(cover.hy * 2, 5);
+          }
+        }
+      }
+      expect(new Set(counts).size).toBe(4);
+      const material = cartons.material as THREE.MeshStandardMaterial;
+      expect(material.vertexColors).toBe(true);
+      expect(material.roughness).toBe(1);
+      expect(material.transparent).toBe(false);
+    } finally {
+      builder.dispose(scene);
+    }
+  });
+
+  it("keeps crate bands and carton tape, labels and print visibly in front of their backing", () => {
+    const scene = new THREE.Scene();
+    const builder = new ArenaBuilder();
+    builder.buildVisuals(scene);
+    try {
+      const timber = scene.getObjectByName("storage-timber") as THREE.Mesh;
+      const packaging = scene.getObjectByName("storage-packaging") as THREE.Mesh;
+      const covers = getObstacleLayout();
+      scene.updateMatrixWorld(true);
+      const raycaster = new THREE.Raycaster();
+      const assertVisibleTint = (mesh: THREE.Mesh, origin: THREE.Vector3, direction: THREE.Vector3,
+        tint: number, backingLimit: number, axis: "x" | "y" | "z", sign: number): void => {
+        raycaster.set(origin, direction);
+        const hit = raycaster.intersectObject(mesh)[0];
+        expect(hit).toBeDefined();
+        const color = new THREE.Color().fromBufferAttribute(mesh.geometry.getAttribute("color"), hit!.face!.a);
+        const expected = new THREE.Color(tint);
+        expect(color.r).toBeCloseTo(expected.r, 6);
+        expect(color.g).toBeCloseTo(expected.g, 6);
+        expect(color.b).toBeCloseTo(expected.b, 6);
+        expect(sign * hit!.point[axis]).toBeGreaterThan(sign * backingLimit + 0.0005);
+      };
+      const wooden = covers[0]!;
+      for (const sign of [-1, 1]) {
+        // Horizontal plank seams and vertical corner straps on both Z faces.
+        const zBacking = wooden.z + sign * (1 - 0.022);
+        assertVisibleTint(timber, new THREE.Vector3(wooden.x - 0.505, 0.22 + 0.89 / 4, wooden.z + sign * 2),
+          new THREE.Vector3(0, 0, -sign), 0x74603f, zBacking, "z", sign);
+        assertVisibleTint(timber, new THREE.Vector3(wooden.x - 0.505 + 0.4575, 0.665, wooden.z + sign * 2),
+          new THREE.Vector3(0, 0, -sign), 0xa48760, zBacking, "z", sign);
+        // The matching side plank seams on both X faces.
+        assertVisibleTint(timber, new THREE.Vector3(wooden.x + sign * 2, 0.22 + 0.89 / 4, wooden.z),
+          new THREE.Vector3(-sign, 0, 0), 0x74603f, wooden.x + sign * (1 - 0.022), "x", sign);
+        // The center of the diagonal brace must hit its timber, not backing.
+        assertVisibleTint(timber, new THREE.Vector3(wooden.x - 0.505, 0.665, wooden.z + sign * 2),
+          new THREE.Vector3(0, 0, -sign), 0xa48760, zBacking, "z", sign);
+      }
+      // The lid joint is a real visible strip between flush planks.
+      assertVisibleTint(timber, new THREE.Vector3(wooden.x - 0.505, 3, wooden.z - 1.922 / 2 + 1.922 / 5),
+        new THREE.Vector3(0, -1, 0), 0x74603f, 1.995, "y", 1);
+      const mixed = covers[1]!;
+      for (const sign of [-1, 1]) {
+        const zBacking = mixed.z + sign * (1 - 0.009);
+        // Front/back packaging tape, paper labels, and the printed label line.
+        assertVisibleTint(packaging, new THREE.Vector3(mixed.x - 0.505, 1.44, mixed.z + sign * 2),
+          new THREE.Vector3(0, 0, -sign), 0xd2b78b, zBacking, "z", sign);
+        assertVisibleTint(packaging, new THREE.Vector3(mixed.x - 0.505 - 0.99 * 0.23,
+          0.88 + 1.12 * 0.70, mixed.z + sign * 2), new THREE.Vector3(0, 0, -sign),
+          0xd8d5bf, zBacking, "z", sign);
+        assertVisibleTint(packaging, new THREE.Vector3(mixed.x - 0.505 - 0.99 * 0.23,
+          0.88 + 1.12 * 0.62, mixed.z + sign * 2), new THREE.Vector3(0, 0, -sign),
+          0x605546, mixed.z + sign * (1 - 0.002), "z", sign);
+      }
+      // A visible layer joint crosses the carton body instead of leaving two
+      // identical-colored boxes touching as one uninterrupted brown face.
+      const stacked = covers[3]!;
+      raycaster.set(new THREE.Vector3(stacked.x - 0.505 + 0.25, 1.116, stacked.z + 2), new THREE.Vector3(0, 0, -1));
+      raycaster.far = 4;
+      expect(raycaster.intersectObject(packaging)).toHaveLength(0);
+    } finally {
+      builder.dispose(scene);
+    }
+  });
+
+  it("uses open diamond wires on a tall post frame and keeps the low boards opaque during camera fades", () => {
+    const scene = new THREE.Scene();
+    const builder = new ArenaBuilder();
+    builder.setWallOpacity(WALL_FADE_OPACITY);
+    builder.buildVisuals(scene);
+    try {
+      const net = scene.getObjectByName("sports-fence-diamond-net") as THREE.LineSegments;
+      const frame = scene.getObjectByName("sports-fence-frame") as THREE.Mesh;
+      const boards = scene.getObjectByName("sports-fence-boards") as THREE.Mesh;
+      expect(net).toBeInstanceOf(THREE.LineSegments);
+      const positions = net.geometry.getAttribute("position");
+      expect(positions.count).toBeLessThan(3000);
+      const sides = new Set<string>();
+      for (let vertex = 0; vertex < positions.count; vertex += 2) {
+        const a = new THREE.Vector3().fromBufferAttribute(positions, vertex);
+        const b = new THREE.Vector3().fromBufferAttribute(positions, vertex + 1);
+        const delta = b.clone().sub(a);
+        expect(Math.abs(delta.y)).toBeCloseTo(Math.hypot(delta.x, delta.z), 4);
+        expect(a.y).toBeGreaterThan(0.6);
+        expect(a.y).toBeLessThan(WALL_VISUAL_HEIGHT);
+        sides.add(Math.abs(delta.x) > 0.001 ? `z:${a.z}` : `x:${a.x}`);
+      }
+      expect(sides.size).toBe(4);
+      boards.geometry.computeBoundingBox();
+      frame.geometry.computeBoundingBox();
+      expect(boards.geometry.boundingBox!.max.y).toBeCloseTo(0.6, 5);
+      expect(frame.geometry.boundingBox!.max.y).toBeCloseTo(WALL_VISUAL_HEIGHT, 5);
+      for (const input of [WALL_FADE_OPACITY, WALL_GLASS_OPACITY, -1, 2, NaN]) {
+        builder.setWallOpacity(input);
+        const expected = builder.getWallOpacity() / WALL_GLASS_OPACITY;
+        for (const object of [net, frame]) {
+          const material = object.material as THREE.Material;
+          expect(material.opacity).toBeCloseTo(expected, 8);
+          expect(material.transparent).toBe(expected < 1);
+          expect(material.depthWrite).toBe(expected === 1);
+        }
+        expect((boards.material as THREE.Material).opacity).toBe(1);
+        expect((boards.material as THREE.Material).transparent).toBe(false);
+        expect((boards.material as THREE.Material).depthWrite).toBe(true);
+      }
+      const { boxes, physics } = createRecordingPhysics();
+      builder.buildColliders(physics);
+      expect(boxes.slice(0, 4).every((box) => box.hy * 2 === WALL_HEIGHT)).toBe(true);
+      expect(WALL_HEIGHT).toBe(1.5);
+      expect(WALL_VISUAL_HEIGHT).toBe(3.5);
+      scene.updateMatrixWorld(true);
+      const raycaster = new THREE.Raycaster(new THREE.Vector3(0, 0.3, -ARENA_HALF_SIZE - 2), new THREE.Vector3(0, 0, 1));
+      expect(raycaster.intersectObject(boards).length).toBeGreaterThan(0);
+    } finally {
+      builder.dispose(scene);
+    }
+  });
+
+  it("raises rim radiance and both spill strengths by 30% with a wider ground pool and no lights", () => {
+    const scene = new THREE.Scene();
+    const builder = new ArenaBuilder();
+    builder.buildVisuals(scene);
+    try {
+      const rims = scene.getObjectByName("trampoline-night-rims") as THREE.InstancedMesh;
+      const ground = scene.getObjectByName("trampoline-ground-spill") as THREE.InstancedMesh;
+      const faces = scene.getObjectByName("trampoline-block-spill") as THREE.InstancedMesh;
+      const rimMaterial = rims.material as THREE.MeshBasicMaterial;
+      const oldColor = new THREE.Color(HL_CHARTREUSE);
+      expect(rimMaterial.color.r / oldColor.r).toBeCloseTo(1.3, 8);
+      expect(rimMaterial.color.g / oldColor.g).toBeCloseTo(1.3, 8);
+      expect(rimMaterial.color.b / oldColor.b).toBeCloseTo(1.3, 8);
+      expect(rimMaterial.blending).toBe(THREE.AdditiveBlending);
+      expect(rims.visible).toBe(false);
+      builder.setEveningLighting(1);
+      expect(rimMaterial.opacity).toBe(0.92);
+      expect((ground.material as THREE.MeshBasicMaterial).opacity / 0.14).toBeCloseTo(1.3, 8);
+      expect((faces.material as THREE.MeshBasicMaterial).opacity / 0.16).toBeCloseTo(1.3, 8);
+      const matrix = new THREE.Matrix4();
+      const scale = new THREE.Vector3();
+      ground.getMatrixAt(0, matrix);
+      scale.setFromMatrixScale(matrix);
+      expect(scale.x).toBeGreaterThan(4.6);
+      expect(scale.x).toBeCloseTo(5.05, 5);
+      builder.setEveningLighting(0);
+      expect([rims, ground, faces].every((mesh) => !mesh.visible)).toBe(true);
+      expect(scene.children.some((child) => child instanceof THREE.Light)).toBe(false);
+    } finally {
+      builder.dispose(scene);
+    }
+  });
+
+  it("batches the new surfaces and disposes all their geometry, materials, texture and camera handles", () => {
+    const scene = new THREE.Scene();
+    const builder = new ArenaBuilder();
+    builder.buildVisuals(scene);
+    const names = ["storage-timber", "storage-packaging", "side-flower-beds", "side-flower-blossoms",
+      "sports-fence-boards", "sports-fence-frame", "sports-fence-diamond-net", "platform-volumes", "shop-roof-flashings"];
+    const resources = new Set<{ dispose(): void }>();
+    let triangles = 0;
+    for (const name of names) {
+      const object = scene.getObjectByName(name) as THREE.Mesh | THREE.LineSegments;
+      expect(object).toBeDefined();
+      resources.add(object.geometry);
+      const material = object.material as THREE.MeshStandardMaterial;
+      resources.add(material);
+      if (material.map) resources.add(material.map);
+      if (object instanceof THREE.InstancedMesh) resources.add(object);
+      if (!(object instanceof THREE.LineSegments)) {
+        triangles += (object.geometry.getIndex()?.count ?? object.geometry.getAttribute("position").count) / 3
+          * (object instanceof THREE.InstancedMesh ? object.count : 1);
+      }
+    }
+    // Nine batches replace twelve old surface batches (four hidden caps removed).
+    expect(names).toHaveLength(9);
+    expect(triangles).toBeLessThan(13000);
+    const oldFrameMaterial = (scene.getObjectByName("sports-fence-frame") as THREE.Mesh).material as THREE.Material;
+    const spies = [...resources].map((resource) => vi.spyOn(resource, "dispose"));
+    builder.dispose(scene);
+    for (const spy of spies) expect(spy).toHaveBeenCalledOnce();
+    expect(scene.children).toHaveLength(0);
+    builder.setWallOpacity(WALL_FADE_OPACITY);
+    expect(oldFrameMaterial.opacity).toBe(1);
+    builder.buildVisuals(scene);
+    const newFrameMaterial = (scene.getObjectByName("sports-fence-frame") as THREE.Mesh).material as THREE.Material;
+    expect(newFrameMaterial).not.toBe(oldFrameMaterial);
+    expect(newFrameMaterial.opacity).toBeCloseTo(0.5, 8);
+    builder.dispose(scene);
+    builder.dispose(scene);
   });
 });
 
@@ -775,42 +1013,46 @@ describe("collider-visual match", () => {
     }
   });
 
-  it("keeps platform cap tops strictly below body tops (no z-fighting)", () => {
-    // Stage 4d.2: cap plates drop 5mm below the figure top so the two top
-    // faces are never coplanar (classic z-fight). Caps are the only
-    // individual box meshes with height 0.1 (ramps use 0.2 slabs).
-    expect(PLATFORM_CAP_DROP).toBe(0.005);
+  it("gives all four shops neutral flat roofs and flush flashing without raised obstructions", () => {
     const scene = new THREE.Scene();
     const builder = new ArenaBuilder();
     builder.buildVisuals(scene);
     try {
-      const platforms = getPlatforms();
-      const caps: THREE.Mesh[] = [];
-      scene.traverse((child: THREE.Object3D) => {
-        if (child instanceof THREE.Mesh && !(child instanceof THREE.InstancedMesh)) {
-          const geometry = child.geometry;
-          if (geometry instanceof THREE.BoxGeometry && geometry.parameters.height === 0.1) {
-            caps.push(child);
+      const roofs = scene.getObjectByName("platform-volumes") as THREE.InstancedMesh;
+      const flashing = scene.getObjectByName("shop-roof-flashings") as THREE.Mesh;
+      expect(roofs.count).toBe(getPlatforms().length);
+      const material = roofs.material as THREE.MeshStandardMaterial;
+      expect(material.map).toBeInstanceOf(THREE.DataTexture);
+      expect(material.roughness).toBeGreaterThan(0.9);
+      const normals = roofs.geometry.getAttribute("normal");
+      const colors = roofs.geometry.getAttribute("color");
+      for (let vertex = 0; vertex < normals.count; vertex += 1) {
+        if (normals.getY(vertex) < 0.99) continue;
+        const color = new THREE.Color().fromBufferAttribute(colors, vertex);
+        expect(Math.max(color.r, color.g, color.b) / Math.min(color.r, color.g, color.b)).toBeLessThan(1.2);
+      }
+      const positions = flashing.geometry.getAttribute("position");
+      scene.updateMatrixWorld(true);
+      const raycaster = new THREE.Raycaster();
+      for (const platform of getPlatforms()) {
+        for (let vertex = 0; vertex < positions.count; vertex += 1) {
+          const x = positions.getX(vertex);
+          const z = positions.getZ(vertex);
+          if (Math.abs(x - platform.x) > platform.hx || Math.abs(z - platform.z) > platform.hz) continue;
+          expect(positions.getY(vertex)).toBeLessThanOrEqual(platform.topY + 0.00001);
+          expect(positions.getY(vertex)).toBeGreaterThanOrEqual(platform.topY - 0.031);
+        }
+        for (const dx of [-0.9, 0, 0.9]) {
+          for (const dz of [-0.9, 0, 0.9]) {
+            raycaster.set(new THREE.Vector3(platform.x + dx, platform.topY + 1, platform.z + dz), new THREE.Vector3(0, -1, 0));
+            const hit = raycaster.intersectObjects([roofs, flashing])[0];
+            expect(hit).toBeDefined();
+            expect(hit!.point.y).toBeCloseTo(platform.topY, 5);
           }
         }
-      });
-      expect(caps).toHaveLength(platforms.length);
-      for (const platform of platforms) {
-        const cap = caps.find(
-          (mesh) => mesh.position.x === platform.x && mesh.position.z === platform.z,
-        );
-        expect(cap).toBeDefined();
-        if (cap === undefined) {
-          continue;
-        }
-        const geometry = cap.geometry;
-        if (!(geometry instanceof THREE.BoxGeometry)) {
-          throw new Error("cap mesh lost its box geometry");
-        }
-        const capTop = cap.position.y + geometry.parameters.height / 2;
-        expect(capTop).toBeLessThan(platform.topY);
-        expect(platform.topY - capTop).toBeCloseTo(PLATFORM_CAP_DROP, 10);
       }
+      expect(scene.children.filter((child) => child instanceof THREE.Mesh && child.geometry instanceof THREE.BoxGeometry
+        && child.geometry.parameters.height === 0.1)).toHaveLength(0);
     } finally {
       builder.dispose(scene);
     }
