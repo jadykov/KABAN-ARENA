@@ -31,7 +31,6 @@ import {
   BASE_FLOOR,
   BASE_FLOOR_GROUT,
   BASE_FLOOR_LIGHT,
-  BASE_FLOOR_STAR,
   BASE_ICE,
   BASE_ICE_EDGE,
   BASE_ICE_FACET,
@@ -42,8 +41,6 @@ import {
   BASE_PAD_RIM,
   BASE_PLATFORM,
   BASE_PLATFORM_TOP,
-  BASE_RAMP,
-  BASE_RAMP_MARK,
   BASE_TRAMPOLINE,
   BASE_WALL,
   BASE_WALL_PLINTH,
@@ -249,11 +246,18 @@ export class ArenaBuilder {
   private readonly swampBubbleMatrix = new THREE.Matrix4();
   private readonly swampBubbleScale = new THREE.Vector3();
   private readonly swampBubbleLocations: Array<{ x: number; z: number; phase: number }> = [];
+  private eveningAmount = 0;
+  private readonly eveningEffects: Array<{
+    mesh: THREE.InstancedMesh;
+    material: THREE.MeshBasicMaterial;
+    opacity: number;
+  }> = [];
 
   public buildVisuals(scene: THREE.Scene): void {
     this.buildFloor(scene);
     this.buildWalls(scene);
     this.buildObstacles(scene);
+    this.buildFlowerBeds(scene);
     this.buildPlatforms(scene);
     this.buildIceZones(scene);
     this.buildSwampZones(scene);
@@ -326,6 +330,16 @@ export class ArenaBuilder {
     return this.wallOpacity;
   }
 
+  // The authoritative round's evening phase is supplied by SceneManager.
+  // Keep it before a late build as well; updates only touch existing materials.
+  public setEveningLighting(amount: number): void {
+    this.eveningAmount = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0;
+    for (const effect of this.eveningEffects) {
+      effect.mesh.visible = this.eveningAmount > 0;
+      effect.material.opacity = effect.opacity * this.eveningAmount;
+    }
+  }
+
   // Called from SceneManager.updateCombat in both play and spectator paths.
   // Only one instance buffer changes; bubbles share one geometry/material.
   public update(deltaSeconds: number): void {
@@ -357,6 +371,8 @@ export class ArenaBuilder {
     this.swampBubbles = null;
     this.swampBubbleTime = 0;
     this.swampBubbleLocations.length = 0;
+    this.eveningAmount = 0;
+    this.eveningEffects.length = 0;
     for (const tracked of this.disposables) {
       tracked.dispose();
     }
@@ -377,7 +393,8 @@ export class ArenaBuilder {
     const size = ARENA_HALF_SIZE * 2;
     const geometry = this.track(new THREE.PlaneGeometry(size, size));
     const texture = this.track(createFloorTexture());
-    texture.repeat.set(6, 6);
+    // One unique arena-wide pattern removes the short repeating tile stamp.
+    texture.repeat.set(1, 1);
     const material = this.track(
       new THREE.MeshStandardMaterial({ color: NEUTRAL_WHITE, map: texture, roughness: 0.94, metalness: 0 }),
     );
@@ -528,6 +545,81 @@ export class ArenaBuilder {
     this.place(edges, scene);
   }
 
+  private buildFlowerBeds(scene: THREE.Scene): void {
+    // Only the four saved low side covers receive a narrow bed at their outer
+    // edge. Most of each roof stays clear; all plants are purely decorative.
+    const beds = getObstacleLayout().slice(4, 8);
+    const soilGeometry = new RoundedBoxGeometry(1, 1, 1, 1, 0.1);
+    const greeneryGeometry = createFlowerStemGeometry();
+    // Static soil and leaves have identical material settings. Bake their
+    // transforms and original linear colors into one mesh to save a draw call.
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const colors: number[] = [];
+    const soilColor = new THREE.Color(0x75644d);
+    const greeneryColor = new THREE.Color(0x71844b);
+    const blossomGeometry = this.track(createBlossomGeometry());
+    const blossomMaterial = this.track(new THREE.MeshStandardMaterial({
+      color: NEUTRAL_WHITE, vertexColors: true, roughness: 0.95, side: THREE.DoubleSide,
+    }));
+    const flowersPerBed = 5;
+    const blossoms = this.track(new THREE.InstancedMesh(
+      blossomGeometry, blossomMaterial, beds.length * flowersPerBed,
+    ));
+    blossoms.name = "side-flower-blossoms";
+    const matrix = new THREE.Matrix4();
+    const rotation = new THREE.Quaternion();
+    const position = new THREE.Vector3();
+    const scale = new THREE.Vector3();
+    const flowerColors = [new THREE.Color(0xe3bf70), new THREE.Color(0xd69991), new THREE.Color(0xe4dfc9)];
+    beds.forEach((bed, bedIndex) => {
+      const width = Math.min(1.48, bed.hx * 2 - 0.3);
+      const depth = Math.min(0.34, bed.hz * 0.45);
+      const z = bed.z + Math.sign(bed.z) * (bed.hz - depth / 2 - 0.13);
+      const topY = bed.hy * 2;
+      matrix.makeScale(width, 0.05, depth);
+      matrix.setPosition(bed.x, topY + 0.025, z);
+      appendColoredGeometry(soilGeometry, matrix, soilColor, positions, normals, colors);
+      for (let flower = 0; flower < flowersPerBed; flower += 1) {
+        const index = bedIndex * flowersPerBed + flower;
+        const variation = hash2(flower + 31, bedIndex + 5);
+        const height = 0.14 + variation * 0.075;
+        position.set(
+          bed.x + (flower / (flowersPerBed - 1) - 0.5) * width * 0.82,
+          topY + 0.05,
+          z + (hash2(flower + 7, bedIndex + 11) - 0.5) * depth * 0.62,
+        );
+        rotation.setFromAxisAngle(new THREE.Vector3(0, 1, 0), variation * Math.PI * 2);
+        scale.set(0.8 + variation * 0.3, height, 0.8 + variation * 0.3);
+        matrix.compose(position, rotation, scale);
+        appendColoredGeometry(greeneryGeometry, matrix, greeneryColor, positions, normals, colors);
+        position.y += height;
+        scale.setScalar(0.8 + variation * 0.3);
+        matrix.compose(position, rotation, scale);
+        blossoms.setMatrixAt(index, matrix);
+        blossoms.setColorAt(index, flowerColors[(flower + bedIndex) % flowerColors.length]!);
+      }
+    });
+    soilGeometry.dispose();
+    greeneryGeometry.dispose();
+    const bedGeometry = this.track(new THREE.BufferGeometry());
+    bedGeometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    bedGeometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    bedGeometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    bedGeometry.computeBoundingSphere();
+    const bedMaterial = this.track(new THREE.MeshStandardMaterial({
+      color: NEUTRAL_WHITE, vertexColors: true, roughness: 1, side: THREE.DoubleSide,
+    }));
+    const soilAndGreenery = new THREE.Mesh(bedGeometry, bedMaterial);
+    soilAndGreenery.name = "side-flower-beds";
+    blossoms.instanceMatrix.needsUpdate = true;
+    for (const mesh of [soilAndGreenery, blossoms]) {
+      mesh.receiveShadow = true;
+      this.place(mesh, scene);
+    }
+    if (blossoms.instanceColor !== null) blossoms.instanceColor.needsUpdate = true;
+  }
+
   private buildPlatforms(scene: THREE.Scene): void {
     // Elevated shops: one InstancedMesh for all figure volumes (warm-lit
     // moss tops and cooler shaded side faces, per-instance pale tint so the
@@ -586,69 +678,64 @@ export class ArenaBuilder {
       this.place(cap, scene);
     }
 
-    // Walk-up ramps retain their exact collider-aligned transforms, now in a
-    // single instanced batch to pay for the new surface detail draw calls.
-    const rampMaterial = this.track(
-      new THREE.MeshStandardMaterial({ color: BASE_RAMP, roughness: 0.9, metalness: 0 }),
-    );
-    const ramps = getRamps();
-    const rampGeometry = this.track(new RoundedBoxGeometry(1, 1, 1, 2, 0.035));
-    const rampSlabs = new THREE.InstancedMesh(rampGeometry, rampMaterial, ramps.length);
-    rampSlabs.name = "ramp-slabs";
-    const slabMatrix = new THREE.Matrix4();
-    const slabRotation = new THREE.Quaternion();
-    const slabPosition = new THREE.Vector3();
-    const slabScale = new THREE.Vector3();
-    ramps.forEach((ramp, index) => {
-      const length = ramp.halfLength * 2;
-      const thick = ramp.halfThick * 2;
-      const width = ramp.halfWidth * 2;
-      const isX = ramp.axis === "x";
-      slabPosition.set(ramp.x, ramp.y, ramp.z);
-      slabRotation.setFromAxisAngle(
-        isX ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1),
-        ramp.angle,
-      );
-      slabScale.set(isX ? width : length, thick, isX ? length : width);
-      slabMatrix.compose(slabPosition, slabRotation, slabScale);
-      rampSlabs.setMatrixAt(index, slabMatrix);
-    });
-    rampSlabs.instanceMatrix.needsUpdate = true;
-    rampSlabs.castShadow = true;
-    rampSlabs.receiveShadow = true;
-    this.place(rampSlabs, scene);
-
-    // Four short stair-like markings on every slope communicate that ramps
-    // are walkable, while the space underneath remains visibly open.
-    const markGeometry = this.track(new RoundedBoxGeometry(1, 1, 1, 2, 0.07));
-    const markMaterial = this.track(new THREE.MeshStandardMaterial({
-      color: BASE_RAMP_MARK, roughness: 0.96,
+    // Open wooden ladders follow the exact original slab transforms. Rails and
+    // rungs share one low-poly timber batch; their tops stay on the unchanged
+    // collision surface, including the existing clearance beneath its high end.
+    const woodTexture = this.track(createWoodTexture());
+    const rampMaterial = this.track(new THREE.MeshStandardMaterial({
+      color: NEUTRAL_WHITE, map: woodTexture, roughness: 0.96, metalness: 0,
     }));
-    const marks = new THREE.InstancedMesh(markGeometry, markMaterial, ramps.length * 4);
-    marks.name = "ramp-surface-marks";
-    const markMatrix = new THREE.Matrix4();
+    const ramps = getRamps();
+    const rungCounts = ramps.map((ramp) => Math.ceil(ramp.halfLength * 2 / 0.64) + 1);
+    const rampGeometry = this.track(new THREE.BoxGeometry(1, 1, 1));
+    const ladders = this.track(new THREE.InstancedMesh(
+      rampGeometry, rampMaterial, rungCounts.reduce((sum, count) => sum + count + 2, 0),
+    ));
+    ladders.name = "ramp-wooden-ladders";
     const rotation = new THREE.Quaternion();
-    const markPosition = new THREE.Vector3();
-    const markScale = new THREE.Vector3();
-    let markIndex = 0;
-    for (const ramp of ramps) {
+    const position = new THREE.Vector3();
+    const scale = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    const lightWood = new THREE.Color(NEUTRAL_WHITE);
+    const darkWood = new THREE.Color(0xe3d1b8);
+    let timberIndex = 0;
+    ramps.forEach((ramp, rampIndex) => {
       const runsOnZ = ramp.axis === "x";
       rotation.setFromAxisAngle(
         runsOnZ ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1),
         ramp.angle,
       );
-      markScale.set(runsOnZ ? ramp.halfWidth * 1.3 : 0.10, 0.013,
-        runsOnZ ? 0.10 : ramp.halfWidth * 1.3);
-      for (let band = 0; band < 4; band += 1) {
-        const along = ((band + 1) / 5 - 0.5) * ramp.halfLength * 2;
-        markPosition.set(runsOnZ ? 0 : along, ramp.halfThick + 0.014, runsOnZ ? along : 0);
-        markPosition.applyQuaternion(rotation).add(new THREE.Vector3(ramp.x, ramp.y, ramp.z));
-        markMatrix.compose(markPosition, rotation, markScale);
-        marks.setMatrixAt(markIndex++, markMatrix);
+      center.set(ramp.x, ramp.y, ramp.z);
+      const railWidth = 0.14;
+      for (const side of [-1, 1]) {
+        const across = side * (ramp.halfWidth - railWidth / 2);
+        position.set(runsOnZ ? across : 0, 0, runsOnZ ? 0 : across);
+        position.applyQuaternion(rotation).add(center);
+        scale.set(runsOnZ ? railWidth : ramp.halfLength * 2,
+          ramp.halfThick * 2, runsOnZ ? ramp.halfLength * 2 : railWidth);
+        matrix.compose(position, rotation, scale);
+        ladders.setMatrixAt(timberIndex, matrix);
+        ladders.setColorAt(timberIndex++, darkWood);
       }
-    }
-    marks.instanceMatrix.needsUpdate = true;
-    this.place(marks, scene);
+      const rungCount = rungCounts[rampIndex] ?? 0;
+      const rungDepth = 0.16;
+      const rungThick = Math.min(0.14, ramp.halfThick * 2);
+      const span = ramp.halfWidth * 2 - railWidth * 2;
+      for (let rung = 0; rung < rungCount; rung += 1) {
+        const along = (rung / (rungCount - 1) - 0.5) * (ramp.halfLength * 2 - rungDepth);
+        position.set(runsOnZ ? 0 : along, ramp.halfThick - rungThick / 2, runsOnZ ? along : 0);
+        position.applyQuaternion(rotation).add(center);
+        scale.set(runsOnZ ? span : rungDepth, rungThick, runsOnZ ? rungDepth : span);
+        matrix.compose(position, rotation, scale);
+        ladders.setMatrixAt(timberIndex, matrix);
+        ladders.setColorAt(timberIndex++, rung % 3 === 0 ? darkWood : lightWood);
+      }
+    });
+    ladders.instanceMatrix.needsUpdate = true;
+    if (ladders.instanceColor !== null) ladders.instanceColor.needsUpdate = true;
+    ladders.castShadow = true;
+    ladders.receiveShadow = true;
+    this.place(ladders, scene);
   }
 
   private buildIceZones(scene: THREE.Scene): void {
@@ -773,6 +860,74 @@ export class ArenaBuilder {
     pads.castShadow = true;
     this.place(bases, scene);
     this.place(pads, scene);
+    this.buildTrampolineEveningEffects(scene, zones);
+  }
+
+  private buildTrampolineEveningEffects(scene: THREE.Scene, zones: readonly ZoneSpec[]): void {
+    // These are emissive-looking surface meshes, never additional lights or
+    // shadows. Two soft ground decals and four small inward-facing decals use
+    // one shared radial map; the white-to-black face vertices fade upward.
+    const glowTexture = this.track(createGroundGlowTexture());
+    const rimGeometry = this.track(new THREE.RingGeometry(0.82, 0.87, 40));
+    const rimMaterial = this.track(new THREE.MeshBasicMaterial({
+      color: HL_CHARTREUSE, transparent: true, depthWrite: false,
+      side: THREE.DoubleSide, toneMapped: false,
+    }));
+    const rims = this.track(new THREE.InstancedMesh(rimGeometry, rimMaterial, zones.length));
+    rims.name = "trampoline-night-rims";
+    const groundGeometry = this.track(new THREE.PlaneGeometry(2, 2));
+    const groundMaterial = this.track(new THREE.MeshBasicMaterial({
+      map: glowTexture, color: HL_CHARTREUSE, transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+    }));
+    const ground = this.track(new THREE.InstancedMesh(groundGeometry, groundMaterial, zones.length));
+    ground.name = "trampoline-ground-spill";
+    const matrix = new THREE.Matrix4();
+    const flatRotation = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
+    zones.forEach((zone, index) => {
+      matrix.copy(flatRotation).scale(new THREE.Vector3(zone.radius, zone.radius, 1));
+      matrix.setPosition(zone.x, 0.365, zone.z);
+      rims.setMatrixAt(index, matrix);
+      matrix.copy(flatRotation).scale(new THREE.Vector3(4.6, 4.6, 1));
+      matrix.setPosition(zone.x, 0.032, zone.z);
+      ground.setMatrixAt(index, matrix);
+    });
+
+    const blocks = getObstacleLayout().slice(0, 4);
+    const faceGeometry = this.track(new THREE.PlaneGeometry(1, 1));
+    const positions = faceGeometry.getAttribute("position");
+    const colors = new Float32Array(positions.count * 3);
+    for (let i = 0; i < positions.count; i += 1) {
+      const brightness = 0.5 - positions.getY(i);
+      colors.set([brightness, brightness, brightness], i * 3);
+    }
+    faceGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    const faceMaterial = this.track(new THREE.MeshBasicMaterial({
+      map: glowTexture, color: HL_CHARTREUSE, vertexColors: true, transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+    }));
+    const faces = this.track(new THREE.InstancedMesh(faceGeometry, faceMaterial, blocks.length));
+    faces.name = "trampoline-block-spill";
+    blocks.forEach((block, index) => {
+      // The saved middle blocks sit either side of the pads, so their inner
+      // X faces receive the spill. The plane stays strictly within each face.
+      const facing = -Math.sign(block.x);
+      matrix.makeRotationY(facing * Math.PI / 2);
+      matrix.scale(new THREE.Vector3(block.hz * 2 - 0.24, block.hy * 2 - 0.24, 1));
+      matrix.setPosition(block.x + facing * (block.hx + 0.006), block.hy, block.z);
+      faces.setMatrixAt(index, matrix);
+    });
+    const effects = [
+      { mesh: rims, material: rimMaterial, opacity: 0.92 },
+      { mesh: ground, material: groundMaterial, opacity: 0.14 },
+      { mesh: faces, material: faceMaterial, opacity: 0.16 },
+    ];
+    for (const effect of effects) {
+      effect.mesh.instanceMatrix.needsUpdate = true;
+      this.eveningEffects.push(effect);
+      this.place(effect.mesh, scene);
+    }
+    this.setEveningLighting(this.eveningAmount);
   }
 
   private buildSpawns(scene: THREE.Scene): void {
@@ -836,9 +991,7 @@ function makeRgbTexture(size: number, pick: (x: number, y: number) => number): T
   return texture;
 }
 
-// Two by two stone tiles repeat across the unchanged floor. Broken, feathered
-// grout and restrained tile-to-tile variation make the paving feel worn while
-// keeping combat silhouettes dominant. This is generated once, never per frame.
+// Deterministic, quiet variation generated once, never per frame.
 function hash2(x: number, y: number): number {
   return (((x * 73856093) ^ (y * 19349663)) >>> 0) % 1024 / 1024;
 }
@@ -852,36 +1005,148 @@ function mixHex(a: number, b: number, t: number): number {
 }
 
 function createFloorTexture(): THREE.DataTexture {
-  const texture = makeRgbTexture(256, (x, y) => {
-    const tx = Math.floor(x / 128);
-    const ty = Math.floor(y / 128);
-    const lx = x % 128;
-    const ly = y % 128;
-    const variation = 0.31 + hash2(tx + 7, ty + 13) * 0.23
-      + (Math.sin(x * 0.11 + y * 0.07) + Math.sin(x * 0.043 - y * 0.12)) * 0.025;
-    let stone = mixHex(BASE_FLOOR, BASE_FLOOR_LIGHT, variation);
-    const dx = Math.abs(lx - 64);
-    const dy = Math.abs(ly - 64);
-    const star = tx === ty && (
-      (dx < 2 && dy < 20) || (dy < 2 && dx < 20) || dx + dy < 11
-    );
-    if (star) stone = mixHex(stone, BASE_FLOOR_STAR, 0.58);
-    const fleck = hash2(Math.floor(x / 7), Math.floor(y / 9));
-    if (fleck > 0.975) stone = mixHex(stone, BASE_FLOOR_LIGHT, 0.28);
-    const edgeX = Math.min(lx, 127 - lx);
-    const edgeY = Math.min(ly, 127 - ly);
-    const alongX = hash2(tx * 31 + Math.floor(y / 8), ty * 17 + 4);
-    const alongY = hash2(ty * 31 + Math.floor(x / 8), tx * 17 + 9);
-    const wearX = alongX > 0.79 ? 0.22 : 1;
-    const wearY = alongY > 0.79 ? 0.22 : 1;
-    const seamX = Math.max(0, (3.4 - edgeX + Math.sin(y * 0.19) * 0.5) / 3.3) * wearX;
-    const seamY = Math.max(0, (3.4 - edgeY + Math.sin(x * 0.17) * 0.5) / 3.3) * wearY;
-    const seam = Math.min(0.78, Math.max(seamX, seamY));
-    return seam > 0 ? mixHex(stone, BASE_FLOOR_GROUT, seam) : stone;
+  const size = 256;
+  const rows = 12;
+  const rowHeight = size / rows;
+  // Unequal, staggered joints avoid both a straight grid and repeated stamps.
+  const joints = Array.from({ length: rows }, (_, row) => {
+    const boundaries = [-32 + hash2(row + 19, 3) * 24];
+    let edge = boundaries[0] ?? 0;
+    for (let tile = 0; edge < size + 32; tile += 1) {
+      edge += 18 + hash2(tile + 17, row + 41) * 10;
+      boundaries.push(edge);
+    }
+    return boundaries;
   });
-  texture.wrapS = THREE.RepeatWrapping;
-  texture.wrapT = THREE.RepeatWrapping;
+  const texture = makeRgbTexture(256, (x, y) => {
+    const bentY = y + Math.sin(x * 0.043) * 0.55 + Math.sin(x * 0.13) * 0.25;
+    const row = Math.max(0, Math.min(rows - 1, Math.floor(bentY / rowHeight)));
+    const rowJoints = joints[row] ?? [];
+    let tile = 0;
+    let verticalDistance = size;
+    for (let i = 0; i < rowJoints.length; i += 1) {
+      const edge = (rowJoints[i] ?? 0) + Math.sin(y * 0.17 + row) * 0.4;
+      if (x > edge) tile = i;
+      verticalDistance = Math.min(verticalDistance, Math.abs(x - edge));
+    }
+    const variation = 0.3 + hash2(tile + 7, row + 13) * 0.24
+      + Math.sin(x * 0.075 + y * 0.049) * 0.045
+      + Math.sin(x * 0.031 - y * 0.093) * 0.035;
+    const stone = mixHex(BASE_FLOOR, BASE_FLOOR_LIGHT, variation);
+    const horizontalDistance = Math.abs(bentY - Math.round(bentY / rowHeight) * rowHeight);
+    // Broad low-contrast erosion is continuous, avoiding chunky dash marks.
+    const wornVertical = Math.max(0, Math.sin(y * 0.31 + tile * 1.7 + row) - 0.05) * 0.26;
+    const wornHorizontal = Math.max(0, Math.sin(x * 0.23 + row * 2.3) - 0.15) * 0.22;
+    const seam = Math.max(
+      Math.max(0, 1 - verticalDistance / 0.9) * wornVertical,
+      Math.max(0, 1 - horizontalDistance / 1.05) * wornHorizontal,
+    );
+    return mixHex(stone, BASE_FLOOR_GROUT, seam);
+  });
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
   return texture;
+}
+
+function createWoodTexture(): THREE.DataTexture {
+  return makeRgbTexture(64, (x, y) => {
+    const grain = Math.sin(y * 0.62 + Math.sin(x * 0.09) * 1.7);
+    const weathering = Math.sin(x * 0.07 + y * 0.15) * 0.05;
+    return mixHex(0x806344, 0xb39366, 0.45 + grain * 0.065 + weathering);
+  });
+}
+
+function createGroundGlowTexture(): THREE.DataTexture {
+  const size = 64;
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const radius = Math.hypot((x + 0.5 - size / 2) / (size / 2), (y + 0.5 - size / 2) / (size / 2));
+      const fade = Math.max(0, 1 - radius * radius);
+      const pixel = (y * size + x) * 4;
+      data.set([255, 255, 255, Math.round(fade * fade * 255)], pixel);
+    }
+  }
+  const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function appendColoredGeometry(
+  geometry: THREE.BufferGeometry,
+  matrix: THREE.Matrix4,
+  color: THREE.Color,
+  positions: number[],
+  normals: number[],
+  colors: number[],
+): void {
+  const sourcePositions = geometry.getAttribute("position");
+  const sourceNormals = geometry.getAttribute("normal");
+  const indices = geometry.getIndex();
+  const normalMatrix = new THREE.Matrix3().getNormalMatrix(matrix);
+  const position = new THREE.Vector3();
+  const normal = new THREE.Vector3();
+  for (let i = 0; i < (indices?.count ?? sourcePositions.count); i += 1) {
+    const vertex = indices?.getX(i) ?? i;
+    position.fromBufferAttribute(sourcePositions, vertex).applyMatrix4(matrix);
+    normal.fromBufferAttribute(sourceNormals, vertex).applyNormalMatrix(normalMatrix);
+    positions.push(position.x, position.y, position.z);
+    normals.push(normal.x, normal.y, normal.z);
+    colors.push(color.r, color.g, color.b);
+  }
+}
+
+function createFlowerStemGeometry(): THREE.BufferGeometry {
+  const stem = new THREE.BoxGeometry(0.012, 1, 0.012);
+  const stemPositions = stem.getAttribute("position");
+  const indices = stem.getIndex();
+  const positions: number[] = [];
+  for (let i = 0; i < (indices?.count ?? 0); i += 1) {
+    const index = indices?.getX(i) ?? 0;
+    positions.push(stemPositions.getX(index), stemPositions.getY(index) + 0.5, stemPositions.getZ(index));
+  }
+  stem.dispose();
+  for (const side of [-1, 1]) {
+    const y = side < 0 ? 0.38 : 0.62;
+    positions.push(
+      0, y, 0, side * 0.08, y + 0.18, -0.035, side * 0.13, y + 0.29, 0,
+      0, y, 0, side * 0.13, y + 0.29, 0, side * 0.08, y + 0.18, 0.035,
+    );
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function createBlossomGeometry(): THREE.BufferGeometry {
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const center = new THREE.Color(0xc4ab63);
+  const petals = 6;
+  for (let i = 0; i < petals; i += 1) {
+    const angle = i * Math.PI * 2 / petals;
+    const point = (a: number, radius: number, y: number): number[] => [Math.cos(a) * radius, y, Math.sin(a) * radius];
+    const inner = point(angle, 0.018, 0.012);
+    const left = point(angle - 0.31, 0.071, 0.006);
+    const tip = point(angle, 0.1, 0.022);
+    const right = point(angle + 0.31, 0.071, 0.006);
+    positions.push(...inner, ...left, ...tip, ...inner, ...tip, ...right);
+    for (let vertex = 0; vertex < 6; vertex += 1) colors.push(1, 1, 1);
+    positions.push(0, 0.025, 0, ...point(angle, 0.027, 0.014), ...point(angle + Math.PI * 2 / petals, 0.027, 0.014));
+    for (let vertex = 0; vertex < 3; vertex += 1) colors.push(center.r, center.g, center.b);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
+  return geometry;
 }
 
 // Faceted icy puddles use the existing circle mesh and no new draw call.

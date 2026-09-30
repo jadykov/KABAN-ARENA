@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import { BALL_MUZZLE_OFFSET, BALL_TORSO_OFFSET, LOCAL_AVATAR_COLOR, MAX_LIVE_BALLS, SELF_SPAWN_Y } from "../config";
+import { PowerUpPickups } from "../arena/PowerUps";
 import { directionFromYawPitch, muzzleForShot, type NetBallSnapshot } from "../net/protocol";
 import { BALL_BASE, IDENTITY_LOCAL, IDENTITY_REMOTES, NEUTRAL_MOON } from "../palette";
 import {
@@ -17,8 +18,6 @@ import {
   MUZZLE_FLASH_LIFE_S,
   SUPER_BALL_COLOR,
   SUPER_BALL_SCALE,
-  SUPER_CORE_INNER_RADIUS,
-  SUPER_CORE_OUTER_RADIUS,
   SUPER_INNER_COLOR,
   SuperCore,
   TRAIL_GOLD_COLOR,
@@ -193,31 +192,179 @@ describe("BallsPool polished-stone redesign", () => {
   });
 });
 
-// Throw-polish SuperCore: bigger shells + inner pulse, no lights added.
-// The pickup orb (wireframe icosahedron + inner octahedron) is an intentional
-// ITEM design — centered, fully enclosed, not the "hand" bump — left as-is.
-describe("SuperCore throw-polish", () => {
-  it("uses outer 1.0 / inner 0.5 shells and pulses the inner", () => {
-    expect(SUPER_CORE_OUTER_RADIUS).toBe(1.0);
-    expect(SUPER_CORE_INNER_RADIUS).toBe(0.5);
+describe("SuperCore compact universal pickup", () => {
+  const snapshot = { active: true, x: 0, z: 0, expiresAt: 10_000, nextAt: 0 };
+
+  function groupOf(scene: THREE.Scene): THREE.Group {
+    const group = scene.getObjectByName("super-core");
+    if (!(group instanceof THREE.Group)) throw new Error("SUPER pickup group missing");
+    return group;
+  }
+
+  function meshesOf(group: THREE.Group): THREE.Mesh[] {
+    return group.children.filter((child): child is THREE.Mesh => child instanceof THREE.Mesh);
+  }
+
+  function spanOf(object: THREE.Object3D): number {
+    const size = new THREE.Box3().setFromObject(object, true).getSize(new THREE.Vector3());
+    return Math.max(size.x, size.y, size.z);
+  }
+
+  it("has a solid colored faceted crystal and collar, only slightly larger than ordinary pickups", () => {
+    const scene = new THREE.Scene();
+    const core = new SuperCore(scene);
+    const pickups = new PowerUpPickups();
+    try {
+      core.render(snapshot, 1_000);
+      const group = groupOf(scene);
+      const meshes = meshesOf(group);
+      expect(meshes).toHaveLength(2);
+      expect(meshes.map((mesh) => mesh.name).sort()).toEqual(["super-core-collar", "super-core-crystal"]);
+      for (const mesh of meshes) {
+        expect(mesh.geometry).not.toBeInstanceOf(THREE.SphereGeometry);
+        expect(mesh.geometry).not.toBeInstanceOf(THREE.OctahedronGeometry);
+        expect(mesh.geometry).not.toBeInstanceOf(THREE.IcosahedronGeometry);
+        const material = mesh.material as THREE.MeshStandardMaterial;
+        expect(material.wireframe).toBe(false);
+        expect(material.transparent).toBe(false);
+        expect(material.color.getHex()).not.toBe(0xffffff);
+        expect(material.emissiveIntensity).toBeGreaterThan(0);
+        expect(material.emissiveIntensity).toBeLessThan(0.5);
+        expect(material.map).toBeNull();
+        expect(mesh.castShadow).toBe(false);
+      }
+      const crystal = meshes.find((mesh) => mesh.name === "super-core-crystal");
+      if (crystal === undefined) throw new Error("crystal missing");
+      const positions = crystal.geometry.getAttribute("position");
+      const heights = new Set<number>();
+      for (let i = 0; i < positions.count; i += 1) heights.add(Number(positions.getY(i).toFixed(4)));
+      // Bevels and flat caps make a short prism, not another pointed diamond.
+      expect(heights.size).toBe(4);
+      expect(positions.count / 3).toBe(48);
+      let lights = 0;
+      scene.traverse((object) => { if (object instanceof THREE.Light) lights += 1; });
+      expect(lights).toBe(0);
+
+      const ordinary = pickups.object.children[0];
+      if (ordinary === undefined) throw new Error("ordinary pickup missing");
+      const ordinarySpan = spanOf(ordinary);
+      for (const yaw of [0, Math.PI / 4, Math.PI / 2]) {
+        group.rotation.y = yaw;
+        const ratio = spanOf(group) / ordinarySpan;
+        expect(ratio).toBeGreaterThanOrEqual(1.2);
+        expect(ratio).toBeLessThanOrEqual(1.4);
+        expect(spanOf(group)).toBeLessThan(1);
+        // Front, side, and overhead all retain a readable solid width.
+        const size = new THREE.Box3().setFromObject(group, true).getSize(new THREE.Vector3());
+        expect(size.x).toBeGreaterThan(ordinarySpan);
+        expect(size.z).toBeGreaterThan(ordinarySpan);
+        expect(size.y).toBeGreaterThan(ordinarySpan * 0.9);
+        for (const offset of [new THREE.Vector3(0, 0, 3), new THREE.Vector3(3, 0, 0), new THREE.Vector3(0, 3, 0)]) {
+          const origin = group.position.clone().add(offset);
+          const direction = offset.clone().negate().normalize();
+          const hits = new THREE.Raycaster(origin, direction).intersectObject(group, true);
+          expect(hits.length).toBeGreaterThan(0);
+          // A front-facing crystal surface survives each viewpoint; inverted
+          // custom-face winding would silently disappear with FrontSide.
+          expect(hits[0]?.object).toBe(crystal);
+        }
+      }
+    } finally {
+      core.dispose();
+      pickups.dispose();
+    }
+  });
+
+  it("moves slowly with bounded bob and glow without expanding its silhouette or reallocating meshes", () => {
     const scene = new THREE.Scene();
     const core = new SuperCore(scene);
     try {
-      core.render({ active: true, x: 0, z: 0, expiresAt: Date.now() + 10000, nextAt: 0 }, Date.now());
-      const group = scene.children.find((child): child is THREE.Group => child instanceof THREE.Group);
-      expect(group).toBeDefined();
-      const meshes = group?.children.filter((child): child is THREE.Mesh => child instanceof THREE.Mesh) ?? [];
-      expect(meshes).toHaveLength(2);
-      const radii = meshes.map((mesh) => (mesh.geometry as THREE.IcosahedronGeometry).parameters.radius).sort();
-      expect(radii[0]).toBeCloseTo(0.5, 5);
-      expect(radii[1]).toBeCloseTo(1.0, 5);
-      const inner = group?.children.find((child) => child instanceof THREE.Mesh && child.name === "super-core-inner");
-      const before = (inner as THREE.Mesh | undefined)?.scale.x ?? 1;
-      core.update(1 / 16);
-      const after = (inner as THREE.Mesh | undefined)?.scale.x ?? 1;
-      expect(after).not.toBe(before);
+      core.render(snapshot, 1_000);
+      const group = groupOf(scene);
+      const meshes = meshesOf(group);
+      const material = meshes.find((mesh) => mesh.name === "super-core-crystal")?.material as THREE.MeshStandardMaterial;
+      const initialGlow = material.emissiveIntensity;
+      core.update(0.5);
+      expect(group.rotation.y).toBeGreaterThan(0);
+      expect(group.rotation.y).toBeLessThan(0.4);
+      expect(material.emissiveIntensity).not.toBe(initialGlow);
+      for (let i = 0; i < 120; i += 1) {
+        core.update(1 / 30);
+        expect(Math.abs(group.position.y - 1.2)).toBeLessThanOrEqual(0.06);
+        expect(material.emissiveIntensity).toBeGreaterThanOrEqual(0.265);
+        expect(material.emissiveIntensity).toBeLessThanOrEqual(0.375);
+        expect(spanOf(group)).toBeLessThan(1);
+        for (const mesh of meshes) expect(mesh.scale.toArray()).toEqual([1, 1, 1]);
+      }
+      expect(meshesOf(group)).toEqual(meshes);
+      expect(group.rotation.x).toBe(0);
+      expect(group.rotation.z).toBe(0);
+      const before = [group.rotation.y, group.position.y, material.emissiveIntensity];
+      for (const invalid of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) core.update(invalid);
+      expect([group.rotation.y, group.position.y, material.emissiveIntensity]).toEqual(before);
     } finally {
       core.dispose();
+    }
+  });
+
+  it("uses replicated position/activity and last-three-second blinking, then clears and resets on pickup/expiry", () => {
+    const scene = new THREE.Scene();
+    const core = new SuperCore(scene);
+    try {
+      const group = groupOf(scene);
+      expect(group.visible).toBe(false);
+      core.render({ ...snapshot, x: 7, z: -5 }, 6_999);
+      expect(group.visible).toBe(true);
+      expect(group.position.x).toBe(7);
+      expect(group.position.z).toBe(-5);
+      core.render(snapshot, 7_000);
+      expect(group.visible).toBe(true);
+      core.render(snapshot, 7_200);
+      expect(group.visible).toBe(true);
+      core.render(snapshot, 7_400);
+      expect(group.visible).toBe(false);
+      core.update(0.5);
+      core.render(snapshot, 7_600);
+      expect(group.visible).toBe(true);
+      expect(group.rotation.y).toBeGreaterThan(0);
+      core.render({ ...snapshot, active: false }, 7_600);
+      expect(group.visible).toBe(false);
+      expect(group.rotation.y).toBe(0);
+      expect(group.position.y).toBe(1.2);
+      core.update(1);
+      expect(group.rotation.y).toBe(0);
+      core.render({ ...snapshot, expiresAt: 20_000 }, 11_000);
+      expect(group.visible).toBe(true);
+      expect(group.rotation.y).toBe(0);
+      core.update(0.5);
+      core.render(null, 11_000);
+      expect(group.visible).toBe(false);
+      expect(group.rotation.y).toBe(0);
+      core.render(snapshot, 9_999);
+      core.render({ ...snapshot, active: false }, 10_000);
+      expect(group.visible).toBe(false);
+    } finally {
+      core.dispose();
+    }
+  });
+
+  it("disposes all four geometry/material resources once and removes the item across repeated scene lifecycles", () => {
+    const scene = new THREE.Scene();
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      const core = new SuperCore(scene);
+      core.render(snapshot, 1_000);
+      const group = groupOf(scene);
+      const resources = meshesOf(group).flatMap((mesh) => [mesh.geometry, mesh.material as THREE.Material]);
+      expect(new Set(resources).size).toBe(4);
+      const disposed = new Map<object, number>();
+      for (const resource of resources) {
+        resource.addEventListener("dispose", () => { disposed.set(resource, (disposed.get(resource) ?? 0) + 1); });
+      }
+      core.dispose();
+      core.dispose();
+      expect(scene.children).toHaveLength(0);
+      expect(group.children).toHaveLength(0);
+      expect(resources.map((resource) => disposed.get(resource))).toEqual([1, 1, 1, 1]);
     }
   });
 });

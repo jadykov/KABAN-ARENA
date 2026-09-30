@@ -18,6 +18,50 @@ import {
 
 afterEach(() => vi.restoreAllMocks());
 
+type ShopPart = {
+  position: THREE.Vector3;
+  scale: THREE.Vector3;
+  normal: THREE.Vector3;
+  bounds: THREE.Box3;
+  color: number;
+};
+
+// Inspect rendered transforms and vertices, including rotated side panels.
+// No fixture metadata is needed to check the walls or traversal clearance.
+function shopParts(scene: THREE.Scene, shopIndex: number, kind: string): ShopPart[] {
+  const transform = getShopfrontTransforms()[shopIndex]!;
+  const shop = scene.getObjectByName(`shopfront:${shopIndex}:${transform.brand}`)!;
+  const platform = PLATFORM_FIGURES[shopIndex]!;
+  const width = 2 * (platform.rampSide.endsWith("z") ? platform.hz : platform.hx);
+  const depth = 2 * (platform.rampSide.endsWith("z") ? platform.hx : platform.hz);
+  shop.updateMatrixWorld(true);
+  const inverse = shop.matrixWorld.clone().invert();
+  const batch = scene.getObjectByName(`shop-static:${kind}`) as THREE.InstancedMesh;
+  const vertices = batch.geometry.getAttribute("position");
+  const result: ShopPart[] = [];
+  for (let index = 0; index < batch.count; index += 1) {
+    const matrix = new THREE.Matrix4();
+    batch.getMatrixAt(index, matrix);
+    matrix.premultiply(inverse);
+    const position = new THREE.Vector3().setFromMatrixPosition(matrix);
+    if (Math.abs(position.x) > width / 2 + 0.6 || position.z < -depth - 0.4 || position.z > 1) continue;
+    const bounds = new THREE.Box3();
+    for (let vertex = 0; vertex < vertices.count; vertex += 1) {
+      bounds.expandByPoint(new THREE.Vector3().fromBufferAttribute(vertices, vertex).applyMatrix4(matrix));
+    }
+    const color = new THREE.Color();
+    batch.getColorAt(index, color);
+    result.push({
+      position,
+      scale: new THREE.Vector3().setFromMatrixScale(matrix),
+      normal: new THREE.Vector3(0, 0, 1).transformDirection(matrix),
+      bounds,
+      color: color.getHex(),
+    });
+  }
+  return result;
+}
+
 describe("shopfront layout", () => {
   it("keeps both Krasnoe & Beloe shops diagonal and binds brands to platform records", () => {
     const shops = getShopfrontTransforms();
@@ -84,160 +128,178 @@ describe("shopfront layout", () => {
 });
 
 describe("AdsManager shop visuals and lifecycle", () => {
-  it("builds four miniature facades and no perimeter wall ads", () => {
+  it("wraps four recognizable modern shops in cladding and keeps the seven static batches", () => {
     const scene = new THREE.Scene();
     const ads = new AdsManager();
     ads.buildVisuals(scene);
     try {
       expect(ads.shopfrontCount).toBe(4);
-      expect(scene.children).toHaveLength(11); // four signs/groups and seven batches
+      expect(scene.children).toHaveLength(11);
       const batches = scene.children.filter((child): child is THREE.InstancedMesh => child instanceof THREE.InstancedMesh);
       expect(batches.map((batch) => batch.name)).toEqual([
-        "shop-static:facade",
-        "shop-static:glazing",
-        "shop-static:trim",
-        "shop-static:canopy",
-        "shop-static:accent",
-        "shop-static:lamp",
-        "shop-static:glow",
+        "shop-static:facade", "shop-static:glazing", "shop-static:trim",
+        "shop-static:canopy", "shop-static:accent", "shop-static:lamp", "shop-static:glow",
       ]);
-      expect(batches.find((batch) => batch.name === "shop-static:facade")?.count).toBe(4);
-      expect(batches.find((batch) => batch.name === "shop-static:glazing")!.count).toBeGreaterThan(12);
-      expect(batches.find((batch) => batch.name === "shop-static:trim")!.count).toBeGreaterThan(50);
-      expect(batches.find((batch) => batch.name === "shop-static:lamp")!.count).toBeGreaterThanOrEqual(7);
+      expect(batches.find((batch) => batch.name === "shop-static:facade")!.count).toBe(16);
+      expect(batches.find((batch) => batch.name === "shop-static:glazing")!.count).toBe(20);
+      expect(batches.find((batch) => batch.name === "shop-static:lamp")!.count).toBe(9);
+      expect(batches.find((batch) => batch.name === "shop-static:glow")!.count).toBe(22);
       expect(batches.find((batch) => batch.name === "shop-static:glow")!.visible).toBe(false);
+      expect(batches.reduce((count, batch) => count + batch.count, 0)).toBeLessThan(400);
       for (const kind of ["trim", "canopy", "accent", "lamp"]) {
-        expect(batches.find((batch) => batch.name === `shop-static:${kind}`)?.geometry).toBeInstanceOf(RoundedBoxGeometry);
+        expect(batches.find((batch) => batch.name === `shop-static:${kind}`)!.geometry).toBeInstanceOf(RoundedBoxGeometry);
       }
       let renderableCount = 0;
-      scene.traverse((child) => { if (child instanceof THREE.Mesh) renderableCount += 1; });
+      let triangleCount = 0;
+      scene.traverse((child) => {
+        if (!(child instanceof THREE.Mesh)) return;
+        renderableCount += 1;
+        triangleCount += (child.geometry.index?.count ?? child.geometry.getAttribute("position").count)
+          / 3 * (child instanceof THREE.InstancedMesh ? child.count : 1);
+      });
       expect(renderableCount).toBe(15); // seven batches + eight sign parts
+      expect(triangleCount).toBeLessThan(28_000);
       expect(scene.children.some((child) => child instanceof THREE.Light)).toBe(false);
       expect(scene.getObjectByName("arena-banner")).toBeUndefined();
       expect(scene.getObjectByName("arena-banner-rig")).toBeUndefined();
-      const shops = scene.children.filter((child) => child.name.startsWith("shopfront:"));
-      expect(shops.map((shop) => shop.name)).toEqual([
-        "shopfront:0:krasnoe-beloe",
-        "shopfront:1:krasnoe-beloe",
-        "shopfront:2:magnit",
-        "shopfront:3:pyaterochka",
-      ]);
-      shops.forEach((shop, index) => {
-        const transform = getShopfrontTransforms()[index]!;
+      expect(batches.every((batch) => batch.boundingSphere !== null)).toBe(true);
+
+      const wallColors: number[] = [];
+      const canopyShapes: string[] = [];
+      getShopfrontTransforms().forEach((transform, index) => {
+        const shop = scene.getObjectByName(`shopfront:${index}:${transform.brand}`)!;
+        const platform = PLATFORM_FIGURES[index]!;
+        const wallWidth = 2 * (platform.rampSide.endsWith("z") ? platform.hz : platform.hx);
+        const wallDepth = 2 * (platform.rampSide.endsWith("z") ? platform.hx : platform.hz);
         expect(shop.position.x).toBeCloseTo(transform.x, 6);
         expect(shop.position.z).toBeCloseTo(transform.z, 6);
         expect(shop.rotation.y).toBeCloseTo(transform.rotationY, 6);
-        expect(shop.children).toHaveLength(2); // sign and adjustable frame
+        expect(shop.children).toHaveLength(2);
         const sign = shop.getObjectByName("sign") as THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
-        expect(sign.scale.x).toBeLessThanOrEqual(SHOP_SIGN_WIDTH_M);
         expect(sign.scale.x).toBeCloseTo(transform.signWidth, 6);
         expect(sign.scale.y).toBeCloseTo(transform.signHeight, 6);
         expect(sign.material.opacity).toBe(SHOP_SIGN_OPACITY);
         expect(sign.material.depthWrite).toBe(false);
-      });
 
-      const checkInstance = (
-        kind: string, index: number, shopIndex: number,
-        local: [number, number, number], size: [number, number, number],
-      ): void => {
-        const batch = scene.getObjectByName(`shop-static:${kind}`) as THREE.InstancedMesh;
-        const matrix = new THREE.Matrix4();
-        const position = new THREE.Vector3();
-        const rotation = new THREE.Quaternion();
-        const scale = new THREE.Vector3();
-        batch.getMatrixAt(index, matrix);
-        matrix.decompose(position, rotation, scale);
-        const shop = getShopfrontTransforms()[shopIndex]!;
-        const expectedPosition = new THREE.Vector3(...local)
-          .applyAxisAngle(new THREE.Vector3(0, 1, 0), shop.rotationY)
-          .add(new THREE.Vector3(shop.x, 0, shop.z));
-        const expectedRotation = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), shop.rotationY);
-        expect(position.distanceTo(expectedPosition)).toBeLessThan(1e-5);
-        expect(Math.abs(rotation.dot(expectedRotation))).toBeCloseTo(1, 5);
-        expect(scale.distanceTo(new THREE.Vector3(...size))).toBeLessThan(1e-5);
-      };
-      getShopfrontTransforms().forEach((shop, index) => {
-        const sy = shop.topY / 3;
-        const w = shop.facadeWidth;
-        checkInstance("facade", index, index, [0, 1.45 * sy, 0.025], [w, 2.72 * sy, 1]);
-      });
-
-      const facadeBatch = scene.getObjectByName("shop-static:facade") as THREE.InstancedMesh;
-      const facadeColors = Array.from({ length: 4 }, (_, index) => {
-        const color = new THREE.Color();
-        facadeBatch.getColorAt(index, color);
-        return color.getHex();
-      });
-      expect(new Set(facadeColors).size).toBe(4);
-
-      const getLocalParts = (kind: string, shopIndex: number, face: "front" | "rear" = "front"): Array<{ position: THREE.Vector3; scale: THREE.Vector3; rotation: THREE.Quaternion }> => {
-        const batch = scene.getObjectByName(`shop-static:${kind}`) as THREE.InstancedMesh;
-        const shop = shops[shopIndex]!;
-        const platform = PLATFORM_FIGURES[shopIndex]!;
-        const rearZ = -2 * (platform.rampSide.endsWith("z") ? platform.hx : platform.hz) + 0.005;
-        shop.updateMatrixWorld(true);
-        const inverse = shop.matrixWorld.clone().invert();
-        const parts = [];
-        for (let index = 0; index < batch.count; index += 1) {
-          const matrix = new THREE.Matrix4();
-          batch.getMatrixAt(index, matrix);
-          const local = inverse.clone().multiply(matrix);
-          const position = new THREE.Vector3();
-          const rotation = new THREE.Quaternion();
-          const scale = new THREE.Vector3();
-          local.decompose(position, rotation, scale);
-          if (Math.abs(position.x) < 1.5 && Math.abs(position.z - (face === "rear" ? rearZ : 0)) < 0.65) {
-            parts.push({ position, scale, rotation });
-          }
+        const panels = shopParts(scene, index, "facade");
+        expect(panels).toHaveLength(4);
+        expect(new Set(panels.map(({ color }) => color)).size).toBe(1);
+        wallColors.push(panels[0]!.color);
+        for (const normal of [new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1),
+          new THREE.Vector3(-1, 0, 0), new THREE.Vector3(1, 0, 0)]) {
+          const panel = panels.find((part) => part.normal.dot(normal) > 0.999)!;
+          expect(panel).toBeDefined();
+          expect(panel.bounds.min.y).toBeCloseTo(0.02 * transform.topY / 3, 5);
+          expect(panel.bounds.max.y).toBeCloseTo(2.96 * transform.topY / 3, 5);
+          expect(panel.scale.x).toBeCloseTo(normal.x === 0 ? wallWidth : wallDepth, 5);
+          // Every face has the same broad brand band, including both sides
+          // and the service back, rather than a front-only miniature facade.
+          const red = [0xbe3039, 0xb9323c, 0xc02f3c, 0xc54247][index]!;
+          expect(shopParts(scene, index, "accent").some((part) =>
+            part.normal.dot(normal) > 0.999 && part.scale.x > panel.scale.x - 0.1
+            && part.position.y > transform.topY * 0.65 && part.color === red)).toBe(true);
         }
-        return parts;
-      };
-      const canopyShapes = shops.map((_, index) => getLocalParts("canopy", index)
-        .map(({ position, scale }) => [position.y.toFixed(2), position.z.toFixed(2), scale.x.toFixed(2)].join(":"))
-        .join("|"));
-      expect(new Set(canopyShapes).size).toBe(4);
-      [1.07, 1.04, 1.07, 1.07].forEach((beamX, index) => {
-        const transform = getShopfrontTransforms()[index]!;
-        const beams = getLocalParts("trim", index).filter(({ position, scale }) =>
-          scale.y > 2.4 * transform.topY / 3
-          && Math.abs(Math.abs(position.x) - beamX * transform.facadeWidth / 2.4) < 0.005);
+        const glazing = shopParts(scene, index, "glazing");
+        const frontGlazing = glazing.filter(({ position }) => position.z > 0);
+        expect(frontGlazing).toHaveLength(3);
+        expect(frontGlazing.every(({ scale }) => scale.y > 1.4 * transform.topY / 3)).toBe(true);
+        const sideGlazing = glazing.filter(({ normal }) => Math.abs(normal.x) > 0.999);
+        expect(sideGlazing).toHaveLength(2); // a broad display and a small corner louver
+        expect(sideGlazing.some(({ scale }) => scale.x > wallDepth * 0.55 && scale.y > 1.2 * transform.topY / 3)).toBe(true);
+        const beamX = [1.07, 1.04, 1.07, 1.07][index]! * transform.facadeWidth / 2.4;
+        const beams = shopParts(scene, index, "trim").filter(({ position, scale }) =>
+          position.z > 0 && scale.y > 2.4 * transform.topY / 3
+          && Math.abs(Math.abs(position.x) - beamX) < 1e-5);
         expect(beams).toHaveLength(2);
-        expect(beams[0]!.position.x).toBeCloseTo(-beams[1]!.position.x, 6);
-        expect(beams[0]!.position.y).toBeCloseTo(beams[1]!.position.y, 6);
-        expect(beams[0]!.position.z).toBeCloseTo(beams[1]!.position.z, 6);
+        expect(beams[0]!.position.x).toBeCloseTo(-beams[1]!.position.x, 5);
         expect(beams[0]!.scale.distanceTo(beams[1]!.scale)).toBeLessThan(1e-6);
-        expect(beams.every(({ rotation }) => Math.abs(rotation.z) < 1e-6)).toBe(true);
+        expect(beams.every(({ normal }) => normal.z > 0.999)).toBe(true);
+        const canopy = shopParts(scene, index, "canopy").filter(({ position }) => position.z > 0);
+        canopyShapes.push(canopy.map(({ position, scale }) =>
+          [position.y.toFixed(2), position.z.toFixed(2), scale.x.toFixed(2), scale.z.toFixed(2)].join(":"))
+          .join("|"));
       });
-      expect(getLocalParts("accent", 0).length).toBeGreaterThan(getLocalParts("accent", 1).length);
-      // Rear fixtures sit against the wall opposite the storefront, including
-      // an exit door, condenser, high window and a separate vented hatch.
-      shops.forEach((_, index) => {
-        const transform = getShopfrontTransforms()[index]!;
-        const platform = PLATFORM_FIGURES[index]!;
-        const rearWallZ = -2 * (platform.rampSide.endsWith("z") ? platform.hx : platform.hz) + 0.015;
-        expect(getLocalParts("trim", index, "rear").length).toBeGreaterThan(3);
-        expect(getLocalParts("accent", index, "rear").length).toBeGreaterThan(0);
-        for (const kind of ["trim", "canopy", "accent"]) {
-          for (const { position, scale } of getLocalParts(kind, index, "rear")) {
-            expect(Math.abs(position.x) + scale.x / 2).toBeLessThan(transform.facadeWidth / 2);
-            expect(position.y + scale.y / 2).toBeLessThan(transform.topY);
-            expect(position.z + scale.z / 2).toBeLessThan(rearWallZ);
-          }
-        }
-      });
-      const condenser = getLocalParts("canopy", 1, "rear").find(({ scale }) => scale.z > 0.15);
-      expect(condenser).toBeDefined();
-      const condenserSlats = getLocalParts("accent", 1, "rear").filter(({ position, scale }) =>
-        position.x < 0 && scale.x > 0.35 && scale.x < 0.5 && scale.y < 0.05);
-      expect(condenserSlats).toHaveLength(3);
-      expect(condenserSlats.every(({ position, scale }) =>
-        position.z - scale.z / 2 < condenser!.position.z - condenser!.scale.z / 2)).toBe(true);
-      expect(getLocalParts("trim", 2, "rear").some(({ position, scale }) =>
-        position.x < 0 && scale.y > 0.5 && scale.y < 0.7)).toBe(true);
-      expect(batches.every((batch) => batch.boundingSphere !== null)).toBe(true);
+      expect(new Set(wallColors).size).toBe(4);
+      expect(new Set(canopyShapes).size).toBe(4);
+      // The K&B pair has silver/light and charcoal/red identities while
+      // keeping the same existing brand sign and diagonal placement.
+      expect(wallColors[0]).toBe(0xe0ded7);
+      expect(wallColors[1]).toBe(0xb9c1c4);
+      expect(shopParts(scene, 3, "trim").some(({ color }) => color === 0x367d47)).toBe(true);
     } finally {
       ads.dispose(scene);
       expect(scene.children).toHaveLength(0);
+    }
+  });
+
+  it("uses metal service fixtures and replaces Magnit's wooden cross-window", () => {
+    const scene = new THREE.Scene();
+    const ads = new AdsManager();
+    ads.buildVisuals(scene);
+    try {
+      getShopfrontTransforms().forEach((transform, index) => {
+        const platform = PLATFORM_FIGURES[index]!;
+        const depth = 2 * (platform.rampSide.endsWith("z") ? platform.hx : platform.hz);
+        const rear = shopParts(scene, index, "trim").filter(({ position }) => position.z < -depth - 0.04);
+        expect(rear.some(({ scale }) => scale.x > 0.6 * transform.facadeWidth / 2.4
+          && scale.y > 1.55 * transform.topY / 3)).toBe(true);
+        expect(shopParts(scene, index, "glazing").every(({ position }) => position.z > -depth)).toBe(true);
+      });
+      const magnit = getShopfrontTransforms()[2]!;
+      const unit = magnit.facadeWidth / 2.4;
+      const sy = magnit.topY / 3;
+      const rear = shopParts(scene, 2, "trim").filter(({ position }) => position.z < -3.04);
+      const serviceDoor = rear.find(({ position, scale }) =>
+        Math.abs(position.x - 0.57 * unit) < 1e-5 && scale.y > 1.7 * sy)!;
+      expect(serviceDoor).toBeDefined();
+      expect(serviceDoor.color).toBe(0xa0aeb4);
+      expect(serviceDoor.scale.x).toBeCloseTo(0.70 * unit, 5);
+      const vent = rear.find(({ position, scale }) =>
+        Math.abs(position.x + 0.58 * unit) < 1e-5 && scale.x > 0.7 * unit)!;
+      expect(vent.scale.y).toBeCloseTo(0.34 * sy, 5);
+      expect(rear.some(({ position, scale }) =>
+        Math.abs(position.x + 0.58 * unit) < 1e-5 && scale.y > 0.4 * sy)).toBe(false);
+      const condenser = shopParts(scene, 1, "canopy").find(({ position }) => position.z < -3)!;
+      expect(condenser.scale.z).toBeCloseTo(0.17, 5);
+      expect(shopParts(scene, 1, "accent").filter(({ position, scale }) =>
+        position.z < -3.20 && position.x < 0 && scale.x > 0.35 && scale.y < 0.04)).toHaveLength(3);
+    } finally {
+      ads.dispose(scene);
+    }
+  });
+
+  it("keeps opaque decor below the deck, shallow on the sides and clear of ramp landings", () => {
+    const scene = new THREE.Scene();
+    const ads = new AdsManager();
+    ads.buildVisuals(scene);
+    try {
+      getShopfrontTransforms().forEach((transform, index) => {
+        const platform = PLATFORM_FIGURES[index]!;
+        const width = 2 * (platform.rampSide.endsWith("z") ? platform.hz : platform.hx);
+        const rampNormal = new THREE.Vector3(
+          platform.rampSide.endsWith("x") ? (platform.rampSide.startsWith("+") ? 1 : -1) : 0, 0,
+          platform.rampSide.endsWith("z") ? (platform.rampSide.startsWith("+") ? 1 : -1) : 0,
+        ).applyAxisAngle(new THREE.Vector3(0, 1, 0), -transform.rotationY);
+        for (const kind of ["facade", "glazing", "trim", "canopy", "accent", "lamp"]) {
+          for (const part of shopParts(scene, index, kind)) {
+            expect(part.bounds.min.y).toBeGreaterThan(0);
+            expect(part.bounds.max.y).toBeLessThan(transform.topY - 0.025);
+            expect(part.bounds.max.z).toBeLessThan(0.48); // existing porch approach
+            expect(part.bounds.max.x).toBeLessThan(width / 2 + 0.065);
+            expect(part.bounds.min.x).toBeGreaterThan(-width / 2 - 0.065);
+            if (Math.abs(part.normal.x) > 0.999 && part.normal.dot(rampNormal) > 0.999 && kind !== "facade") {
+              expect(part.bounds.max.y).toBeLessThan(transform.topY - 0.30);
+              if (kind === "glazing") {
+                // The corner vent does not spill into the two-meter slope.
+                expect(Math.min(Math.abs(part.bounds.min.z + 1.515), Math.abs(part.bounds.max.z + 1.515)))
+                  .toBeGreaterThan(platform.rampWidth / 2);
+              }
+            }
+          }
+        }
+      });
+    } finally {
+      ads.dispose(scene);
     }
   });
 
@@ -450,8 +512,23 @@ describe("AdsManager shop visuals and lifecycle", () => {
     const frame = scene.children[0]!.getObjectByName("sign-frame") as THREE.Mesh;
     expect(frame.scale.x).toBeCloseTo(signMeshes[0]!.scale.x + 0.10, 6);
     expect(frame.scale.y).toBeGreaterThan(signMeshes[0]!.scale.y);
-    const signGeometry = (scene.children[0]!.getObjectByName("sign") as THREE.Mesh).geometry;
-    const geometryDispose = vi.spyOn(signGeometry, "dispose");
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
+    const maps = new Set<THREE.Texture>();
+    scene.traverse((child) => {
+      if (!(child instanceof THREE.Mesh)) return;
+      geometries.add(child.geometry);
+      for (const material of Array.isArray(child.material) ? child.material : [child.material]) {
+        materials.add(material);
+        if (material instanceof THREE.MeshBasicMaterial && material.map !== null) maps.add(material.map);
+      }
+    });
+    expect(geometries.size).toBe(2); // shared plane and rounded box
+    expect(materials.size).toBe(15); // seven batch materials and eight sign materials
+    expect(maps.size).toBe(4); // one glow texture and three shared brand textures
+    const geometryDisposers = [...geometries].map((geometry) => vi.spyOn(geometry, "dispose"));
+    const materialDisposers = [...materials].map((material) => vi.spyOn(material, "dispose"));
+    const mapDisposers = [...maps].map((texture) => vi.spyOn(texture, "dispose"));
     const batchDisposers = scene.children
       .filter((child): child is THREE.InstancedMesh => child instanceof THREE.InstancedMesh)
       .map((batch) => vi.spyOn(batch, "dispose"));
@@ -459,7 +536,9 @@ describe("AdsManager shop visuals and lifecycle", () => {
     expect(ads.isLoaded).toBe(false);
     expect(ads.shopfrontCount).toBe(0);
     expect(scene.children).toHaveLength(0);
-    expect(geometryDispose).toHaveBeenCalledTimes(1);
+    for (const spy of geometryDisposers) expect(spy).toHaveBeenCalledTimes(1);
+    for (const spy of materialDisposers) expect(spy).toHaveBeenCalledTimes(1);
+    for (const spy of mapDisposers) expect(spy).toHaveBeenCalledTimes(1);
     for (const spy of batchDisposers) expect(spy).toHaveBeenCalledTimes(1);
     for (const spy of disposed) expect(spy).toHaveBeenCalledTimes(1);
   });

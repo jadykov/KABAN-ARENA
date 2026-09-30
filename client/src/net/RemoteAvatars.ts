@@ -43,16 +43,21 @@ function makeNameSprite(nick: string): THREE.Sprite {
     context.font = "bold 32px system-ui, sans-serif";
     context.textAlign = "center";
     context.textBaseline = "middle";
-    context.fillStyle = "rgba(0,0,0,0.55)";
-    const textWidth = context.measureText(nick).width;
-    context.fillRect(128 - textWidth / 2 - 10, 8, textWidth + 20, 48);
+    // A thin glyph outline keeps white names readable against the morning
+    // sky without painting a panel across the action.
+    context.strokeStyle = "rgba(18,31,39,0.8)";
+    context.lineWidth = 2;
+    context.lineJoin = "round";
+    context.strokeText(nick, 128, 34);
     context.fillStyle = NEUTRAL_WHITE_CSS;
     context.fillText(nick, 128, 34);
   }
   const texture = new THREE.CanvasTexture(canvas);
   const material = new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true });
   const sprite = new THREE.Sprite(material);
-  sprite.scale.set(2.2, 0.55, 1);
+  // Keep the raster font crisp; reducing XY once makes visible text exactly
+  // 80% of its previous size for both remote players and bots.
+  sprite.scale.set(2.2 * 0.8, 0.55 * 0.8, 1);
   sprite.position.y = 2.3;
   return sprite;
 }

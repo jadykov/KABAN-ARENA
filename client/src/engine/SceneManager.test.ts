@@ -861,6 +861,37 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     }
   });
 
+  it("synchronizes trampoline spill and suburban windows to server time on late build and round reset", () => {
+    const batches = [
+      ["trampoline-night-rims", 0.92], ["trampoline-ground-spill", 0.14],
+      ["trampoline-block-spill", 0.16], ["suburban-window-glow", 0.36],
+    ] as const;
+    for (const elapsed of [0, 105, 119.999, 120, 121, 123.15, 126.3, 180]) {
+      const scene = new THREE.Scene();
+      const manager = new SceneManager(scene, new THREE.PerspectiveCamera());
+      managers.push(manager);
+      manager.setDayProgress(elapsed / 180);
+      manager.build();
+      const time = Math.max(0, Math.min(1, (elapsed - 120) / 6.3));
+      const fade = time * time * (3 - 2 * time);
+      for (const [name, maximum] of batches) {
+        const mesh = scene.getObjectByName(name) as THREE.InstancedMesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+        expect(mesh).toBeInstanceOf(THREE.InstancedMesh);
+        expect(mesh.visible).toBe(elapsed > 120);
+        expect(mesh.material.opacity).toBeCloseTo(maximum * fade, 10);
+      }
+      let lights = 0;
+      scene.traverse((object) => { if (object instanceof THREE.Light) lights += 1; });
+      expect(lights).toBe(2);
+      manager.setDayProgress(0);
+      for (const [name] of batches) {
+        const mesh = scene.getObjectByName(name) as THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+        expect(mesh.visible).toBe(false);
+        expect(mesh.material.opacity).toBe(0);
+      }
+    }
+  });
+
   it("releases the gradient, both discs, the cloud batch and its shared texture with the scene", async () => {
     const { manager, scene } = await createManagerWithScene();
     const sun = scene.getObjectByName("sun") as THREE.Mesh;

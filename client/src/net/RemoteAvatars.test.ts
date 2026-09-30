@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HIT_FLASH_DURATION_S } from "../config";
 import { ACCENT_HIT_FLASH } from "../palette";
 import { RemoteAvatars } from "./RemoteAvatars";
@@ -66,6 +66,117 @@ beforeEach(() => {
 
 afterEach(() => {
   delete (globalThis as unknown as Record<string, unknown>)["document"];
+});
+
+describe("RemoteAvatars transparent compact nicknames", () => {
+  function labelOf(group: THREE.Object3D): THREE.Sprite {
+    const label = group.children.find((child) => child instanceof THREE.Sprite);
+    if (!(label instanceof THREE.Sprite)) throw new Error("nickname sprite missing");
+    return label;
+  }
+
+  it("paints only outlined white text on a transparent canvas and scales players/bots to exactly 80%", () => {
+    const contexts: Array<{
+      font: string; textAlign: string; textBaseline: string; fillStyle: string;
+      strokeStyle: string; lineWidth: number; lineJoin: string;
+      fillText: ReturnType<typeof vi.fn>; strokeText: ReturnType<typeof vi.fn>; fillRect: ReturnType<typeof vi.fn>;
+    }> = [];
+    const fakeDocument = {
+      createElement: (): unknown => {
+        const canvas = {
+          width: 0, height: 0,
+          getContext: (): unknown => {
+            // Exercise the real nickname painter; unrelated face canvases
+            // keep their normal headless fallback instead of a fake painter.
+            if (canvas.width !== 256 || canvas.height !== 64) return null;
+            const context = {
+              font: "", textAlign: "", textBaseline: "", fillStyle: "", strokeStyle: "", lineWidth: 0, lineJoin: "",
+              fillText: vi.fn(), strokeText: vi.fn(), fillRect: vi.fn(),
+            };
+            contexts.push(context);
+            return context;
+          },
+        };
+        return canvas;
+      },
+    };
+    (globalThis as unknown as Record<string, unknown>)["document"] = fakeDocument;
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    try {
+      avatars.sync([
+        makeSnapshot({ sessionId: "human", nick: "Игрок", isBot: false }),
+        makeSnapshot({ sessionId: "bot", nick: "Борис", isBot: true }),
+      ], null, FRAME);
+      expect(contexts).toHaveLength(2);
+      for (const [index, nick] of ["Игрок", "Борис"].entries()) {
+        const group = scene.children[index];
+        const context = contexts[index];
+        if (group === undefined || context === undefined) throw new Error("nickname entry missing");
+        const label = labelOf(group);
+        expect(label.scale.x / 2.2).toBeCloseTo(0.8, 12);
+        expect(label.scale.y / 0.55).toBeCloseTo(0.8, 12);
+        expect(label.scale.z).toBe(1);
+        expect(label.position.y).toBe(2.3);
+        expect(label.material.transparent).toBe(true);
+        expect(label.material.depthTest).toBe(false);
+        expect(label.material.map).toBeInstanceOf(THREE.CanvasTexture);
+        expect(context.font).toBe("bold 32px system-ui, sans-serif");
+        expect(context.fillStyle).toBe("#ffffff");
+        expect(context.fillRect).not.toHaveBeenCalled();
+        expect(context.fillText).toHaveBeenCalledTimes(1);
+        expect(context.fillText).toHaveBeenCalledWith(nick, 128, 34);
+        expect(context.strokeText).toHaveBeenCalledTimes(1);
+        expect(context.strokeText).toHaveBeenCalledWith(nick, 128, 34);
+        expect(context.lineWidth).toBeLessThanOrEqual(2);
+        expect(context.textAlign).toBe("center");
+        expect(context.textBaseline).toBe("middle");
+      }
+    } finally {
+      avatars.dispose();
+    }
+  });
+
+  it("reuses labels through death/respawn and disposes each map/material on spectator, room reset, and teardown", () => {
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    const players = [makeSnapshot({ sessionId: "human", isBot: false }), makeSnapshot({ sessionId: "bot", isBot: true })];
+    const disposed = new Map<object, number>();
+    const tracked: object[] = [];
+    const track = (label: THREE.Sprite): void => {
+      const resources = [label.material, label.material.map];
+      for (const resource of resources) {
+        if (resource === null) throw new Error("nickname texture missing");
+        tracked.push(resource);
+        resource.addEventListener("dispose", () => { disposed.set(resource, (disposed.get(resource) ?? 0) + 1); });
+      }
+    };
+    try {
+      avatars.sync(players, null, FRAME);
+      const labels = scene.children.map(labelOf);
+      labels.forEach(track);
+      avatars.sync(players.map((player) => ({ ...player, alive: false })), null, FRAME);
+      expect(labels.every((label) => !label.visible)).toBe(true);
+      expect(disposed.size).toBe(0);
+      avatars.sync(players, null, FRAME);
+      expect(scene.children.map(labelOf)).toEqual(labels);
+      expect(labels.every((label) => label.visible)).toBe(true);
+      avatars.sync(players.map((player) => ({ ...player, spectator: player.sessionId === "human" })), null, FRAME);
+      expect(scene.children).toHaveLength(1);
+      expect(disposed.size).toBe(2);
+      avatars.sync([], null, FRAME);
+      expect(scene.children).toHaveLength(0);
+      expect(disposed.size).toBe(4);
+      avatars.sync(players, null, FRAME);
+      scene.children.map(labelOf).forEach(track);
+      avatars.dispose();
+      avatars.dispose();
+      expect(scene.children).toHaveLength(0);
+      expect(tracked.map((resource) => disposed.get(resource))).toEqual(Array<number>(8).fill(1));
+    } finally {
+      avatars.dispose();
+    }
+  });
 });
 
 // NOTE: the server replicates body height every tick (grounded derivation +

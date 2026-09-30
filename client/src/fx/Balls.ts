@@ -29,10 +29,11 @@ export const SUPER_INNER_COLOR = NEUTRAL_WHITE;
 // highlight, not from geometry. Every normal core shares this base; the
 // thrower's identity appears ONLY as the subtle ring + polar dot.
 export const BALL_NEUTRAL_BASE = BALL_BASE;
-// SUPER pickup orb (center spawn): slightly bigger shells so the x2 buff
-// reads at a glance on a phone screen. No lights, still one draw group.
-export const SUPER_CORE_OUTER_RADIUS = 1.0;
-export const SUPER_CORE_INNER_RADIUS = 0.5;
+// Compact SUPER item: solid collar outer radius and six-facet crystal's
+// widest radius. These legacy names now describe parts, not nested spheres.
+// Its 0.88m span is only 1.26x the ordinary pickup's 0.70m span.
+export const SUPER_CORE_OUTER_RADIUS = 0.44;
+export const SUPER_CORE_INNER_RADIUS = 0.27;
 // Fired SUPER ball visual scale (group scale multiplier vs a normal core).
 export const SUPER_BALL_SCALE = 2;
 // Ball snapshot smoothing: exponential lerp rate (1/s) toward the latest
@@ -787,29 +788,104 @@ export class BallsPool {
   }
 }
 
-// Floating SUPER core: icosahedron with emissive-look basic material (no new
-// lights), slow spin + bob + inner scale pulse, blinks via visible toggle
-// in the last 3s of life.
+// A bevelled hexagonal crystal with flat ends, rather than the old pointed
+// white diamond. Flat face normals preserve its silhouette from above and
+// the side; restrained facet tints remain visible when the sun goes down.
+function makeSuperCrystalGeometry(): THREE.BufferGeometry {
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const rings = [
+    { radius: 0.12, y: -0.30 },
+    { radius: SUPER_CORE_INNER_RADIUS, y: -0.13 },
+    { radius: SUPER_CORE_INNER_RADIUS, y: 0.17 },
+    { radius: 0.10, y: 0.34 },
+  ];
+  const sides = 6;
+  const shades = [1, 0.80, 0.94, 0.76, 0.88, 0.98];
+  const vertex = (radius: number, y: number, side: number): readonly number[] => {
+    const angle = side * Math.PI * 2 / sides;
+    return [Math.cos(angle) * radius, y, Math.sin(angle) * radius];
+  };
+  const triangle = (a: readonly number[], b: readonly number[], c: readonly number[], shade: number): void => {
+    positions.push(...a, ...b, ...c);
+    for (let i = 0; i < 3; i += 1) colors.push(shade, shade, shade);
+  };
+  for (let side = 0; side < sides; side += 1) {
+    const shade = shades[side] ?? 1;
+    for (let ring = 0; ring < rings.length - 1; ring += 1) {
+      const lower = rings[ring];
+      const upper = rings[ring + 1];
+      if (lower === undefined || upper === undefined) continue;
+      const a = vertex(lower.radius, lower.y, side);
+      const b = vertex(lower.radius, lower.y, side + 1);
+      const c = vertex(upper.radius, upper.y, side + 1);
+      const d = vertex(upper.radius, upper.y, side);
+      triangle(a, d, b, shade);
+      triangle(b, d, c, shade);
+    }
+    const bottom = rings[0];
+    const top = rings[rings.length - 1];
+    if (bottom !== undefined && top !== undefined) {
+      triangle([0, bottom.y, 0], vertex(bottom.radius, bottom.y, side), vertex(bottom.radius, bottom.y, side + 1), shade);
+      triangle([0, top.y, 0], vertex(top.radius, top.y, side + 1), vertex(top.radius, top.y, side), shade);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+// Universal SUPER pickup silhouette: a luminous energy crystal seated in a
+// short satin-metal collar. Just two solid meshes, no texture/halo/light.
+// The existing x2 power grant stays server-owned; the item is also suitable
+// for future super effects without depicting a specific projectile.
 export class SuperCore {
   private readonly scene: THREE.Scene;
   private readonly group = new THREE.Group();
-  private readonly mesh: THREE.Mesh;
-  private readonly inner: THREE.Mesh;
+  private readonly crystalMaterial: THREE.MeshStandardMaterial;
+  private readonly disposables: Array<{ dispose(): void }> = [];
+  private active = false;
   private spinTime = 0;
 
   public constructor(scene: THREE.Scene) {
     this.scene = scene;
-    const geometry = new THREE.IcosahedronGeometry(SUPER_CORE_OUTER_RADIUS, 0);
-    const material = new THREE.MeshBasicMaterial({ color: SUPER_BALL_COLOR, wireframe: true });
-    this.mesh = new THREE.Mesh(geometry, material);
-    this.group.add(this.mesh);
-    const core = new THREE.Mesh(
-      new THREE.OctahedronGeometry(SUPER_CORE_INNER_RADIUS, 0),
-      new THREE.MeshBasicMaterial({ color: NEUTRAL_WHITE }),
-    );
-    core.name = "super-core-inner";
-    this.inner = core;
-    this.group.add(core);
+    this.group.name = "super-core";
+    const crystalGeometry = makeSuperCrystalGeometry();
+    this.crystalMaterial = new THREE.MeshStandardMaterial({
+      color: SUPER_BALL_COLOR,
+      emissive: SUPER_BALL_COLOR,
+      emissiveIntensity: 0.32,
+      roughness: 0.28,
+      metalness: 0.14,
+      vertexColors: true,
+      flatShading: true,
+    });
+    const crystal = new THREE.Mesh(crystalGeometry, this.crystalMaterial);
+    crystal.name = "super-core-crystal";
+    this.group.add(crystal);
+    const collarGeometry = new THREE.LatheGeometry([
+      new THREE.Vector2(0.19, -0.33),
+      new THREE.Vector2(0.38, -0.33),
+      new THREE.Vector2(SUPER_CORE_OUTER_RADIUS, -0.28),
+      new THREE.Vector2(SUPER_CORE_OUTER_RADIUS, -0.20),
+      new THREE.Vector2(0.39, -0.16),
+      new THREE.Vector2(0.19, -0.16),
+      new THREE.Vector2(0.19, -0.33),
+    ], 12);
+    const collarMaterial = new THREE.MeshStandardMaterial({
+      color: 0x426369,
+      emissive: 0x426369,
+      emissiveIntensity: 0.12,
+      roughness: 0.44,
+      metalness: 0.45,
+      flatShading: true,
+    });
+    const collar = new THREE.Mesh(collarGeometry, collarMaterial);
+    collar.name = "super-core-collar";
+    this.group.add(collar);
+    this.disposables.push(crystalGeometry, this.crystalMaterial, collarGeometry, collarMaterial);
     this.group.visible = false;
     this.group.position.set(0, 1.2, 0);
     this.scene.add(this.group);
@@ -818,8 +894,14 @@ export class SuperCore {
   public render(superSnapshot: NetSuperSnapshot | null, nowMs: number): void {
     if (superSnapshot === null || !superSnapshot.active) {
       this.group.visible = false;
+      this.active = false;
+      this.spinTime = 0;
+      this.group.rotation.set(0, 0, 0);
+      this.group.position.y = 1.2;
+      this.crystalMaterial.emissiveIntensity = 0.32;
       return;
     }
+    this.active = true;
     this.group.visible = true;
     this.group.position.set(superSnapshot.x, 1.2, superSnapshot.z);
     const remainingMs = superSnapshot.expiresAt - nowMs;
@@ -830,23 +912,20 @@ export class SuperCore {
   }
 
   public update(deltaSeconds: number): void {
-    if (!this.group.visible || !(deltaSeconds > 0)) {
+    if (!this.active || !Number.isFinite(deltaSeconds) || deltaSeconds <= 0) {
       return;
     }
     this.spinTime += deltaSeconds;
-    this.group.rotation.y += deltaSeconds * 1.5;
-    this.mesh.rotation.x += deltaSeconds * 0.8;
-    this.group.position.y = 1.2 + Math.sin(this.spinTime * 2) * 0.15;
-    this.inner.scale.setScalar(1 + 0.18 * Math.sin(this.spinTime * 4));
+    this.group.rotation.y += deltaSeconds * 0.55;
+    this.group.position.y = 1.2 + Math.sin(this.spinTime * 1.6) * 0.06;
+    this.crystalMaterial.emissiveIntensity = 0.32 + Math.sin(this.spinTime * 1.4) * 0.055;
   }
 
   public dispose(): void {
+    this.render(null, 0);
     this.scene.remove(this.group);
-    for (const child of [...this.group.children]) {
-      const mesh = child as THREE.Mesh;
-      mesh.geometry.dispose();
-      (mesh.material as THREE.Material).dispose();
-      this.group.remove(child);
-    }
+    for (const resource of this.disposables) resource.dispose();
+    this.disposables.length = 0;
+    this.group.clear();
   }
 }

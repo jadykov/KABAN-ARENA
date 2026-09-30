@@ -88,6 +88,7 @@ import {
 } from "../config";
 import { ArenaBuilder, getObstacleLayout, getPlatforms, getTrampolineAt, isOnIce, isOnSwamp } from "../arena/Arena";
 import { PowerUpPickups, PowerUpState } from "../arena/PowerUps";
+import { SuburbanEnvironment } from "../arena/SuburbanEnvironment";
 import { BallsPool, SuperCore } from "../fx/Balls";
 import { CameraShake, HitFlash } from "../fx/CameraShake";
 import { Fireflies } from "../fx/Fireflies";
@@ -457,6 +458,7 @@ export class SceneManager {
   private readonly scene: THREE.Scene;
   private readonly camera: THREE.PerspectiveCamera;
   private readonly disposables: Array<{ dispose(): void }> = [];
+  private readonly environment = new SuburbanEnvironment();
   private roundProgress = 0;
   private skyProgress = ROUND_LIGHTING_DAY_SAMPLE_PROGRESS;
   private sceneBackground: THREE.Color | null = null;
@@ -763,6 +765,8 @@ export class SceneManager {
     }
     const eveningLights = eveningLightsAt(this.roundProgress);
     this.ads.setPorchLighting(eveningLights);
+    this.arena.setEveningLighting(eveningLights);
+    this.environment.setEveningLighting(eveningLights);
     this.fireflies?.setVisibility(eveningLights);
     const stars = smooth01((this.skyProgress - 0.66) / 0.3);
     if (this.starMaterial !== null) this.starMaterial.opacity = 0.9 * stars;
@@ -803,6 +807,7 @@ export class SceneManager {
     this.directionalLight = directional;
 
     this.arena.buildVisuals(this.scene);
+    this.environment.build(this.scene);
     this.buildSky(this.scene);
     this.ads.buildVisuals(this.scene);
     this.setDayProgress(this.roundProgress);
@@ -2167,6 +2172,7 @@ export class SceneManager {
     this.pickups.dispose();
     this.particles.dispose();
     this.arena.dispose(this.scene);
+    this.environment.dispose(this.scene);
     this.ads.dispose(this.scene);
     if (this.physics !== null) {
       this.physics.dispose();

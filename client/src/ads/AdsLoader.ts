@@ -24,10 +24,10 @@ type ShopBrand = "magnit" | "pyaterochka" | "krasnoe-beloe";
 // the two Krasnoe & Beloe outlets. Per-instance colors keep the extra detail
 // in the same few draw calls as the original facades.
 const SHOP_STYLES = [
-  { wall: 0xb8b9a1, frame: 0x744747, trim: 0xd5caaa, roof: 0x883f43, accent: 0xbf6257, glass: 0x79999b, door: 0x394747 },
-  { wall: 0x3d6253, frame: 0x8aa393, trim: 0x29443d, roof: 0x53685a, accent: 0xa94849, glass: 0x4a6770, door: 0x718079 },
-  { wall: 0x50734e, frame: 0xa89b75, trim: 0x3d5941, roof: 0x718056, accent: 0xd3a35e, glass: 0x8baaa5, door: 0x493f39 },
-  { wall: 0xa8c5aa, frame: 0x4f805e, trim: 0xd5dfbd, roof: 0x61946c, accent: 0xc76759, glass: 0x8cb3bb, door: 0x3b7068 },
+  { wall: 0xe0ded7, frame: 0xbd333b, trim: 0x69747a, roof: 0xd1d7d8, accent: 0xbe3039, glass: 0x78949e, door: 0x6a8791, metal: 0xa3afb4, base: 0x727c81 },
+  { wall: 0xb9c1c4, frame: 0xd9dfdf, trim: 0x38454c, roof: 0x3e4b52, accent: 0xb9323c, glass: 0x536f7b, door: 0x617f8a, metal: 0x929fa6, base: 0x46555d },
+  { wall: 0xd6dbdc, frame: 0xbdc8cc, trim: 0x566970, roof: 0xb92c39, accent: 0xc02f3c, glass: 0x77969f, door: 0x66858f, metal: 0xa0aeb4, base: 0x717d83 },
+  { wall: 0xe2e7e0, frame: 0x367d47, trim: 0xc0cecb, roof: 0x42814e, accent: 0xc54247, glass: 0x819fa4, door: 0x729099, metal: 0xa1b0b2, base: 0x7b8889 },
 ] as const;
 
 // Keep the accepted reach while adding another 20% to Stage 11's brightness.
@@ -184,7 +184,7 @@ export class AdsManager {
     const plane = new THREE.PlaneGeometry(1, 1);
     // A single low-segment bevel softens awnings, beams and fixtures without
     // adding materials or changing the platform colliders.
-    const box = new RoundedBoxGeometry(1, 1, 1, 2, 0.045);
+    const box = new RoundedBoxGeometry(1, 1, 1, 1, 0.045);
     const facade = new THREE.MeshStandardMaterial({ color: NEUTRAL_WHITE, roughness: 0.94 });
     const glazing = new THREE.MeshStandardMaterial({
       color: NEUTRAL_WHITE,
@@ -239,12 +239,12 @@ export class AdsManager {
     const addStatic = (
       kind: StaticKind, root: THREE.Group,
       x: number, y: number, z: number, width: number, height: number, depth: number,
-      color: number, tiltZ = 0, tiltX = 0,
+      color: number, tiltZ = 0, tiltX = 0, tiltY = 0,
     ): void => {
       root.updateMatrix();
       localPosition.set(x, y, z);
       localScale.set(width, height, depth);
-      localRotation.setFromEuler(localEuler.set(tiltX, 0, tiltZ));
+      localRotation.setFromEuler(localEuler.set(tiltX, tiltY, tiltZ));
       localMatrix.compose(localPosition, localRotation, localScale);
       staticParts[kind].push({
         matrix: new THREE.Matrix4().multiplyMatrices(root.matrix, localMatrix),
@@ -288,15 +288,14 @@ export class AdsManager {
       const platform = PLATFORM_FIGURES[transform.platformIndex];
       if (platform === undefined) throw new Error("Missing shop platform");
       const wallDepth = 2 * (platform.rampSide.endsWith("z") ? platform.hx : platform.hz);
-      // The root sits 0.015 m outside the front wall. Keep rear fixtures
-      // against the opposite wall and clear of the perpendicular ramp.
-      const rearFaceZ = -wallDepth + 0.005;
+      const wallWidth = 2 * (platform.rampSide.endsWith("z") ? platform.hz : platform.hx);
+      const rearFaceZ = -wallDepth - 0.04;
       const add = (
         kind: StaticKind, x: number, y: number, z: number,
-        width: number, height: number, depth: number, color: number, tiltZ = 0,
+        width: number, height: number, depth: number, color: number,
       ): void => addStatic(
         kind, shop, x * unit, y * sy, z,
-        width * unit, height * sy, depth, color, tiltZ,
+        width * unit, height * sy, depth, color,
       );
       const back = (
         kind: "trim" | "canopy" | "accent",
@@ -311,7 +310,7 @@ export class AdsManager {
       };
       const pane = (
         x: number, y: number, width: number, height: number,
-        glassColor: number, frameColor = style.frame,
+        glassColor: number, frameColor: number = style.frame,
       ): void => {
         add("glazing", x, y, 0.055, width, height, 1, glassColor);
         add("trim", x - width / 2, y, 0.075, 0.045, height + 0.045, 0.035, frameColor);
@@ -320,10 +319,89 @@ export class AdsManager {
         add("trim", x, y - height / 2, 0.075, width + 0.045, 0.045, 0.035, frameColor);
       };
 
-      // The solid platform remains the wall and collider. Every shop detail
-      // sits on its inward-facing side, clear of the perpendicular ramp.
-      add("facade", 0, 1.45, 0.025, 2.4, 2.72, 1, style.wall);
-      add("trim", 0, 0.10, 0.08, 2.25, 0.09, 0.11, style.trim);
+      // Dress the existing platform walls rather than placing a separate hut
+      // on the deck. Full-width cladding and a continuous branded fascia
+      // cover all four faces; the top and its original collider stay clear.
+      type WallFace = "front" | "rear" | "left" | "right";
+      const faces: readonly WallFace[] = ["front", "rear", "left", "right"];
+      const rampDirection = new THREE.Vector3(
+        platform.rampSide.endsWith("x") ? (platform.rampSide.startsWith("+") ? 1 : -1) : 0,
+        0,
+        platform.rampSide.endsWith("z") ? (platform.rampSide.startsWith("+") ? 1 : -1) : 0,
+      ).applyAxisAngle(new THREE.Vector3(0, 1, 0), -transform.rotationY);
+      const rampFace: WallFace = rampDirection.x > 0 ? "right" : "left";
+      const facePart = (
+        kind: StaticKind, face: WallFace, across: number, y: number,
+        width: number, height: number, depth: number, color: number, layer = 0,
+      ): void => {
+        const side = face === "left" || face === "right";
+        const angle = face === "front" ? 0 : face === "rear" ? Math.PI
+          : face === "left" ? -Math.PI / 2 : Math.PI / 2;
+        // Side fixtures use at most 4 cm of relief. On the ramp side they
+        // stay below the landing and away from the ramp's central width.
+        const planePart = kind === "facade" || kind === "glazing";
+        const relief = planePart ? layer : layer + depth / 2;
+        const local = new THREE.Vector3(across, y * sy, relief)
+          .applyAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+        local.x += side ? (face === "left" ? -1 : 1) * (wallWidth / 2 + 0.012) : 0;
+        local.z += face === "front" ? 0.025 : face === "rear" ? rearFaceZ : -wallDepth / 2 - 0.015;
+        addStatic(kind, shop, local.x, local.y, local.z,
+          width, height * sy, depth, color, 0, 0, angle);
+      };
+      for (const face of faces) {
+        const side = face === "left" || face === "right";
+        const faceWidth = side ? wallDepth : wallWidth;
+        facePart("facade", face, 0, 1.49, faceWidth, 2.94, 1, style.wall);
+        facePart("accent", face, 0, 0.16, faceWidth - 0.04, 0.23, 0.018, style.base);
+        // The landing-side fascia remains below the ramp slab. Only the
+        // flush wall skin continues higher; no cornice crosses the deck.
+        const bandY = face === rampFace ? 2.42 : 2.55;
+        const bandHeight = face === rampFace ? 0.52 : 0.78;
+        const bandColor = transform.platformIndex === 0 ? style.roof
+          : transform.platformIndex === 1 ? style.trim : style.accent;
+        facePart("accent", face, 0, bandY, faceWidth - 0.025, bandHeight, 0.018, bandColor, 0.003);
+        if (transform.platformIndex <= 1) {
+          facePart("accent", face, 0, bandY - bandHeight / 2 + 0.075,
+            faceWidth - 0.025, 0.15, 0.018, style.accent, 0.024);
+        }
+        if (transform.platformIndex === 3) {
+          facePart("trim", face, 0, bandY - bandHeight / 2 - 0.045,
+            faceWidth - 0.025, 0.075, 0.022, style.frame, 0.003);
+        }
+        // Few broad panel joints read as retail cladding at game scale.
+        // They stop beneath the brand band instead of making a fine grid.
+        for (const joint of [-0.30, 0.30]) {
+          facePart("trim", face, joint * faceWidth, 1.25,
+            0.014, 1.82, 0.012, style.metal, 0.001);
+        }
+      }
+
+      // A long side display has aluminium framing. The other side is the
+      // ramp landing: only wall panels and a shallow corner louver appear
+      // there, outside the slope width and below its walking surface.
+      for (const face of ["left", "right"] as const) {
+        if (face === rampFace) {
+          const cornerWidth = (wallDepth - platform.rampWidth) / 2;
+          if (cornerWidth > 0.30) {
+            const across = wallDepth / 2 - cornerWidth / 2;
+            facePart("glazing", face, across, 1.86, cornerWidth * 0.72, 0.29, 1, style.trim, 0.016);
+            for (const y of [1.77, 1.86, 1.95]) {
+              facePart("trim", face, across, y, cornerWidth * 0.65, 0.025, 0.012, style.metal, 0.019);
+            }
+          }
+          continue;
+        }
+        const displayWidth = wallDepth * 0.59;
+        facePart("glazing", face, 0, 1.24, displayWidth, 1.32, 1, style.glass, 0.016);
+        for (const across of [-displayWidth / 2, 0, displayWidth / 2]) {
+          facePart("trim", face, across, 1.24, 0.035, 1.36, 0.016, style.frame, 0.021);
+        }
+        for (const y of [0.58, 1.90]) {
+          facePart("trim", face, 0, y, displayWidth + 0.035, 0.035, 0.016, style.frame, 0.021);
+        }
+        facePart("accent", face, 0, 0.73, displayWidth - 0.045, 0.19, 0.012, style.accent, 0.024);
+      }
+
       let doorX = 0;
       let porchY = 1.84;
       let porchLights: readonly number[] = [];
@@ -332,198 +410,122 @@ export class AdsManager {
 
       switch (transform.platformIndex) {
         case 0: {
-          // Light corner grocer: striped awning, filled display window and a
-          // wall-mounted planter. The off-center entrance keeps it informal.
+          // White K&B: silver entrance hood, red jambs and broad glazing.
           doorX = 0.19;
           porchY = 1.83;
           porchLights = [0.19];
           signY = 2.48;
-          pane(-0.66, 1.02, 0.77, 1.27, style.glass);
-          pane(doorX, 0.91, 0.62, 1.61, style.door);
-          pane(0.85, 1.02, 0.31, 1.27, style.glass);
-          add("trim", -0.66, 0.84, 0.095, 0.74, 0.035, 0.035, style.frame);
-          add("trim", -0.66, 1.19, 0.095, 0.74, 0.035, 0.035, style.frame);
-          add("accent", -0.85, 0.96, 0.105, 0.15, 0.18, 0.035, 0xc96453);
-          add("accent", -0.58, 0.96, 0.105, 0.13, 0.14, 0.035, 0xdfb77a);
-          add("accent", -0.76, 1.34, 0.105, 0.20, 0.13, 0.035, 0x8caa70);
-          add("accent", 0.41, 0.88, 0.098, 0.035, 0.14, 0.035, 0xd8c6a7);
-          add("trim", 0.59, 1.41, 0.081, 0.13, 0.30, 0.035, style.frame);
-          add("accent", 0.59, 1.41, 0.105, 0.075, 0.17, 0.025, 0xdfc99f);
-          add("canopy", 0, 2.04, 0.22, 2.43, 0.11, 0.42, style.roof);
-          for (let i = -2; i <= 2; i += 1) {
-            add("accent", i * 0.48, 1.98, 0.443, 0.24, 0.065, 0.025,
-              i % 2 === 0 ? style.accent : 0xe0cba9);
-          }
+          pane(-0.66, 1.09, 0.77, 1.48, style.glass);
+          pane(doorX, 0.91, 0.62, 1.61, style.door, style.metal);
+          pane(0.85, 1.09, 0.31, 1.48, style.glass);
+          add("accent", -0.66, 0.63, 0.103, 0.71, 0.19, 0.018, style.accent);
+          add("accent", 0.41, 0.88, 0.105, 0.035, 0.18, 0.035, style.metal);
+          add("canopy", 0, 2.04, 0.22, 2.43, 0.10, 0.42, style.roof);
+          add("accent", 0, 1.98, 0.443, 2.38, 0.085, 0.025, style.accent);
           pairedBeams(1.07, 1.42, 0.073, 0.10, 2.48, 0.08, style.frame);
-          add("canopy", -0.75, 0.30, 0.11, 0.48, 0.17, 0.13, 0x9a7858);
-          for (const leafX of [-0.87, -0.74, -0.61]) {
-            add("accent", leafX, 0.49, 0.13, 0.055, 0.24, 0.025, 0x5a8058,
-              leafX < -0.75 ? -0.3 : 0.3);
-          }
           break;
         }
         case 1: {
-          // A compact depot: straight side ribs, louvered windows, double
-          // utility doors and a narrow metal hood distinguish the other K&B.
-          doorX = 0;
+          // Charcoal K&B: red side piers, double glass doors and slim hood.
           porchY = 1.86;
           porchLights = [-0.43, 0.43];
           signX = 0.08;
-          pane(-0.73, 1.00, 0.35, 1.26, style.glass);
+          pane(-0.73, 1.08, 0.35, 1.42, style.glass);
           pane(0, 0.91, 0.82, 1.64, style.door);
-          pane(0.73, 1.00, 0.35, 1.26, style.glass);
-          add("trim", 0, 0.91, 0.092, 0.04, 1.62, 0.035, style.trim);
-          add("accent", -0.14, 0.82, 0.105, 0.035, 0.16, 0.035, 0xd5d0b9);
-          add("accent", 0.14, 0.82, 0.105, 0.035, 0.16, 0.035, 0xd5d0b9);
-          for (const ventX of [-0.73, 0.73]) {
-            for (const ventY of [0.72, 0.91, 1.10, 1.29]) {
-              add("trim", ventX, ventY, 0.095, 0.30, 0.045, 0.035, style.trim);
-            }
+          pane(0.73, 1.08, 0.35, 1.42, style.glass);
+          add("trim", 0, 0.91, 0.092, 0.04, 1.62, 0.035, style.frame);
+          for (const handleX of [-0.14, 0.14]) {
+            add("accent", handleX, 0.82, 0.105, 0.035, 0.18, 0.035, style.metal);
           }
-          add("trim", 1.02, 1.69, 0.087, 0.21, 0.24, 0.045, style.frame);
-          add("accent", 1.02, 1.69, 0.12, 0.12, 0.045, 0.025, 0xb2b8a4);
           add("canopy", 0, 2.09, 0.18, 2.34, 0.09, 0.35, style.roof);
           add("accent", 0, 2.03, 0.37, 2.30, 0.055, 0.04, style.accent);
-          pairedBeams(1.04, 1.42, 0.105, 0.19, 2.62, 0.10, style.trim);
-          add("trim", 0, 2.87, 0.073, 2.18, 0.065, 0.07, style.frame);
-          for (const ventX of [-0.92, 0.92]) {
-            add("glazing", ventX, 2.73, 0.068, 0.23, 0.15, 1, 0x253e3c);
-            for (const ventY of [2.69, 2.74, 2.79]) {
-              add("accent", ventX, ventY, 0.083, 0.19, 0.017, 0.022, 0x9aac99);
-            }
-          }
-          add("canopy", 0.83, 0.29, 0.10, 0.34, 0.24, 0.12, 0x586d5b);
-          add("accent", 0.83, 0.37, 0.18, 0.25, 0.035, 0.025, style.accent);
+          pairedBeams(1.04, 1.42, 0.105, 0.13, 2.62, 0.07, style.accent);
           break;
         }
         case 2: {
-          // Magnit borrows the reference's olive wedge, shelves, planter and
-          // little over-sign arms. Its front edge is a warm thin blade.
+          // Magnit: light composite panels, red fascia, aluminium entrance.
           doorX = 0.17;
           porchY = 1.84;
           porchLights = [-0.48, 0.48];
           signX = 0.05;
-          pane(-0.63, 1.01, 0.68, 1.28, style.glass);
+          pane(-0.63, 1.10, 0.68, 1.48, style.glass);
           pane(doorX, 0.91, 0.63, 1.61, style.door);
-          pane(0.87, 1.00, 0.25, 1.26, style.glass);
-          add("trim", -0.63, 0.78, 0.095, 0.64, 0.035, 0.035, style.frame);
-          add("trim", -0.63, 1.16, 0.095, 0.64, 0.035, 0.035, style.frame);
-          add("accent", -0.82, 0.93, 0.105, 0.15, 0.14, 0.035, 0xcc7657);
-          add("accent", -0.53, 0.93, 0.105, 0.17, 0.14, 0.035, 0xd9bb76);
-          add("accent", -0.68, 1.34, 0.105, 0.16, 0.17, 0.035, 0x8cba80);
-          add("trim", 0.39, 0.82, 0.102, 0.035, 0.13, 0.035, style.frame);
-          for (const ventY of [1.30, 1.38, 1.46]) {
-            add("accent", 0.60, ventY, 0.095, 0.13, 0.025, 0.025, style.trim);
-          }
+          pane(0.87, 1.10, 0.25, 1.48, style.glass);
+          add("accent", -0.63, 0.65, 0.103, 0.61, 0.19, 0.018, style.accent);
+          add("trim", 0.39, 0.82, 0.105, 0.035, 0.18, 0.035, style.metal);
           add("canopy", 0, 2.05, 0.23, 2.40, 0.09, 0.40, style.roof);
           add("accent", 0, 1.99, 0.44, 2.38, 0.035, 0.03, style.accent);
-          pairedBeams(1.07, 1.40, 0.092, 0.15, 2.62, 0.09, style.trim);
+          pairedBeams(1.07, 1.40, 0.092, 0.15, 2.62, 0.07, style.frame);
           for (const armX of [-0.59, 0.59]) {
-            add("trim", armX, 2.91, 0.14, 0.045, 0.11, 0.08, style.frame);
+            add("trim", armX, 2.91, 0.14, 0.045, 0.11, 0.08, style.trim);
             add("lamp", armX, 2.87, 0.21, 0.21, 0.035, 0.07, 0xffe4ad);
-          }
-          add("canopy", -0.75, 0.30, 0.11, 0.44, 0.17, 0.13, 0x9c7857);
-          for (const leafX of [-0.84, -0.72, -0.61]) {
-            add("accent", leafX, 0.47, 0.13, 0.048, 0.23, 0.025, 0x5f8b5b,
-              leafX < -0.72 ? -0.24 : 0.24);
           }
           break;
         }
         case 3: {
-          // The pale pavilion gets a stepped crown, three glazed bays,
-          // twin doors and green vertical rhythm instead of a wedge.
-          doorX = 0;
+          // Pyaterochka: red header and green portal frame, pale panel walls.
           porchY = 1.88;
           porchLights = [-0.46, 0.46];
           signY = 2.56;
-          pane(-0.78, 1.01, 0.43, 1.32, style.glass);
-          pane(0, 0.91, 0.80, 1.66, style.door);
-          pane(0.78, 1.01, 0.43, 1.32, style.glass);
-          add("trim", 0, 0.91, 0.092, 0.045, 1.64, 0.035, style.frame);
-          add("accent", -0.15, 0.83, 0.102, 0.035, 0.15, 0.035, style.trim);
-          add("accent", 0.15, 0.83, 0.102, 0.035, 0.15, 0.035, style.trim);
-          for (const bayX of [-0.78, 0.78]) {
-            add("trim", bayX, 0.85, 0.095, 0.40, 0.035, 0.035, style.frame);
-            add("accent", bayX - 0.10, 0.99, 0.105, 0.10, 0.16, 0.025, 0x83a45e);
-            add("accent", bayX + 0.10, 0.99, 0.105, 0.10, 0.16, 0.025, 0xd3a166);
+          pane(-0.78, 1.08, 0.43, 1.46, style.glass, style.metal);
+          pane(0, 0.91, 0.80, 1.66, style.door, style.metal);
+          pane(0.78, 1.08, 0.43, 1.46, style.glass, style.metal);
+          add("trim", 0, 0.91, 0.092, 0.045, 1.64, 0.035, style.metal);
+          for (const handleX of [-0.15, 0.15]) {
+            add("accent", handleX, 0.83, 0.105, 0.035, 0.18, 0.035, style.metal);
           }
           for (const bayX of [-0.78, 0.78]) {
-            add("accent", bayX, 1.79, 0.09, 0.24, 0.05, 0.035, style.trim);
+            add("accent", bayX, 0.64, 0.103, 0.37, 0.22, 0.018, style.frame);
           }
           add("canopy", 0, 2.13, 0.23, 2.44, 0.11, 0.43, style.roof);
           add("accent", 0, 2.07, 0.46, 2.40, 0.05, 0.03, style.accent);
-          pairedBeams(1.07, 1.48, 0.08, 0.075, 2.55, 0.08, style.frame);
-          add("canopy", 0, 2.88, 0.06, 2.42, 0.10, 0.15, style.trim);
-          add("canopy", 0, 2.96, 0.06, 1.65, 0.045, 0.16, style.roof);
-          for (const ribX of [-0.84, -0.56, 0.56, 0.84]) {
-            add("accent", ribX, 2.09, 0.47, 0.035, 0.15, 0.04, style.frame);
-          }
+          pairedBeams(1.07, 1.48, 0.08, 0.10, 2.55, 0.07, style.frame);
+          add("canopy", 0, 2.88, 0.06, 2.42, 0.075, 0.12, style.accent);
           break;
         }
       }
 
-      // Small service-side details give each building a different back while
-      // leaving the platform itself as the only wall and collider. Boxes are
-      // reused in the existing static batches; nothing protrudes onto ramps.
+      const serviceDoor = (x: number, y: number, width: number, height: number): void => {
+        back("trim", x, y, width, height, 0.04, style.metal);
+        for (const edgeX of [x - width / 2 - 0.025, x + width / 2 + 0.025]) {
+          back("trim", edgeX, y, 0.04, height + 0.05, 0.035, style.trim, 0.025);
+        }
+        back("trim", x, y + height / 2 + 0.025, width + 0.09, 0.045, 0.035, style.trim, 0.025);
+        back("accent", x - width / 2 + 0.12, y + 0.04, 0.12, 0.035, 0.03, style.trim, 0.06);
+      };
+      const rearVent = (x: number, y: number, width: number): void => {
+        back("trim", x, y, width, 0.34, 0.04, style.trim);
+        for (const offset of [-0.10, 0, 0.10]) {
+          back("accent", x, y + offset, width - 0.08, 0.03, 0.02, style.metal, 0.045);
+        }
+      };
+      // Plain metal doors and broad louvers replace the wooden door and
+      // crossed cottage window. These fixtures remain on the rear wall.
       switch (transform.platformIndex) {
-        case 0: {
-          // A delivery door with a small exit plaque and a high louver.
-          back("trim", 0.53, 0.89, 0.68, 1.67, 0.045, style.door);
-          back("trim", 0.53, 1.75, 0.76, 0.07, 0.07, style.frame, 0.015);
-          for (const edgeX of [0.16, 0.90]) {
-            back("trim", edgeX, 0.89, 0.045, 1.74, 0.06, style.frame, 0.015);
-          }
-          back("accent", 0.28, 0.93, 0.045, 0.12, 0.06, style.trim, 0.045);
-          back("accent", 0.53, 1.91, 0.58, 0.12, 0.035, 0xe6d8b8);
-          back("trim", -0.64, 1.73, 0.69, 0.43, 0.045, 0x5c6a64);
-          for (const ventY of [1.59, 1.69, 1.79, 1.89]) {
-            back("accent", -0.64, ventY, 0.60, 0.025, 0.025, style.trim, 0.04);
-          }
+        case 0:
+          serviceDoor(0.53, 0.91, 0.68, 1.70);
+          rearVent(-0.64, 1.78, 0.73);
           break;
-        }
-        case 1: {
-          // Metal shutter and a compact condenser with three readable slats.
-          back("trim", 0.55, 1.07, 0.71, 1.40, 0.045, 0x304c43);
-          for (const shutterY of [0.72, 0.96, 1.20, 1.44, 1.68]) {
-            back("accent", 0.55, shutterY, 0.68, 0.035, 0.035, 0x7e9a8b, 0.035);
+        case 1:
+          back("trim", 0.55, 1.05, 0.76, 1.60, 0.045, style.metal);
+          for (const shutterY of [0.58, 0.90, 1.22, 1.54]) {
+            back("accent", 0.55, shutterY, 0.72, 0.025, 0.025, style.trim, 0.045);
           }
-          back("canopy", -0.58, 1.89, 0.66, 0.54, 0.17, 0x73867b);
-          back("trim", -0.58, 1.89, 0.53, 0.39, 0.035, 0x344b47, 0.18);
+          back("canopy", -0.58, 1.89, 0.66, 0.54, 0.17, style.metal);
+          back("trim", -0.58, 1.89, 0.53, 0.39, 0.025, style.trim, 0.18);
           for (const ventY of [1.78, 1.89, 2.00]) {
-            back("accent", -0.58, ventY, 0.42, 0.025, 0.03, 0xb0b7a2, 0.22);
+            back("accent", -0.58, ventY, 0.42, 0.025, 0.02, style.frame, 0.215);
           }
-          back("trim", -0.83, 1.46, 0.035, 0.30, 0.055, style.trim);
-          back("trim", -0.33, 1.46, 0.035, 0.30, 0.055, style.trim);
           break;
-        }
-        case 2: {
-          // A service door and a small square window break up the olive back.
-          back("trim", 0.57, 0.91, 0.64, 1.64, 0.045, style.door);
-          for (const edgeX of [0.23, 0.91]) {
-            back("trim", edgeX, 0.91, 0.045, 1.70, 0.06, style.frame, 0.015);
-          }
-          back("accent", 0.30, 0.93, 0.045, 0.13, 0.06, 0xe0bc84, 0.045);
-          back("trim", -0.56, 1.64, 0.69, 0.62, 0.045, 0x3b5750);
-          back("trim", -0.56, 1.64, 0.045, 0.67, 0.055, style.frame, 0.015);
-          back("trim", -0.56, 1.64, 0.73, 0.045, 0.055, style.frame, 0.015);
-          back("canopy", -0.56, 1.28, 0.78, 0.09, 0.11, style.roof);
+        case 2:
+          serviceDoor(0.57, 0.94, 0.70, 1.76);
+          rearVent(-0.58, 1.74, 0.78);
           break;
-        }
-        case 3: {
-          // A narrow service hatch, ventilation grille and short drainpipe.
-          back("trim", -0.49, 0.93, 0.65, 1.58, 0.045, style.door);
-          back("trim", -0.49, 1.76, 0.74, 0.07, 0.07, style.frame, 0.015);
-          for (const edgeX of [-0.84, -0.14]) {
-            back("trim", edgeX, 0.93, 0.045, 1.65, 0.06, style.frame, 0.015);
-          }
-          back("accent", -0.25, 0.91, 0.045, 0.12, 0.06, style.trim, 0.045);
-          back("trim", 0.52, 1.54, 0.68, 0.42, 0.045, 0x53766c);
-          for (const ventY of [1.40, 1.49, 1.58, 1.67]) {
-            back("accent", 0.52, ventY, 0.57, 0.025, 0.025, 0xc4d4b9, 0.04);
-          }
-          back("trim", 0.99, 0.67, 0.045, 1.20, 0.08, style.frame);
+        case 3:
+          serviceDoor(-0.49, 0.93, 0.67, 1.72);
+          rearVent(0.52, 1.60, 0.72);
+          back("trim", 1.00, 0.70, 0.035, 1.20, 0.035, style.metal);
           break;
-        }
       }
 
       for (const lightX of porchLights) {
