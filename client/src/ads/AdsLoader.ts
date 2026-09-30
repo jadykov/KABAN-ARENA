@@ -30,6 +30,10 @@ const SHOP_STYLES = [
   { wall: 0xa8c5aa, frame: 0x4f805e, trim: 0xd5dfbd, roof: 0x61946c, accent: 0xc76759, glass: 0x8cb3bb, door: 0x3b7068 },
 ] as const;
 
+// Keep the accepted reach while adding another 20% to Stage 11's brightness.
+const PORCH_LIGHT_INTENSITY_GAIN = 1.15 * 1.20;
+const PORCH_LIGHT_REACH_GAIN = 1.15;
+
 function createPorchGlowTexture(): THREE.DataTexture {
   const size = 32;
   const pixels = new Uint8Array(size * size * 4);
@@ -207,6 +211,7 @@ export class AdsManager {
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
+      forceSinglePass: true,
     });
     this.porchLampMaterial = lamp;
     this.porchGlowMaterial = glow;
@@ -230,16 +235,16 @@ export class AdsManager {
     const localScale = new THREE.Vector3();
     const localMatrix = new THREE.Matrix4();
     const localRotation = new THREE.Quaternion();
-    const zAxis = new THREE.Vector3(0, 0, 1);
+    const localEuler = new THREE.Euler();
     const addStatic = (
       kind: StaticKind, root: THREE.Group,
       x: number, y: number, z: number, width: number, height: number, depth: number,
-      color: number, tiltZ = 0,
+      color: number, tiltZ = 0, tiltX = 0,
     ): void => {
       root.updateMatrix();
       localPosition.set(x, y, z);
       localScale.set(width, height, depth);
-      localRotation.setFromAxisAngle(zAxis, tiltZ);
+      localRotation.setFromEuler(localEuler.set(tiltX, 0, tiltZ));
       localMatrix.compose(localPosition, localRotation, localScale);
       staticParts[kind].push({
         matrix: new THREE.Matrix4().multiplyMatrices(root.matrix, localMatrix),
@@ -524,11 +529,23 @@ export class AdsManager {
       for (const lightX of porchLights) {
         add("trim", lightX, porchY + 0.075, 0.32, 0.055, 0.13, 0.10, style.trim);
         add("lamp", lightX, porchY, 0.425, 0.21, 0.045, 0.09, 0xffe9bf);
-        add("glow", lightX, porchY - 0.20, 0.48, 0.67, 0.69, 1, 0xffffff);
+        // A compact source-centered core reads as a lit fixture rather than
+        // only a patch on the wall. It fits inside the existing halo and uses
+        // that same additive batch, texture and smooth activation.
+        add("glow", lightX, porchY, 0.482, 0.31, 0.18, 1, 0xffffff);
+        add("glow", lightX, porchY - 0.20, 0.48,
+          0.67 * PORCH_LIGHT_REACH_GAIN, 0.69 * PORCH_LIGHT_REACH_GAIN, 1, 0xffffff);
       }
       // A faint warm wash on the entrance suggests light falling from the
       // fixture without a real light source or any additional shadows.
-      add("glow", doorX, 0.99, 0.13, 1.02, 1.50, 1, 0x827465);
+      add("glow", doorX, 0.99, 0.13,
+        1.02 * PORCH_LIGHT_REACH_GAIN, 1.50 * PORCH_LIGHT_REACH_GAIN, 1, 0x827465);
+      // The old halos only sat vertically against each entrance. A quiet
+      // floor spill now carries their warm reach into the walkable approach;
+      // it shares their radial fade, material and single instanced draw.
+      addStatic("glow", shop, doorX * unit, 0.018, 0.85,
+        1.70 * unit * PORCH_LIGHT_REACH_GAIN, 2.10 * PORCH_LIGHT_REACH_GAIN, 1,
+        0x8d7759, 0, -Math.PI / 2);
 
       const signMaterial = new THREE.MeshBasicMaterial({
         color: NEUTRAL_WHITE,
@@ -584,9 +601,9 @@ export class AdsManager {
     const value = this.porchLightingStrength;
     if (this.porchLampMaterial !== null) {
       this.porchLampMaterial.color.copy(this.porchLampOffColor).lerp(this.porchLampOnColor, value);
-      this.porchLampMaterial.emissiveIntensity = value * 2.4;
+      this.porchLampMaterial.emissiveIntensity = value * 2.4 * PORCH_LIGHT_INTENSITY_GAIN;
     }
-    if (this.porchGlowMaterial !== null) this.porchGlowMaterial.opacity = value * 0.52;
+    if (this.porchGlowMaterial !== null) this.porchGlowMaterial.opacity = value * 0.52 * PORCH_LIGHT_INTENSITY_GAIN;
     if (this.porchGlowBatch !== null) this.porchGlowBatch.visible = value > 0.001;
   }
 

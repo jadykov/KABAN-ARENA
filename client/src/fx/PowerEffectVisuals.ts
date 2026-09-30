@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { HL_SHIELD, HL_CHARTREUSE_BRIGHT } from "../palette";
+import { HL_SHIELD } from "../palette";
 
 export type PowerEffectKind = "shield" | "speed" | "charge";
 
@@ -11,8 +11,11 @@ const BADGE_Y_M = 1.55;
 const SHIELD_RADIUS_M = 0.88;
 const SHIELD_PULSE_AMPLITUDE = 0.035;
 const SHIELD_PULSE_RATE = 2.4;
-const WIND_BOB_AMPLITUDE_M = 0.045;
-const WIND_BOB_RATE = 5;
+const WIND_BOB_AMPLITUDE_M = 0.015;
+const WIND_BOB_RATE = 4;
+const WIND_SECTIONS = 12;
+const WIND_WIDTH_STEPS = 4;
+const WIND_RUN_THRESHOLD = 0.25;
 
 let shieldIconTexture: THREE.Texture | null = null;
 let speedIconTexture: THREE.Texture | null = null;
@@ -50,14 +53,61 @@ function releaseIcons(): void {
   chargeIconTexture = null;
 }
 
+// Two quiet, curved ribbons share one mesh. Their width tapers at both ends;
+// vertex alpha feathers the edges and fades the tail without a texture or
+// particles. Build the small buffers once, then animate only the transform.
+function makeSpeedWakeGeometry(): THREE.BufferGeometry {
+  const rowSize = WIND_WIDTH_STEPS + 1;
+  const ribbonSize = (WIND_SECTIONS + 1) * rowSize;
+  const positions = new Float32Array(2 * ribbonSize * 3);
+  const colors = new Float32Array(2 * ribbonSize * 4);
+  const indices: number[] = [];
+  const color = new THREE.Color(0xcff4e5);
+  for (let ribbon = 0; ribbon < 2; ribbon += 1) {
+    const side = ribbon === 0 ? -1 : 1;
+    const length = ribbon === 0 ? 1.25 : 1.04;
+    const startY = ribbon === 0 ? 0.18 : -0.12;
+    for (let section = 0; section <= WIND_SECTIONS; section += 1) {
+      const t = section / WIND_SECTIONS;
+      const curve = Math.sin(t * Math.PI);
+      const centerX = side * (0.48 + 0.16 * curve - 0.12 * t);
+      const centerY = startY + 0.11 * curve - 0.08 * t;
+      const z = -0.3 - length * t;
+      const halfWidth = 0.085 * curve * (1 - 0.3 * t);
+      const alpha = curve * (1 - 0.65 * t);
+      for (let edge = 0; edge < rowSize; edge += 1) {
+        const across = 2 * edge / WIND_WIDTH_STEPS - 1;
+        const vertex = ribbon * ribbonSize + section * rowSize + edge;
+        positions[vertex * 3] = centerX + side * across * halfWidth * 0.35;
+        positions[vertex * 3 + 1] = centerY + across * halfWidth;
+        positions[vertex * 3 + 2] = z;
+        colors[vertex * 4] = color.r;
+        colors[vertex * 4 + 1] = color.g;
+        colors[vertex * 4 + 2] = color.b;
+        colors[vertex * 4 + 3] = alpha * (1 - across * across);
+        if (section < WIND_SECTIONS && edge < WIND_WIDTH_STEPS) {
+          const next = vertex + rowSize;
+          indices.push(vertex, next, vertex + 1, vertex + 1, next, next + 1);
+        }
+      }
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
+  geometry.setIndex(indices);
+  return geometry;
+}
+
 // Small shared visual vocabulary for local and remote fighters. All geometry
 // is built once per avatar; update only changes transforms and visibility.
 export class PowerEffectVisuals {
   private readonly parent: THREE.Object3D;
   private readonly shield: THREE.Mesh;
-  private readonly wind: THREE.LineSegments;
-  private readonly runTrail: THREE.LineSegments;
+  private readonly runTrail: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
   private readonly badge: THREE.Sprite;
+  private speedActive = false;
+  private runningSpeed = 0;
   private badgeLeft = 0;
   private phase = 0;
   private disposed = false;
@@ -77,44 +127,17 @@ export class PowerEffectVisuals {
     this.shield.visible = false;
     parent.add(this.shield);
 
-    // A few open, offset strokes read as moving air without smoke, particles,
-    // extra lights, or a flashing emissive effect.
-    const strokes = new Float32Array([
-      -0.87, -0.30, -0.20, -0.48, -0.30, -0.20,
-      -0.98,  0.04,  0.25, -0.53,  0.04,  0.25,
-      -0.81,  0.42, -0.04, -0.42,  0.42, -0.04,
-       0.87, -0.18,  0.18,  0.50, -0.18,  0.18,
-       0.96,  0.28, -0.24,  0.49,  0.28, -0.24,
-    ]);
-    const windGeometry = new THREE.BufferGeometry();
-    windGeometry.setAttribute("position", new THREE.BufferAttribute(strokes, 3));
-    const windMaterial = new THREE.LineBasicMaterial({
-      color: HL_CHARTREUSE_BRIGHT,
+    // The rig faces local +Z. Both ribbons stay behind it through turns and
+    // replace the old ordinary-run strips and rotating bonus wind together.
+    const trailMaterial = new THREE.MeshBasicMaterial({
+      vertexColors: true,
       transparent: true,
-      opacity: 0.8,
+      opacity: 0.58,
       depthWrite: false,
+      side: THREE.DoubleSide,
+      forceSinglePass: true,
     });
-    this.wind = new THREE.LineSegments(windGeometry, windMaterial);
-    this.wind.name = "bonus-speed-wind";
-    this.wind.visible = false;
-    parent.add(this.wind);
-
-    // Short strokes sit behind local +Z (the avatar's forward direction).
-    // The parent rotates with the runner, so a turn keeps every stroke
-    // pointing from front to back. This is independent of the speed pickup.
-    const trailGeometry = new THREE.BufferGeometry();
-    trailGeometry.setAttribute("position", new THREE.Float32BufferAttribute([
-      -0.25, 0.18, -0.29, -0.31, 0.19, -0.72,
-       0.19, 0.31, -0.35,  0.23, 0.32, -0.83,
-       0.02, 0.06, -0.28,  0.00, 0.07, -0.59,
-    ], 3));
-    const trailMaterial = new THREE.LineBasicMaterial({
-      color: 0xd8eef1,
-      transparent: true,
-      opacity: 0.46,
-      depthWrite: false,
-    });
-    this.runTrail = new THREE.LineSegments(trailGeometry, trailMaterial);
+    this.runTrail = new THREE.Mesh(makeSpeedWakeGeometry(), trailMaterial);
     this.runTrail.name = "run-wind-trail";
     this.runTrail.visible = false;
     parent.add(this.runTrail);
@@ -137,19 +160,25 @@ export class PowerEffectVisuals {
 
   public setActive(shieldActive: boolean, speedActive: boolean): void {
     this.shield.visible = shieldActive;
-    this.wind.visible = speedActive;
+    this.speedActive = speedActive;
+    this.refreshSpeedWake();
   }
 
   public setRunning(speed01: number): void {
-    const speed = Number.isFinite(speed01) ? Math.max(0, Math.min(1, speed01)) : 0;
-    this.runTrail.visible = speed > 0.25;
-    (this.runTrail.material as THREE.LineBasicMaterial).opacity = 0.22 + 0.3 * speed;
+    this.runningSpeed = Number.isFinite(speed01) ? Math.max(0, Math.min(1, speed01)) : 0;
+    this.refreshSpeedWake();
+  }
+
+  private refreshSpeedWake(): void {
+    this.runTrail.visible = this.speedActive && this.runningSpeed > WIND_RUN_THRESHOLD;
+    this.runTrail.material.opacity = 0.38 + 0.2 * this.runningSpeed;
   }
 
   public reset(): void {
     this.setActive(false, false);
     this.setRunning(0);
     this.badgeLeft = 0;
+    this.phase = 0;
     this.badge.visible = false;
     this.badge.position.y = BADGE_Y_M;
   }
@@ -171,12 +200,9 @@ export class PowerEffectVisuals {
       this.shield.scale.setScalar(scale);
       this.shield.rotation.y += deltaSeconds * 0.25;
     }
-    if (this.wind.visible) {
-      this.wind.position.y = Math.sin(this.phase * WIND_BOB_RATE) * WIND_BOB_AMPLITUDE_M;
-      this.wind.rotation.y += deltaSeconds * 0.8;
-    }
     if (this.runTrail.visible) {
-      this.runTrail.position.z = -0.06 * (0.5 + 0.5 * Math.sin(this.phase * 10));
+      this.runTrail.position.y = Math.sin(this.phase * WIND_BOB_RATE) * WIND_BOB_AMPLITUDE_M;
+      this.runTrail.scale.z = 1 + 0.045 * Math.sin(this.phase * 6);
     }
     if (this.badgeLeft > 0) {
       this.badgeLeft = Math.max(0, this.badgeLeft - deltaSeconds);
@@ -188,11 +214,9 @@ export class PowerEffectVisuals {
   public dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.parent.remove(this.shield, this.wind, this.runTrail, this.badge);
+    this.parent.remove(this.shield, this.runTrail, this.badge);
     this.shield.geometry.dispose();
     (this.shield.material as THREE.Material).dispose();
-    this.wind.geometry.dispose();
-    (this.wind.material as THREE.Material).dispose();
     this.runTrail.geometry.dispose();
     (this.runTrail.material as THREE.Material).dispose();
     (this.badge.material as THREE.Material).dispose();

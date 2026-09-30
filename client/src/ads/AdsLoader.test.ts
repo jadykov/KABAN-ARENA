@@ -241,22 +241,33 @@ describe("AdsManager shop visuals and lifecycle", () => {
     }
   });
 
-  it("fades porch fixtures and entrance glow, clamps input, and resets after disposal", () => {
+  it("adds 20% to Stage 11 porch intensity, keeps fade linear, and resets after disposal", () => {
     const scene = new THREE.Scene();
     const ads = new AdsManager();
     ads.setPorchLighting(0.4); // SceneManager may set progress before visuals exist.
     ads.buildVisuals(scene);
     const lamp = scene.getObjectByName("shop-static:lamp") as THREE.InstancedMesh<THREE.BoxGeometry, THREE.MeshStandardMaterial>;
     const glow = scene.getObjectByName("shop-static:glow") as THREE.InstancedMesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
-    expect(lamp.material.emissiveIntensity).toBeCloseTo(0.96, 6);
-    expect(glow.material.opacity).toBeCloseTo(0.208, 6);
+    expect(lamp.material.emissiveIntensity).toBeCloseTo(0.96 * 1.15 * 1.20, 6);
+    expect(glow.material.opacity).toBeCloseTo(0.208 * 1.15 * 1.20, 6);
     expect(glow.visible).toBe(true);
 
     ads.setPorchLighting(4);
-    expect(lamp.material.emissiveIntensity).toBeCloseTo(2.4, 6);
-    expect(glow.material.opacity).toBeCloseTo(0.52, 6);
+    expect(lamp.material.emissiveIntensity / (2.4 * 1.15)).toBeCloseTo(1.20, 6);
+    expect(glow.material.opacity / (0.52 * 1.15)).toBeCloseTo(1.20, 6);
+    expect(lamp.material.color.getHex()).toBe(0xffe9bb);
+    expect(lamp.material.emissive.r).toBeGreaterThan(lamp.material.emissive.g);
+    expect(lamp.material.emissive.g).toBeGreaterThan(lamp.material.emissive.b);
+    expect(glow.material.color.r).toBeGreaterThan(glow.material.color.g);
+    expect(glow.material.color.g).toBeGreaterThan(glow.material.color.b);
+    ads.setPorchLighting(0.5);
+    expect(lamp.material.emissiveIntensity).toBeCloseTo(2.4 * 1.15 * 1.20 / 2, 6);
+    expect(glow.material.opacity).toBeCloseTo(0.52 * 1.15 * 1.20 / 2, 6);
+    ads.setPorchLighting(Number.POSITIVE_INFINITY);
+    expect(lamp.material.emissiveIntensity).toBeCloseTo(2.4 * 1.15 * 1.20, 6);
     ads.setPorchLighting(-3);
     expect(lamp.material.emissiveIntensity).toBe(0);
+    expect(lamp.material.color.getHex()).toBe(0x574936);
     expect(glow.material.opacity).toBe(0);
     expect(glow.visible).toBe(false);
     ads.setPorchLighting(Number.NaN);
@@ -264,13 +275,146 @@ describe("AdsManager shop visuals and lifecycle", () => {
 
     const glowTexture = glow.material.map!;
     const textureDispose = vi.spyOn(glowTexture, "dispose");
+    const materialDispose = vi.spyOn(glow.material, "dispose");
+    const lampDispose = vi.spyOn(lamp.material, "dispose");
+    const batchDispose = vi.spyOn(glow, "dispose");
     ads.setPorchLighting(1);
     ads.dispose(scene);
     expect(textureDispose).toHaveBeenCalledTimes(1);
+    expect(materialDispose).toHaveBeenCalledTimes(1);
+    expect(lampDispose).toHaveBeenCalledTimes(1);
+    expect(batchDispose).toHaveBeenCalledTimes(1);
     expect(scene.children).toHaveLength(0);
     ads.buildVisuals(scene);
     expect((scene.getObjectByName("shop-static:glow") as THREE.InstancedMesh).visible).toBe(false);
+    expect((scene.getObjectByName("shop-static:lamp") as typeof lamp).material.emissiveIntensity).toBe(0);
     ads.dispose(scene);
+  });
+
+  it("keeps Stage 11 reach and makes every porch source visible in the same glow batch", () => {
+    const scene = new THREE.Scene();
+    const ads = new AdsManager();
+    ads.buildVisuals(scene);
+    try {
+      const glow = scene.getObjectByName("shop-static:glow") as THREE.InstancedMesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+      expect(scene.children.filter((child) => child.name === "shop-static:glow")).toHaveLength(1);
+      expect(glow.count).toBe(22); // seven cores/halos, four door washes, four floor spills
+      expect(glow.material.forceSinglePass).toBe(true);
+      expect(glow.material.depthWrite).toBe(false);
+      expect(glow.material.blending).toBe(THREE.AdditiveBlending);
+      expect(glow.geometry.groups).toHaveLength(0);
+      const lights: THREE.Light[] = [];
+      scene.traverse((child) => { if (child instanceof THREE.Light) lights.push(child); });
+      expect(lights).toHaveLength(0);
+      ads.setPorchLighting(1);
+      scene.updateMatrixWorld(true);
+
+      getShopfrontTransforms().forEach((shop, index) => {
+        const unit = shop.facadeWidth / 2.4;
+        const sy = shop.topY / 3;
+        const doorX = [0.19, 0, 0.17, 0][index]! * unit;
+        const porchY = [1.83, 1.86, 1.84, 1.88][index]!;
+        const haloXs = [[0.19], [-0.43, 0.43], [-0.48, 0.48], [-0.46, 0.46]][index]!;
+        const root = new THREE.Matrix4().compose(
+          new THREE.Vector3(shop.x, 0, shop.z),
+          new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), shop.rotationY),
+          new THREE.Vector3(1, 1, 1),
+        );
+        const inverse = root.clone().invert();
+        const parts: Array<{ matrix: THREE.Matrix4; position: THREE.Vector3; scale: THREE.Vector3 }> = [];
+        for (let instance = 0; instance < glow.count; instance += 1) {
+          const matrix = new THREE.Matrix4();
+          glow.getMatrixAt(instance, matrix);
+          const local = inverse.clone().multiply(matrix);
+          const position = new THREE.Vector3().setFromMatrixPosition(local);
+          if (Math.abs(position.x) < 1 && position.z > 0 && position.z < 1) {
+            parts.push({ matrix: local, position, scale: new THREE.Vector3().setFromMatrixScale(local) });
+          }
+        }
+        expect(parts).toHaveLength(haloXs.length * 2 + 2);
+        for (const lightX of haloXs) {
+          const halo = parts.find(({ position }) => Math.abs(position.z - 0.48) < 1e-5
+            && Math.abs(position.x - lightX * unit) < 1e-5)!;
+          expect(halo.position.y).toBeCloseTo((porchY - 0.20) * sy, 5);
+          expect(halo.scale.x / (0.67 * unit)).toBeCloseTo(1.15, 5);
+          expect(halo.scale.y / (0.69 * sy)).toBeCloseTo(1.15, 5);
+          const core = parts.find(({ position }) => Math.abs(position.z - 0.482) < 1e-5
+            && Math.abs(position.x - lightX * unit) < 1e-5)!;
+          expect(core.position.y).toBeCloseTo(porchY * sy, 5);
+          // The added bright core stays inside the existing halo's footprint,
+          // and is just in front of the fixture's emitting face at z=0.47.
+          expect(core.scale.x).toBeLessThan(halo.scale.x);
+          expect(core.position.y + core.scale.y / 2).toBeLessThan(halo.position.y + halo.scale.y / 2);
+          expect(core.position.y - core.scale.y / 2).toBeGreaterThan(halo.position.y - halo.scale.y / 2);
+          expect(core.position.z).toBeGreaterThan(0.47);
+          const target = core.position.clone().applyMatrix4(root);
+          for (const side of [-0.25, 0, 0.25]) {
+            const camera = new THREE.Vector3(lightX * unit + side, 1.45 * sy, 3).applyMatrix4(root);
+            const ray = new THREE.Raycaster(camera, target.clone().sub(camera).normalize());
+            const hit = ray.intersectObjects(scene.children, true)[0]!;
+            expect(hit.object).toBe(glow); // emitting core is clear of awnings and opaque fixtures
+            expect(hit.point.distanceTo(target)).toBeLessThan(1e-4);
+          }
+        }
+        const wash = parts.find(({ position }) => Math.abs(position.z - 0.13) < 1e-5)!;
+        expect(wash.position.x).toBeCloseTo(doorX, 5);
+        expect(wash.position.y).toBeCloseTo(0.99 * sy, 5);
+        expect(wash.scale.x / (1.02 * unit)).toBeCloseTo(1.15, 5);
+        expect(wash.scale.y / (1.50 * sy)).toBeCloseTo(1.15, 5);
+
+        const floor = parts.find(({ position }) => position.y < 0.02)!;
+        expect(floor.position.x).toBeCloseTo(doorX, 5);
+        expect(floor.position.y).toBeGreaterThan(0);
+        expect(floor.scale.x / (1.70 * unit)).toBeCloseTo(1.15, 5);
+        expect(floor.scale.y / 2.10).toBeCloseTo(1.15, 5);
+        const normal = new THREE.Vector3(0, 0, 1).transformDirection(floor.matrix);
+        expect(normal.y).toBeCloseTo(1, 5);
+        // Actual transformed plane vertices lie on the floor and extend over
+        // two meters outside the facade, rather than enlarging only a wall halo.
+        const corners = [new THREE.Vector3(-0.5, -0.5, 0), new THREE.Vector3(0.5, 0.5, 0)]
+          .map((corner) => corner.applyMatrix4(floor.matrix));
+        expect(corners.every((corner) => Math.abs(corner.y - 0.018) < 1e-5)).toBe(true);
+        expect(Math.abs(corners[0]!.x - corners[1]!.x)).toBeCloseTo(1.70 * unit * 1.15, 5);
+        expect(Math.abs(corners[0]!.z - corners[1]!.z)).toBeCloseTo(2.10 * 1.15, 5);
+        expect(Math.max(corners[0]!.z, corners[1]!.z)).toBeGreaterThan(2);
+      });
+    } finally {
+      ads.dispose(scene);
+    }
+  });
+
+  it("fades warm light monotonically from its core to transparent radial edges", () => {
+    const scene = new THREE.Scene();
+    const ads = new AdsManager();
+    ads.buildVisuals(scene);
+    try {
+      const glow = scene.getObjectByName("shop-static:glow") as THREE.InstancedMesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+      const texture = glow.material.map as THREE.DataTexture;
+      const { data, width, height } = texture.image;
+      expect(width).toBe(32);
+      expect(height).toBe(32);
+      const alpha = (x: number, y: number): number => data[(y * width + x) * 4 + 3]!;
+      const center = width / 2;
+      expect(alpha(center, center)).toBeGreaterThan(200);
+      expect(alpha(center + 8, center)).toBeGreaterThan(0);
+      expect(alpha(center + 8, center)).toBeLessThan(100);
+      for (let offset = 1; offset < width / 2; offset += 1) {
+        expect(alpha(center + offset, center)).toBeLessThanOrEqual(alpha(center + offset - 1, center));
+        expect(alpha(center, center + offset)).toBeLessThanOrEqual(alpha(center, center + offset - 1));
+        expect(alpha(center + offset, center + offset)).toBeLessThanOrEqual(alpha(center + offset - 1, center + offset - 1));
+      }
+      for (let edge = 0; edge < width; edge += 1) {
+        expect(alpha(edge, 0)).toBe(0);
+        expect(alpha(edge, height - 1)).toBe(0);
+        expect(alpha(0, edge)).toBe(0);
+        expect(alpha(width - 1, edge)).toBe(0);
+      }
+      expect(texture.magFilter).toBe(THREE.LinearFilter);
+      expect(texture.minFilter).toBe(THREE.LinearFilter);
+      expect(texture.generateMipmaps).toBe(false);
+    } finally {
+      ads.dispose(scene);
+    }
   });
 
   it("shares repeated brand texture and disposes all resources", async () => {

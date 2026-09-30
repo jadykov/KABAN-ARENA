@@ -177,12 +177,12 @@ export class RemoteAvatars {
         // estimated from the eased Y trail, damped against jitter.
         const moved = Math.hypot(entry.group.position.x - prevX, entry.group.position.z - prevZ);
         const speed01 = deltaSeconds > 0 ? Math.min(1, moved / (deltaSeconds * MOVE_SPEED)) : 0;
-        entry.effects.setRunning(speed01);
         const rawVy = deltaSeconds > 0 ? (entry.group.position.y - entry.prevY) / deltaSeconds : 0;
         entry.prevY = entry.group.position.y;
         const smooth = 1 - Math.exp(-REMOTE_VY_SMOOTH_RATE * Math.max(0, deltaSeconds));
         entry.vySmooth += (rawVy - entry.vySmooth) * smooth;
         const airborne = entry.gate.update(Math.abs(entry.vySmooth), deltaSeconds);
+        entry.effects.setRunning(airborne ? 0 : speed01);
         updateHopVisual(entry.rig, 0, speed01, entry.hop, deltaSeconds, airborne);
       } else {
         // Fresh kill: burst once at the last tracked position with the

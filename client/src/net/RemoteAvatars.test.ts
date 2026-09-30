@@ -252,7 +252,7 @@ describe("RemoteAvatars remote death burst (alive→false edge)", () => {
 });
 
 describe("RemoteAvatars replicated bonuses", () => {
-  it("shows timed shield and wind on a remote avatar and a 1.5-second pickup badge", () => {
+  it("shows a timed shield and pickup badge without speed wind on an idle buffed avatar", () => {
     const scene = new THREE.Scene();
     const avatars = new RemoteAvatars(scene);
     try {
@@ -261,10 +261,10 @@ describe("RemoteAvatars replicated bonuses", () => {
       })], null, FRAME, 1_000);
       const rig = rigOf(scene);
       const shield = rig.getObjectByName("bonus-shield");
-      const wind = rig.getObjectByName("bonus-speed-wind");
+      const wind = rig.getObjectByName("run-wind-trail");
       const badge = rig.getObjectByName("bonus-badge");
       expect(shield?.visible).toBe(true);
-      expect(wind?.visible).toBe(true);
+      expect(wind?.visible).toBe(false);
       avatars.showBonusPickup("r1", "shield");
       expect(badge?.visible).toBe(true);
       avatars.sync([makeSnapshot({ sessionId: "r1", shieldHp: 0, shieldUntil: 0, speedUntil: 0 })], null, 1.51, 12_000);
@@ -276,17 +276,77 @@ describe("RemoteAvatars replicated bonuses", () => {
     }
   });
 
-  it("shows the run trail for a moving remote and hides it when the avatar dies", () => {
+  it("shows a moving remote's wake only with a speed buff and hides on expiry or death", () => {
     const scene = new THREE.Scene();
     const avatars = new RemoteAvatars(scene);
     try {
-      avatars.sync([makeSnapshot({ sessionId: "r1" })], null, FRAME);
+      avatars.sync([makeSnapshot({ sessionId: "r1" })], null, FRAME, 1_000);
       const trail = rigOf(scene).getObjectByName("run-wind-trail");
       expect(trail?.visible).toBe(false);
-      avatars.sync([makeSnapshot({ sessionId: "r1", z: 2 })], null, FRAME);
-      expect(trail?.visible).toBe(true);
-      avatars.sync([makeSnapshot({ sessionId: "r1", z: 2, alive: false })], null, FRAME);
+      avatars.sync([makeSnapshot({ sessionId: "r1", z: 2 })], null, FRAME, 1_000);
       expect(trail?.visible).toBe(false);
+      avatars.sync([makeSnapshot({ sessionId: "r1", z: 3, speedUntil: 6_000 })], null, FRAME, 1_000);
+      expect(trail?.visible).toBe(true);
+      avatars.sync([makeSnapshot({ sessionId: "r1", z: 4, speedUntil: 6_000 })], null, FRAME, 6_000);
+      expect(trail?.visible).toBe(false);
+      avatars.sync([makeSnapshot({ sessionId: "r1", z: 5, speedUntil: 12_000 })], null, FRAME, 6_000);
+      expect(trail?.visible).toBe(true);
+      avatars.sync([makeSnapshot({ sessionId: "r1", z: 5, speedUntil: 12_000, alive: false })], null, FRAME, 6_000);
+      expect(trail?.visible).toBe(false);
+    } finally {
+      avatars.dispose();
+    }
+  });
+
+  it("suppresses a buffed remote wake while airborne and restores it after landing", () => {
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    try {
+      let x = 0;
+      let y = 1.1;
+      avatars.sync([makeSnapshot({ sessionId: "r1", speedUntil: 10_000 })], null, FRAME, 1_000);
+      const trail = rigOf(scene).getObjectByName("run-wind-trail");
+      for (let i = 0; i < 30; i += 1) {
+        x += 0.1;
+        avatars.sync([makeSnapshot({ sessionId: "r1", x, y, speedUntil: 10_000 })], null, FRAME, 1_000);
+      }
+      expect(trail?.visible).toBe(true);
+      for (let i = 0; i < 60; i += 1) {
+        x += 0.1;
+        y += 0.15;
+        avatars.sync([makeSnapshot({ sessionId: "r1", x, y, speedUntil: 10_000 })], null, FRAME, 1_000);
+      }
+      expect(rigOf(scene).rotation.x).toBeGreaterThan(0.05);
+      expect(trail?.visible).toBe(false);
+      for (let i = 0; i < 120; i += 1) {
+        x += 0.1;
+        avatars.sync([makeSnapshot({ sessionId: "r1", x, y: 1.1, speedUntil: 10_000 })], null, FRAME, 1_000);
+      }
+      expect(trail?.visible).toBe(true);
+      for (let i = 0; i < 120; i += 1) {
+        avatars.sync([makeSnapshot({ sessionId: "r1", x, y: 1.1, speedUntil: 10_000 })], null, FRAME, 1_000);
+      }
+      expect(trail?.visible).toBe(false);
+    } finally {
+      avatars.dispose();
+    }
+  });
+
+  it("removes an active speed wake when a fighter spectates or the room resets", () => {
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    try {
+      const snapshot = makeSnapshot({ sessionId: "r1", speedUntil: 10_000 });
+      avatars.sync([snapshot], null, FRAME, 1_000);
+      avatars.sync([{ ...snapshot, x: 1 }], null, FRAME, 1_000);
+      expect(rigOf(scene).getObjectByName("run-wind-trail")?.visible).toBe(true);
+      avatars.sync([{ ...snapshot, spectator: true }], null, FRAME, 1_000);
+      expect(scene.children).toHaveLength(0);
+      avatars.sync([snapshot], null, FRAME, 1_000);
+      avatars.sync([{ ...snapshot, x: 1 }], null, FRAME, 1_000);
+      expect(rigOf(scene).getObjectByName("run-wind-trail")?.visible).toBe(true);
+      avatars.sync([], null, FRAME, 1_000);
+      expect(scene.children).toHaveLength(0);
     } finally {
       avatars.dispose();
     }
