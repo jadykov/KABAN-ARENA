@@ -17,7 +17,6 @@ import {
 import { ARENA_LAYOUT } from "../layout";
 import type { PhysicsWorld } from "../physics/World";
 import {
-  ACCENT_ICE_GLOW,
   ACCENT_SWAMP_BUBBLE,
   ACCENT_SWAMP_BUBBLE_LIGHT,
   ACCENT_SWAMP_MUD,
@@ -27,9 +26,6 @@ import {
   BASE_FLOOR,
   BASE_FLOOR_GROUT,
   BASE_FLOOR_LIGHT,
-  BASE_ICE,
-  BASE_ICE_EDGE,
-  BASE_ICE_FACET,
   BASE_PAD,
   BASE_PAD_RIM,
   BASE_TRAMPOLINE,
@@ -419,7 +415,7 @@ export class ArenaBuilder {
     const frameColor = new THREE.Color(0x71847b);
     const netPositions: number[] = [];
     const point = new THREE.Vector3();
-    const spacing = 0.25;
+    const spacing = 0.5;
     const lowY = FENCE_BOARD_HEIGHT + 0.06;
     const highY = WALL_VISUAL_HEIGHT - 0.06;
     const addBox = (parts: ColoredParts, color: THREE.Color,
@@ -657,7 +653,7 @@ export class ArenaBuilder {
     const blossomMaterial = this.track(new THREE.MeshStandardMaterial({
       color: NEUTRAL_WHITE, vertexColors: true, roughness: 0.95, side: THREE.DoubleSide,
     }));
-    const flowersPerBed = 16;
+    const flowersPerBed = 20;
     const blossoms = this.track(new THREE.InstancedMesh(
       blossomGeometry, blossomMaterial, beds.length * flowersPerBed,
     ));
@@ -693,21 +689,22 @@ export class ArenaBuilder {
       for (let flower = 0; flower < flowersPerBed; flower += 1) {
         const index = bedIndex * flowersPerBed + flower;
         const variation = hash2(flower + 31, bedIndex + 5);
-        const height = 0.13 + variation * 0.085;
-        const column = flower % 4;
-        const row = Math.floor(flower / 4);
+        const height = 0.155 + variation * 0.1;
+        const column = flower % 5;
+        const row = Math.floor(flower / 5);
         position.set(
-          bed.x + (column / 3 - 0.5) * (width - rim * 2) * 0.8 + (variation - 0.5) * 0.08,
+          bed.x + (column / 4 - 0.5) * (width - rim * 2) * 0.8 + (variation - 0.5) * 0.08,
           topY,
           bed.z + (row / 3 - 0.5) * (depth - rim * 2) * 0.8
             + (hash2(flower + 7, bedIndex + 11) - 0.5) * 0.08,
         );
         rotation.setFromAxisAngle(new THREE.Vector3(0, 1, 0), variation * Math.PI * 2);
-        scale.set(0.85 + variation * 0.3, height, 0.85 + variation * 0.3);
+        const foliageWidth = (0.85 + variation * 0.3) * 1.25;
+        scale.set(foliageWidth, height, foliageWidth);
         matrix.compose(position, rotation, scale);
         appendColoredGeometry(greeneryGeometry, matrix, greeneryColor, parts.positions, parts.normals, parts.colors);
         position.y += height;
-        scale.setScalar(0.7 + variation * 0.25);
+        scale.setScalar((0.7 + variation * 0.25) * 1.35);
         matrix.compose(position, rotation, scale);
         blossoms.setMatrixAt(index, matrix);
         blossoms.setColorAt(index, flowerColors[(flower + bedIndex) % flowerColors.length]!);
@@ -849,12 +846,11 @@ export class ArenaBuilder {
       new THREE.MeshStandardMaterial({
         color: NEUTRAL_WHITE,
         map: texture,
-        emissive: ACCENT_ICE_GLOW,
-        emissiveIntensity: 0.18,
         transparent: true,
-        opacity: 0.9,
-        roughness: 0.36,
-        metalness: 0.04,
+        opacity: 0.96,
+        depthWrite: false,
+        roughness: 0.34,
+        metalness: 0,
       }),
     );
     const puddles = this.track(new THREE.InstancedMesh(geometry, material, zones.length));
@@ -1296,18 +1292,74 @@ function createBlossomGeometry(): THREE.BufferGeometry {
   return geometry;
 }
 
-// Faceted icy puddles use the existing circle mesh and no new draw call.
+// Pale cloudy ice and sparse wandering fractures share the existing surface
+// map. Its translucent, slightly uneven edge blends into the paving without
+// a bright rim, extra meshes or self illumination.
 function createIceTexture(): THREE.DataTexture {
-  return makeRgbTexture(128, (x, y) => {
-    const dx = (x - 63.5) / 63.5;
-    const dy = (y - 63.5) / 63.5;
-    const radius = Math.hypot(dx, dy);
-    const angle = Math.atan2(dy, dx);
-    if (radius > 0.86) return BASE_ICE_EDGE;
-    if (radius > 0.27 && Math.abs(Math.sin(angle * 6 + radius * 0.9)) < 0.06) return BASE_ICE_FACET;
-    const facet = Math.floor((angle + Math.PI) * 6 / Math.PI) % 3;
-    return facet === 0 ? BASE_ICE_FACET : BASE_ICE;
+  const size = 128;
+  const data = new Uint8Array(size * size * 4);
+  const paths = [
+    [[-0.97, -0.34], [-0.72, -0.26], [-0.54, -0.31], [-0.32, -0.18], [-0.05, -0.2],
+      [0.2, -0.03], [0.49, 0.08], [0.76, 0.09], [0.98, 0.23]],
+    [[0.28, -0.97], [0.17, -0.78], [0.23, -0.58], [0.1, -0.4], [-0.05, -0.2]],
+    [[0.49, 0.08], [0.37, 0.3], [0.46, 0.47], [0.3, 0.63], [0.35, 0.94]],
+    [[-0.72, -0.26], [-0.75, -0.05], [-0.58, 0.12]],
+    [[0.17, -0.78], [0.43, -0.66], [0.65, -0.73]],
+  ];
+  const segments = paths.flatMap((path) => {
+    const points = new THREE.SplineCurve(path.map(([x, y]) => new THREE.Vector2(x!, y!))).getPoints(24);
+    return points.slice(1).map((point, index) => {
+      const start = points[index]!;
+      const dx = point.x - start.x;
+      const dy = point.y - start.y;
+      return { x: start.x, y: start.y, dx, dy, lengthSq: dx * dx + dy * dy };
+    });
   });
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const dx = (x + 0.5 - size / 2) / (size / 2);
+      const dy = (y + 0.5 - size / 2) / (size / 2);
+      const radius = Math.hypot(dx, dy);
+      const angle = Math.atan2(dy, dx);
+      const warpedX = dx + Math.sin(dy * 4.7 + 0.5) * 0.13;
+      const warpedY = dy + Math.sin(dx * 5.3 - 1) * 0.12;
+      const clouds = 0.5 + Math.sin(warpedX * 5.2 + warpedY * 3.1) * 0.2
+        + Math.cos(warpedX * 8.4 - warpedY * 5.7) * 0.15
+        + Math.sin(warpedY * 16.3 + warpedX * 12.1) * 0.08;
+      let distanceSq = Infinity;
+      // A small meander keeps the sampled fractures organic at close range.
+      const crackX = dx + Math.sin(dy * 23 + 1) * 0.006;
+      const crackY = dy + Math.sin(dx * 19 - 0.7) * 0.005;
+      for (const segment of segments) {
+        const t = Math.max(0, Math.min(1,
+          ((crackX - segment.x) * segment.dx + (crackY - segment.y) * segment.dy) / segment.lengthSq));
+        distanceSq = Math.min(distanceSq,
+          (crackX - segment.x - t * segment.dx) ** 2 + (crackY - segment.y - t * segment.dy) ** 2);
+      }
+      const distance = Math.sqrt(distanceSq);
+      const fracture = Math.max(0, 1 - distance / 0.0095);
+      const frostedLip = Math.max(0, 1 - Math.abs(distance - 0.011) / 0.007) * 0.08;
+      let color = mixHex(0x82b9d2, 0xbddfe8, clouds + (hash2(x, y) - 0.5) * 0.018);
+      color = mixHex(color, 0xd1e8ef, frostedLip);
+      color = mixHex(color, 0x668da4, fracture * 0.38);
+      const matteEdge = Math.max(0, Math.min(1, (radius - 0.85) / 0.14));
+      color = mixHex(color, 0xabcdd8, matteEdge * 0.22);
+      const edge = 0.982 + Math.sin(angle * 5 + 0.4) * 0.008 + Math.sin(angle * 11 - 1) * 0.005;
+      const alpha = Math.max(0, Math.min(1, (edge - radius) / 0.035));
+      const pixel = (y * size + x) * 4;
+      data[pixel] = (color >> 16) & 255;
+      data[pixel + 1] = (color >> 8) & 255;
+      data[pixel + 2] = color & 255;
+      data[pixel + 3] = Math.round(alpha * 255);
+    }
+  }
+  const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  texture.needsUpdate = true;
+  return texture;
 }
 
 // Concentric mechanical rings clarify the trampoline's trigger surface.

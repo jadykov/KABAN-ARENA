@@ -154,6 +154,7 @@ export class RemoteAvatars {
       entry.effects.setActive(
         snapshot.alive && snapshot.shieldHp > 0 && snapshot.shieldUntil > serverNow,
         snapshot.alive && snapshot.speedUntil > serverNow,
+        snapshot.alive && snapshot.chargeUntil > serverNow,
       );
       entry.effects.update(deltaSeconds);
       // Victim hit-flash tick (Stage 4d.4): fades a triggered flash back to

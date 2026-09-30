@@ -16,6 +16,9 @@ const WIND_BOB_RATE = 4;
 const WIND_SECTIONS = 12;
 const WIND_WIDTH_STEPS = 4;
 const WIND_RUN_THRESHOLD = 0.25;
+const CHARGE_ORB_RADIUS_M = 0.11;
+const CHARGE_ORBIT_RADIUS_M = 0.76;
+const CHARGE_ORBIT_RATE = 1.6;
 
 let shieldIconTexture: THREE.Texture | null = null;
 let speedIconTexture: THREE.Texture | null = null;
@@ -26,7 +29,7 @@ function acquireIcons(): void {
   iconUsers += 1;
   if (shieldIconTexture !== null && speedIconTexture !== null && chargeIconTexture !== null) return;
   // Headless scene tests have no image loader. They still exercise the effect
-  // meshes; browser builds load the two real SVG assets from public/icons.
+  // meshes; browser builds load the three real SVG assets from public/icons.
   if (typeof document === "undefined" || typeof document.createElementNS !== "function") {
     shieldIconTexture = new THREE.Texture();
     speedIconTexture = new THREE.Texture();
@@ -105,6 +108,7 @@ export class PowerEffectVisuals {
   private readonly parent: THREE.Object3D;
   private readonly shield: THREE.Mesh;
   private readonly runTrail: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+  private readonly chargeOrb: THREE.Mesh<THREE.SphereGeometry, THREE.MeshStandardMaterial>;
   private readonly badge: THREE.Sprite;
   private speedActive = false;
   private runningSpeed = 0;
@@ -142,6 +146,23 @@ export class PowerEffectVisuals {
     this.runTrail.visible = false;
     parent.add(this.runTrail);
 
+    // One small ball circles the waist independently of movement. Shading
+    // and a modest emissive base keep it legible at night without a light,
+    // pulsing brightness, particles or another trail.
+    this.chargeOrb = new THREE.Mesh(
+      new THREE.SphereGeometry(CHARGE_ORB_RADIUS_M, 12, 8),
+      new THREE.MeshStandardMaterial({
+        color: 0xd8ea70,
+        emissive: 0xd8ea70,
+        emissiveIntensity: 0.22,
+        roughness: 0.45,
+      }),
+    );
+    this.chargeOrb.name = "bonus-charge-orb";
+    this.chargeOrb.position.set(CHARGE_ORBIT_RADIUS_M, 0, 0);
+    this.chargeOrb.visible = false;
+    parent.add(this.chargeOrb);
+
     acquireIcons();
     const badgeMaterial = new THREE.SpriteMaterial({
       map: shieldIconTexture,
@@ -158,9 +179,10 @@ export class PowerEffectVisuals {
     parent.add(this.badge);
   }
 
-  public setActive(shieldActive: boolean, speedActive: boolean): void {
+  public setActive(shieldActive: boolean, speedActive: boolean, chargeActive: boolean = false): void {
     this.shield.visible = shieldActive;
     this.speedActive = speedActive;
+    this.chargeOrb.visible = chargeActive;
     this.refreshSpeedWake();
   }
 
@@ -179,6 +201,7 @@ export class PowerEffectVisuals {
     this.setRunning(0);
     this.badgeLeft = 0;
     this.phase = 0;
+    this.chargeOrb.position.set(CHARGE_ORBIT_RADIUS_M, 0, 0);
     this.badge.visible = false;
     this.badge.position.y = BADGE_Y_M;
   }
@@ -204,6 +227,14 @@ export class PowerEffectVisuals {
       this.runTrail.position.y = Math.sin(this.phase * WIND_BOB_RATE) * WIND_BOB_AMPLITUDE_M;
       this.runTrail.scale.z = 1 + 0.045 * Math.sin(this.phase * 6);
     }
+    if (this.chargeOrb.visible) {
+      const angle = this.phase * CHARGE_ORBIT_RATE;
+      this.chargeOrb.position.set(
+        Math.cos(angle) * CHARGE_ORBIT_RADIUS_M,
+        0,
+        Math.sin(angle) * CHARGE_ORBIT_RADIUS_M,
+      );
+    }
     if (this.badgeLeft > 0) {
       this.badgeLeft = Math.max(0, this.badgeLeft - deltaSeconds);
       if (this.badgeLeft < 0.000001) this.badgeLeft = 0;
@@ -214,11 +245,13 @@ export class PowerEffectVisuals {
   public dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.parent.remove(this.shield, this.runTrail, this.badge);
+    this.parent.remove(this.shield, this.runTrail, this.chargeOrb, this.badge);
     this.shield.geometry.dispose();
     (this.shield.material as THREE.Material).dispose();
     this.runTrail.geometry.dispose();
     (this.runTrail.material as THREE.Material).dispose();
+    this.chargeOrb.geometry.dispose();
+    this.chargeOrb.material.dispose();
     (this.badge.material as THREE.Material).dispose();
     releaseIcons();
   }

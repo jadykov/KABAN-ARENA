@@ -140,14 +140,75 @@ describe("power effect visuals", () => {
     }
   });
 
+  it("orbits one small steady ball around the waist in idle and movement, independently of other buffs", () => {
+    const rig = new THREE.Group();
+    const effects = new PowerEffectVisuals(rig);
+    try {
+      const orb = rig.getObjectByName("bonus-charge-orb") as THREE.Mesh<THREE.SphereGeometry, THREE.MeshStandardMaterial>;
+      const shield = rig.getObjectByName("bonus-shield");
+      const trail = rig.getObjectByName("run-wind-trail");
+      const positions = orb.geometry.getAttribute("position").array;
+      const intensity = orb.material.emissiveIntensity;
+      expect(orb.visible).toBe(false);
+      expect(orb.geometry.parameters.radius).toBeGreaterThanOrEqual(0.1);
+      expect(orb.geometry.parameters.radius).toBeLessThanOrEqual(0.12);
+      expect(orb.geometry.getAttribute("position").count).toBeLessThan(150);
+      effects.setActive(true, true, true);
+      const initial = orb.position.clone();
+      effects.update(0.25);
+      expect(orb.visible).toBe(true);
+      expect(trail?.visible).toBe(false);
+      expect(orb.position.distanceTo(initial)).toBeGreaterThan(0.2);
+      // An idle ball makes a moderate turn, without moving vertically or
+      // changing brightness. Running and body turns keep the same orbit.
+      expect(Math.atan2(orb.position.z, orb.position.x)).toBeGreaterThan(0.3);
+      expect(Math.atan2(orb.position.z, orb.position.x)).toBeLessThan(0.5);
+      effects.setRunning(1);
+      rig.position.set(4, 1.2, -3);
+      rig.rotation.y = Math.PI / 2;
+      for (let frame = 0; frame < 120; frame += 1) {
+        effects.update(1 / 60);
+        rig.updateMatrixWorld(true);
+        expect(orb.visible).toBe(true);
+        expect(orb.position.y).toBe(0);
+        const distance = orb.getWorldPosition(new THREE.Vector3()).distanceTo(rig.getWorldPosition(new THREE.Vector3()));
+        expect(distance).toBeGreaterThanOrEqual(0.7);
+        expect(distance).toBeLessThanOrEqual(0.8);
+        expect(orb.material.emissiveIntensity).toBe(intensity);
+      }
+      expect(shield?.visible).toBe(true);
+      expect(trail?.visible).toBe(true);
+      expect(orb.geometry.getAttribute("position").array).toBe(positions);
+      expect(rig.children.some((child) => child instanceof THREE.Light)).toBe(false);
+      // The optional third flag preserves every older two-buff caller and
+      // immediately removes charge without disturbing shield or running.
+      effects.setActive(true, true);
+      expect(orb.visible).toBe(false);
+      expect(shield?.visible).toBe(true);
+      expect(trail?.visible).toBe(true);
+      effects.setActive(false, false, true);
+      effects.showPickup("charge");
+      effects.reset();
+      expect(orb.visible).toBe(false);
+      expect(rig.getObjectByName("bonus-badge")?.visible).toBe(false);
+      effects.setActive(false, false, true);
+      expect(orb.position.y).toBe(0);
+      expect(orb.position.z).toBe(0);
+    } finally {
+      effects.dispose();
+    }
+  });
+
   it("disposes all per-avatar geometry and materials once", () => {
     const rig = new THREE.Group();
     const effects = new PowerEffectVisuals(rig);
     const shield = rig.getObjectByName("bonus-shield") as THREE.Mesh;
     const trail = rig.getObjectByName("run-wind-trail") as THREE.Mesh;
+    const orb = rig.getObjectByName("bonus-charge-orb") as THREE.Mesh;
     const badge = rig.getObjectByName("bonus-badge") as THREE.Sprite;
     const resources = [shield.geometry, shield.material as THREE.Material,
-      trail.geometry, trail.material as THREE.Material, badge.material];
+      trail.geometry, trail.material as THREE.Material,
+      orb.geometry, orb.material as THREE.Material, badge.material];
     const dispose = resources.map((resource) => vi.spyOn(resource, "dispose"));
     effects.dispose();
     effects.dispose();

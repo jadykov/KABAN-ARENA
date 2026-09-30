@@ -1254,7 +1254,9 @@ export class SceneManager {
     if (this.avatarMaterial !== null) {
       this.flash.update(deltaSeconds, this.avatarMaterial);
     }
-    this.powerEffects?.setActive(this.powerState.hasShield(), this.powerState.isSpeedActive());
+    this.powerEffects?.setActive(
+      this.powerState.hasShield(), this.powerState.isSpeedActive(), this.powerState.hasChargeBoost(),
+    );
     this.particles.update(deltaSeconds);
     this.updateCombat(deltaSeconds);
     // South Park hop: displacement speed eases the rig bounce (0 standing
@@ -1405,7 +1407,9 @@ export class SceneManager {
     } else {
       this.powerState.sync(player, serverNow);
     }
-    this.powerEffects?.setActive(this.powerState.hasShield(), this.powerState.isSpeedActive());
+    this.powerEffects?.setActive(
+      this.powerState.hasShield(), this.powerState.isSpeedActive(), this.powerState.hasChargeBoost(),
+    );
   }
 
   public hasChargeBoost(): boolean {

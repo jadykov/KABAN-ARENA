@@ -87,7 +87,7 @@ describe("SuburbanEnvironment", () => {
     environment.build(scene);
     const building = scene.getObjectByName("suburban-houses-and-trunks") as THREE.InstancedMesh;
     const parts = instanceParts(building);
-    const bodies = parts.filter(({ scale }) => scale.x > 6 && scale.y > 3.4 && scale.z > 5);
+    const bodies = parts.filter(({ scale }) => scale.x > 5.5 && scale.y > 2.9 && scale.z > 4.9);
     expect(bodies).toHaveLength(8);
     expect(new Set(bodies.map(({ scale }) => scale.y.toFixed(1))).size).toBeGreaterThanOrEqual(6);
     expect(new Set(bodies.map(({ color }) => color.getHex())).size).toBeGreaterThanOrEqual(6);
@@ -109,8 +109,8 @@ describe("SuburbanEnvironment", () => {
         .find((local) => Math.abs(local.x) < 0.5 && Math.abs(local.z - 0.5) < 0.04)!;
       expect(door).toBeDefined();
       entries.push(door.x);
-      expect(panes.every(({ local, scale }) => Math.abs(local.x - door.x) * body.scale.x > (scale.x + 1.05) / 2
-        || Math.abs(local.y - door.y) * body.scale.y > 2)).toBe(true);
+      expect(panes.every(({ local, scale }) => Math.abs(local.x - door.x) * body.scale.x > (scale.x + 0.861) / 2
+        || Math.abs(local.y - door.y) * body.scale.y > 1.64)).toBe(true);
 
       // Read the actual merged roof vertices in each building's local space:
       // gables, hipped ridges and single-slope slabs have distinct ridge profiles.
@@ -128,8 +128,59 @@ describe("SuburbanEnvironment", () => {
     expect(rhythms.size).toBeGreaterThanOrEqual(6);
     expect(entries.some((x) => x < -0.25)).toBe(true);
     expect(entries.some((x) => x > 0.25)).toBe(true);
-    expect(parts.filter(({ scale }) => scale.x > 2 && scale.x < 4 && scale.y > 2.4 && scale.z > 4)).toHaveLength(2);
+    expect(parts.filter(({ scale }) => scale.x > 2 && scale.x < 3.3 && scale.y > 2 && scale.z > 3.6)).toHaveLength(2);
     environment.dispose(scene);
+  });
+
+  it("shrinks all eight houses by 18% around their unchanged grounded centers while preserving trees", () => {
+    const scene = new THREE.Scene();
+    const environment = new SuburbanEnvironment();
+    environment.build(scene);
+    try {
+      const parts = instanceParts(scene.getObjectByName("suburban-houses-and-trunks") as THREE.InstancedMesh);
+      const h = ARENA_HALF_SIZE;
+      const expected = [
+        [-14, -h - 25, 7.052, 3.116, 5.002],
+        [17, -h - 29, 9.676, 5.494, 5.986],
+        [-h - 25, -14, 6.396, 5.166, 5.822],
+        [-h - 29, 20, 8.282, 3.362, 5.412],
+        [h + 27, -17, 8.774, 5.33, 5.904],
+        [h + 23, 16, 5.822, 2.993, 5.002],
+        [-17, h + 28, 9.348, 5.576, 6.314],
+        [16, h + 24, 8.036, 3.69, 5.248],
+      ];
+      for (const [x, z, width, height, depth] of expected) {
+        const body = parts.find(({ position, scale }) => Math.abs(position.x - x!) < 0.00001
+          && Math.abs(position.z - z!) < 0.00001 && Math.abs(scale.y - height!) < 0.00001)!;
+        expect(body).toBeDefined();
+        expect(body.scale.x).toBeCloseTo(width!, 5);
+        expect(body.scale.z).toBeCloseTo(depth!, 5);
+        expect(body.position.y - body.scale.y / 2).toBeCloseTo(0, 5);
+        // Door bottoms and every house foundation retain the same ground plane.
+        const inverse = body.matrix.clone().invert();
+        const doors = parts.filter(({ color }) => color.getHex() === 0x68746e)
+          .filter(({ position }) => Math.abs(position.clone().applyMatrix4(inverse).x) < 0.5
+            && Math.abs(position.clone().applyMatrix4(inverse).z - 0.5) < 0.04);
+        expect(doors).toHaveLength(1);
+        expect(doors[0]!.scale.y).toBeCloseTo(1.7056, 5);
+        expect(doors[0]!.position.y - doors[0]!.scale.y / 2).toBeCloseTo(0, 5);
+      }
+      const trunks = parts.filter(({ color }) => color.getHex() === 0x756b58);
+      expect(trunks).toHaveLength(14);
+      for (const trunk of trunks) {
+        expect(trunk.scale.x).toBeCloseTo(0.24, 6);
+        expect(trunk.scale.z).toBeCloseTo(0.26, 6);
+        expect(trunk.position.y - trunk.scale.y / 2).toBeCloseTo(0, 5);
+      }
+      const leaves = instanceParts(scene.getObjectByName("suburban-trees") as THREE.InstancedMesh);
+      expect(leaves).toHaveLength(28);
+      expect(leaves[0]!.position.x).toBeCloseTo(-h - 11, 5);
+      expect(leaves[0]!.position.z).toBe(-24);
+      expect(leaves[0]!.scale.x).toBeCloseTo(2.1, 6);
+      expect(leaves[0]!.scale.y).toBeCloseTo(2.21, 6);
+    } finally {
+      environment.dispose(scene);
+    }
   });
 
   it("lights a sparse set of warm panes while retaining dark windows and real frame detail", () => {

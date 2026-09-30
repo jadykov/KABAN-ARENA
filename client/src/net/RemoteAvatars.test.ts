@@ -363,6 +363,69 @@ describe("RemoteAvatars remote death burst (alive→false edge)", () => {
 });
 
 describe("RemoteAvatars replicated bonuses", () => {
+  it("shows fast charge in a late idle snapshot and keeps it in motion until consumption, expiry or death", () => {
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    try {
+      const snapshot = makeSnapshot({ sessionId: "r1", chargeUntil: 11_000, shieldHp: 25, shieldUntil: 11_000, speedUntil: 6000 });
+      avatars.showBonusPickup("r1", "charge");
+      avatars.sync([snapshot], null, FRAME, 1000);
+      const rig = rigOf(scene);
+      const orb = rig.getObjectByName("bonus-charge-orb")!;
+      const badge = rig.getObjectByName("bonus-badge")!;
+      expect(orb.visible).toBe(true);
+      expect(badge.visible).toBe(true);
+      const idlePosition = orb.position.clone();
+      avatars.sync([snapshot], null, 0.25, 1250);
+      expect(orb.visible).toBe(true);
+      expect(orb.position.distanceTo(idlePosition)).toBeGreaterThan(0.2);
+      avatars.sync([{ ...snapshot, z: 2 }], null, FRAME, 1300);
+      expect(orb.visible).toBe(true);
+      expect(rig.getObjectByName("run-wind-trail")?.visible).toBe(true);
+      // Consumption arrives from the accepted server shot; independent
+      // shield/speed deadlines remain active.
+      avatars.sync([{ ...snapshot, chargeUntil: 0 }], null, FRAME, 1300);
+      expect(orb.visible).toBe(false);
+      expect(rig.getObjectByName("bonus-shield")?.visible).toBe(true);
+      avatars.sync([snapshot], null, FRAME, 10_999);
+      expect(orb.visible).toBe(true);
+      avatars.sync([snapshot], null, FRAME, 11_000);
+      expect(orb.visible).toBe(false);
+      avatars.sync([snapshot], null, FRAME, 1000);
+      expect(orb.visible).toBe(true);
+      avatars.sync([{ ...snapshot, alive: false }], null, FRAME, 1000);
+      expect(orb.visible).toBe(false);
+      avatars.sync([{ ...snapshot, chargeUntil: 0 }], null, FRAME, 1000);
+      expect(rig.visible).toBe(true);
+      expect(orb.visible).toBe(false);
+    } finally {
+      avatars.dispose();
+    }
+  });
+
+  it("disposes a charge orbit on spectating and room reset without leaking into replacement entries", () => {
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    try {
+      const snapshot = makeSnapshot({ sessionId: "r1", chargeUntil: 11_000 });
+      for (const removed of [[{ ...snapshot, spectator: true }], []]) {
+        avatars.sync([snapshot], null, FRAME, 1000);
+        const orb = rigOf(scene).getObjectByName("bonus-charge-orb") as THREE.Mesh;
+        expect(orb.visible).toBe(true);
+        const geometryDispose = vi.spyOn(orb.geometry, "dispose");
+        const materialDispose = vi.spyOn(orb.material as THREE.Material, "dispose");
+        avatars.sync(removed, null, FRAME, 1000);
+        expect(scene.children).toHaveLength(0);
+        expect(geometryDispose).toHaveBeenCalledOnce();
+        expect(materialDispose).toHaveBeenCalledOnce();
+      }
+      avatars.sync([{ ...snapshot, chargeUntil: 0 }], null, FRAME, 1000);
+      expect(rigOf(scene).getObjectByName("bonus-charge-orb")?.visible).toBe(false);
+    } finally {
+      avatars.dispose();
+    }
+  });
+
   it("shows a timed shield and pickup badge without speed wind on an idle buffed avatar", () => {
     const scene = new THREE.Scene();
     const avatars = new RemoteAvatars(scene);

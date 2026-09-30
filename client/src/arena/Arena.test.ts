@@ -278,6 +278,65 @@ describe("swamp, ice, and trampolines", () => {
     }
   });
 
+  it("keeps ice pale and softly translucent at its edge without glowing or hard color sectors", () => {
+    const scene = new THREE.Scene();
+    const builder = new ArenaBuilder();
+    builder.buildVisuals(scene);
+    try {
+      const ice = scene.getObjectByName("ice-zones") as THREE.InstancedMesh;
+      const material = ice.material as THREE.MeshStandardMaterial;
+      expect(material.emissive.getHex()).toBe(0);
+      expect(material.roughness).toBeGreaterThanOrEqual(0.3);
+      expect(material.roughness).toBeLessThanOrEqual(0.38);
+      expect(material.depthWrite).toBe(false);
+      const texture = material.map as THREE.DataTexture;
+      const { width, height, data } = texture.image;
+      const pixels = data as Uint8Array;
+      const interiorColors = new Set<string>();
+      let largestStep = 0;
+      for (let y = 1; y < height - 1; y += 1) {
+        for (let x = 1; x < width - 1; x += 1) {
+          if (Math.hypot((x + 0.5) / width * 2 - 1, (y + 0.5) / height * 2 - 1) > 0.8) continue;
+          const pixel = (y * width + x) * 4;
+          const [r, g, b, alpha] = pixels.subarray(pixel, pixel + 4);
+          expect(alpha).toBe(255);
+          expect(r).toBeGreaterThan(110);
+          expect(g).toBeGreaterThan(r!);
+          expect(b).toBeGreaterThanOrEqual(g!);
+          expect(b! - r!).toBeGreaterThan(40);
+          expect(b! - r!).toBeLessThan(90);
+          interiorColors.add(`${r},${g},${b}`);
+          for (const neighbor of [pixel - 4, pixel - width * 4]) {
+            for (let channel = 0; channel < 3; channel++) {
+              largestStep = Math.max(largestStep, Math.abs(pixels[pixel + channel]! - pixels[neighbor + channel]!));
+            }
+          }
+        }
+      }
+      expect(interiorColors.size).toBeGreaterThan(100);
+      expect(largestStep).toBeLessThan(35);
+      const alphaAt = (radius: number, angle: number): number => {
+        const x = Math.min(width - 1, Math.floor((Math.cos(angle) * radius + 1) * width / 2));
+        const y = Math.min(height - 1, Math.floor((Math.sin(angle) * radius + 1) * height / 2));
+        return pixels[(y * width + x) * 4 + 3]!;
+      };
+      for (let sample = 0; sample < 24; sample++) {
+        const angle = sample * Math.PI / 12;
+        expect(alphaAt(0.85, angle)).toBe(255);
+        expect(alphaAt(0.995, angle)).toBeLessThan(40);
+      }
+      const meanAlpha = (radius: number): number => Array.from({ length: 24 }, (_, sample) =>
+        alphaAt(radius, sample * Math.PI / 12)).reduce((sum, alpha) => sum + alpha, 0) / 24;
+      expect(meanAlpha(0.94)).toBeGreaterThan(180);
+      expect(meanAlpha(0.965)).toBeGreaterThan(20);
+      expect(meanAlpha(0.965)).toBeLessThan(180);
+      expect(ice.count).toBe(getIceZones().length);
+      expect(scene.children.some((child) => child instanceof THREE.Light)).toBe(false);
+    } finally {
+      builder.dispose(scene);
+    }
+  });
+
   it("keeps ice friction low and swamp friction ordinary", () => {
     expect(ICE_FRICTION).toBeGreaterThanOrEqual(0.05);
     expect(ICE_FRICTION).toBeLessThanOrEqual(0.1);
@@ -480,7 +539,8 @@ describe("open ladders, quiet paving, flowers, and trampoline evening light", ()
       expect(beds).toBeInstanceOf(THREE.Mesh);
       expect(beds.material.vertexColors).toBe(true);
       expect(beds.material.roughness).toBe(1);
-      expect(blossoms.count).toBe(64);
+      expect(blossoms.count).toBe(80);
+      const blossomVertices = blossoms.geometry.getAttribute("position");
       const positions = beds.geometry.getAttribute("position");
       const colors = beds.geometry.getAttribute("color");
       const soilColor = new THREE.Color(0x695b45);
@@ -509,7 +569,7 @@ describe("open ladders, quiet paving, flowers, and trampoline evening light", ()
         expect(borderBounds.min.toArray()).toEqual([cover.x - cover.hx, 0, cover.z - cover.hz]);
         expect(borderBounds.max.toArray()).toEqual([cover.x + cover.hx, cover.hy * 2, cover.z + cover.hz]);
         const flowerBounds = new THREE.Box3();
-        for (let flower = index * 16; flower < index * 16 + 16; flower += 1) {
+        for (let flower = index * 20; flower < index * 20 + 20; flower += 1) {
           blossoms.getMatrixAt(flower, matrix);
           point.setFromMatrixPosition(matrix);
           flowerBounds.expandByPoint(point);
@@ -517,6 +577,16 @@ describe("open ladders, quiet paving, flowers, and trampoline evening light", ()
           expect(Math.abs(point.z - cover.z)).toBeLessThan(cover.hz - 0.12);
           expect(point.y).toBeGreaterThan(cover.hy * 2);
           expect(point.y).toBeLessThan(cover.hy * 2 + 0.3);
+          const budBounds = new THREE.Box3().setFromPoints(Array.from({ length: blossomVertices.count }, (_, vertex) =>
+            new THREE.Vector3().fromBufferAttribute(blossomVertices, vertex).applyMatrix4(matrix)));
+          expect(budBounds.min.x).toBeGreaterThan(cover.x - cover.hx);
+          expect(budBounds.max.x).toBeLessThan(cover.x + cover.hx);
+          expect(budBounds.min.z).toBeGreaterThan(cover.z - cover.hz);
+          expect(budBounds.max.z).toBeLessThan(cover.z + cover.hz);
+          expect(budBounds.max.y).toBeLessThan(cover.hy * 2 + 0.3);
+          const budSize = budBounds.getSize(new THREE.Vector3());
+          expect(Math.max(budSize.x, budSize.z)).toBeGreaterThan(0.18);
+          expect(Math.max(budSize.x, budSize.z)).toBeLessThan(0.3);
         }
         const flowerSize = flowerBounds.getSize(new THREE.Vector3());
         expect(flowerSize.x).toBeGreaterThan(cover.hx * 1.3);
@@ -530,6 +600,15 @@ describe("open ladders, quiet paving, flowers, and trampoline evening light", ()
             expect(hit!.point.y).toBeCloseTo(cover.hy * 2, 5);
           }
         }
+      }
+      for (let vertex = 0; vertex < positions.count; vertex++) {
+        const color = new THREE.Color().fromBufferAttribute(colors, vertex);
+        if ((color.r - stemColor.r) ** 2 + (color.g - stemColor.g) ** 2 + (color.b - stemColor.b) ** 2 > 1e-10) continue;
+        point.fromBufferAttribute(positions, vertex);
+        const bed = getObstacleLayout().slice(4, 8)
+          .find((cover) => Math.abs(point.x - cover.x) <= cover.hx && Math.abs(point.z - cover.z) <= cover.hz);
+        expect(bed).toBeDefined();
+        expect(point.y).toBeLessThan(bed!.hy * 2 + 0.3);
       }
       const { boxes, rotated, physics } = createRecordingPhysics();
       builder.buildColliders(physics);
@@ -651,7 +730,7 @@ describe("open ladders, quiet paving, flowers, and trampoline evening light", ()
     // Whole planters use the same two batches as their previous strips;
     // more low planting still fits a modest triangle budget.
     expect(meshes).toHaveLength(6);
-    expect(triangles).toBeLessThan(4500);
+    expect(triangles).toBeLessThan(5000);
     const spies = [...resources].map((resource) => vi.spyOn(resource, "dispose"));
     const oldRimMaterial = meshes[3]!.material as THREE.MeshBasicMaterial;
     builder.dispose(scene);
@@ -809,8 +888,9 @@ describe("shop storage and sports enclosure", () => {
       const boards = scene.getObjectByName("sports-fence-boards") as THREE.Mesh;
       expect(net).toBeInstanceOf(THREE.LineSegments);
       const positions = net.geometry.getAttribute("position");
-      expect(positions.count).toBeLessThan(3000);
+      expect(positions.count).toBeLessThan(1300);
       const sides = new Set<string>();
+      const bottomCrossings: number[] = [];
       for (let vertex = 0; vertex < positions.count; vertex += 2) {
         const a = new THREE.Vector3().fromBufferAttribute(positions, vertex);
         const b = new THREE.Vector3().fromBufferAttribute(positions, vertex + 1);
@@ -819,8 +899,15 @@ describe("shop storage and sports enclosure", () => {
         expect(a.y).toBeGreaterThan(0.6);
         expect(a.y).toBeLessThan(WALL_VISUAL_HEIGHT);
         sides.add(Math.abs(delta.x) > 0.001 ? `z:${a.z}` : `x:${a.x}`);
+        if (Math.abs(delta.x) > 0.001 && a.z < -ARENA_HALF_SIZE && delta.x * delta.y > 0
+          && Math.abs(a.y - 0.66) < 0.00001) bottomCrossings.push(a.x);
       }
       expect(sides.size).toBe(4);
+      bottomCrossings.sort((a, b) => a - b);
+      expect(bottomCrossings.length).toBeGreaterThan(60);
+      for (let index = 1; index < bottomCrossings.length; index++) {
+        expect(bottomCrossings[index]! - bottomCrossings[index - 1]!).toBeCloseTo(0.5, 5);
+      }
       boards.geometry.computeBoundingBox();
       frame.geometry.computeBoundingBox();
       expect(boards.geometry.boundingBox!.max.y).toBeCloseTo(0.6, 5);
@@ -907,7 +994,7 @@ describe("shop storage and sports enclosure", () => {
     }
     // Nine batches replace twelve old surface batches (four hidden caps removed).
     expect(names).toHaveLength(9);
-    expect(triangles).toBeLessThan(13000);
+    expect(triangles).toBeLessThan(13500);
     const oldFrameMaterial = (scene.getObjectByName("sports-fence-frame") as THREE.Mesh).material as THREE.Material;
     const spies = [...resources].map((resource) => vi.spyOn(resource, "dispose"));
     builder.dispose(scene);

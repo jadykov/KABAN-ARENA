@@ -17,6 +17,8 @@ interface House {
   chimney?: number;
 }
 
+const HOUSE_SCALE = 0.82;
+
 // Ground and buildings live in world space outside the arena boundary. The
 // backdrop never moves with the camera, adds no colliders, casts no shadows,
 // and uses the arena's existing lights/fog. Five batches cover the whole yard.
@@ -170,9 +172,9 @@ export class SuburbanEnvironment {
       const yaw = Math.atan2(-house.x, -house.z);
       const add = (x: number, y: number, z: number, width: number, height: number, depth: number, color: number): BoxPart => {
         const part = {
-          x: house.x + x * Math.cos(yaw) + z * Math.sin(yaw),
-          y, z: house.z - x * Math.sin(yaw) + z * Math.cos(yaw),
-          width, height, depth, yaw, color,
+          x: house.x + (x * Math.cos(yaw) + z * Math.sin(yaw)) * HOUSE_SCALE,
+          y: y * HOUSE_SCALE, z: house.z + (-x * Math.sin(yaw) + z * Math.cos(yaw)) * HOUSE_SCALE,
+          width: width * HOUSE_SCALE, height: height * HOUSE_SCALE, depth: depth * HOUSE_SCALE, yaw, color,
         };
         parts.push(part);
         return part;
@@ -188,8 +190,8 @@ export class SuburbanEnvironment {
         const pane = add(x, y, house.depth / 2 + 0.115, width, height, 0.035, 0x465d63);
         add(x, y - height / 2 - 0.13, house.depth / 2 + 0.15, width + 0.32, 0.09, 0.3, house.trim);
         if (width >= 1.9) add(x, y, house.depth / 2 + 0.17, 0.065, height, 0.045, house.trim);
-        if (window.lit) windows.push({ ...pane, depth: 0.01,
-          z: pane.z + 0.025 * Math.cos(yaw), x: pane.x + 0.025 * Math.sin(yaw),
+        if (window.lit) windows.push({ ...pane, depth: 0.01 * HOUSE_SCALE,
+          z: pane.z + 0.025 * HOUSE_SCALE * Math.cos(yaw), x: pane.x + 0.025 * HOUSE_SCALE * Math.sin(yaw),
           color: windows.length % 3 === 0 ? 0xfff2d8 : 0xeedab8 });
       }
       add(house.entry, 1.04, house.depth / 2 + 0.07, 1.05, 2.08, 0.10, 0x68746e);
@@ -210,7 +212,7 @@ export class SuburbanEnvironment {
         this.appendRoof(roofPositions, roofColors, {
           ...house, x: house.x + wing.x * Math.cos(yaw), z: house.z - wing.x * Math.sin(yaw),
           width: wing.width, depth: wing.depth, height: wing.height, roofShape: "shed", roofRise: 0.5,
-        }, yaw);
+        }, yaw, house);
       }
     }
     const trees = [
@@ -279,7 +281,8 @@ export class SuburbanEnvironment {
     return mesh;
   }
 
-  private appendRoof(positions: number[], colors: number[], house: House, yaw: number): void {
+  private appendRoof(positions: number[], colors: number[], house: House, yaw: number,
+    anchor: Pick<House, "x" | "z"> = house): void {
     const vertices = [[-0.5, 0, -0.5], [0.5, 0, -0.5], [0.5, 0, 0.5], [-0.5, 0, 0.5]];
     let triangles: number[];
     if (house.roofShape === "gable") {
@@ -300,9 +303,9 @@ export class SuburbanEnvironment {
       const vertex = vertices[index]!;
       const x = vertex[0]! * (house.width + 0.6);
       const z = vertex[2]! * (house.depth + 0.6);
-      positions.push(house.x + x * Math.cos(yaw) + z * Math.sin(yaw),
-        house.height + vertex[1]! * house.roofRise,
-        house.z - x * Math.sin(yaw) + z * Math.cos(yaw));
+      positions.push(anchor.x + (house.x - anchor.x + x * Math.cos(yaw) + z * Math.sin(yaw)) * HOUSE_SCALE,
+        (house.height + vertex[1]! * house.roofRise) * HOUSE_SCALE,
+        anchor.z + (house.z - anchor.z - x * Math.sin(yaw) + z * Math.cos(yaw)) * HOUSE_SCALE);
       colors.push(color.r, color.g, color.b);
     }
   }

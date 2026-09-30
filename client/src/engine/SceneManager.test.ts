@@ -37,6 +37,7 @@ import {
   WALL_HEIGHT,
 } from "../config";
 import { mirrorChargeCameraPitch } from "../net/chargeAim";
+import type { NetPlayerSnapshot } from "../net/protocol";
 import {
   ACCENT_DEATH_PALE,
   ACCENT_DEATH_RED,
@@ -998,6 +999,87 @@ describe("SceneManager local run trail", () => {
     expect(trail?.visible).toBe(false);
     manager.setSpectating(true);
     expect(trail?.visible).toBe(false);
+  });
+});
+
+describe("SceneManager local fast-charge bonus visual", () => {
+  function player(overrides: Partial<NetPlayerSnapshot> = {}): NetPlayerSnapshot {
+    return {
+      sessionId: "self", nick: "Self", x: 0, y: 1.1, z: 0, rotY: 0,
+      hp: 100, score: 0, alive: true, isBot: false, ready: true, spectator: false,
+      superBuff: false, reloadUntil: 0, shieldHp: 0, shieldUntil: 0, speedUntil: 0,
+      chargeUntil: 11_000, pickupKind: "", pickupAt: 0, pickupSeq: 0,
+      ...overrides,
+    };
+  }
+
+  function buildScene(): { manager: SceneManager; scene: THREE.Scene } {
+    const scene = new THREE.Scene();
+    const manager = new SceneManager(scene, new THREE.PerspectiveCamera(75, 1, 0.1, 200));
+    manager.build();
+    managers.push(manager);
+    return { manager, scene };
+  }
+
+  it("keeps the orbit through held-charge cancellation and removes it when the accepted-shot snapshot spends the buff", () => {
+    const { manager, scene } = buildScene();
+    const orb = scene.getObjectByName("bonus-charge-orb")!;
+    expect(orb.visible).toBe(false);
+    manager.syncPowerUps(player({ shieldHp: 25, shieldUntil: 11_000, speedUntil: 6000 }), 1000, []);
+    manager.showBonusPickup("charge");
+    expect(orb.visible).toBe(true);
+    expect(scene.getObjectByName("bonus-badge")?.visible).toBe(true);
+    const idlePosition = orb.position.clone();
+    manager.update(0.25, NO_MOVE, NO_LOOK);
+    expect(orb.position.distanceTo(idlePosition)).toBeGreaterThan(0.2);
+    manager.setCharging(true);
+    manager.setCharge01(0.7);
+    manager.setChargeZoom01(0.7);
+    manager.setChargeTranslucent(true);
+    manager.update(FRAME, { x: 0, y: 1 }, NO_LOOK);
+    expect(orb.visible).toBe(true);
+    expect(scene.getObjectByName("run-wind-trail")?.visible).toBe(true);
+    // The actual held-charge cancel feeds zero to these methods; it does
+    // not consume a server-granted bonus.
+    manager.setCharging(false);
+    manager.setCharge01(0);
+    manager.setChargeZoom01(0);
+    manager.setChargeTranslucent(false);
+    manager.update(FRAME, NO_MOVE, NO_LOOK);
+    expect(manager.hasChargeBoost()).toBe(true);
+    expect(orb.visible).toBe(true);
+    manager.syncPowerUps(player({ chargeUntil: 0, shieldHp: 25, shieldUntil: 11_000, speedUntil: 6000 }), 1300, []);
+    expect(manager.hasChargeBoost()).toBe(false);
+    expect(orb.visible).toBe(false);
+    expect(scene.getObjectByName("bonus-shield")?.visible).toBe(true);
+  });
+
+  it("expires between snapshots and clears on death, spectator, missing self and new round", () => {
+    const { manager, scene } = buildScene();
+    const orb = scene.getObjectByName("bonus-charge-orb")!;
+    manager.syncPowerUps(player(), 1000, []);
+    expect(manager.getPowerUpHudState().chargeRemaining).toBe(10);
+    for (let i = 0; i < 39; i += 1) manager.update(0.25, NO_MOVE, NO_LOOK);
+    expect(orb.visible).toBe(true);
+    manager.update(0.26, NO_MOVE, NO_LOOK);
+    expect(orb.visible).toBe(false);
+    expect(manager.hasChargeBoost()).toBe(false);
+    for (const invalid of [player({ alive: false }), player({ spectator: true }), player({ ready: false }), null]) {
+      manager.syncPowerUps(player(), 1000, []);
+      expect(orb.visible).toBe(true);
+      manager.syncPowerUps(invalid, 1000, []);
+      expect(orb.visible).toBe(false);
+    }
+    manager.syncPowerUps(player(), 1000, []);
+    manager.showBonusPickup("charge");
+    manager.reset();
+    expect(orb.visible).toBe(false);
+    expect(manager.hasChargeBoost()).toBe(false);
+    expect(scene.getObjectByName("bonus-badge")?.visible).toBe(false);
+    manager.syncPowerUps(player(), 1000, []);
+    expect(orb.visible).toBe(true);
+    manager.dispose();
+    expect(scene.getObjectByName("bonus-charge-orb")).toBeUndefined();
   });
 });
 
