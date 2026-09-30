@@ -7,7 +7,7 @@ import {
 } from "./config";
 import { InputController, isTypingTarget, mapCodeToDirection } from "./engine/InputController";
 import { formatTimer, heartsAfterHits } from "./ui/hud";
-import { computeJoystickVector } from "./ui/joystick";
+import { computeJoystickVector, createJoystick } from "./ui/joystick";
 
 interface FakeKeyEventOptions {
   code?: string;
@@ -178,6 +178,113 @@ describe("joystick vector math", () => {
 
   it("guards invalid radius", () => {
     expect(computeJoystickVector(10, 10, 0)).toEqual({ x: 0, y: 0 });
+  });
+});
+
+describe("joystick reset during a suspended touch", () => {
+  class StickElement extends EventTarget {
+    public id = "";
+    public readonly style: Record<string, string> = {};
+    public readonly children: StickElement[] = [];
+    public parentElement: StickElement | null = null;
+    public readonly captures: number[] = [];
+
+    public appendChild(child: StickElement): void {
+      child.parentElement = this;
+      this.children.push(child);
+    }
+
+    public removeChild(child: StickElement): void {
+      this.children.splice(this.children.indexOf(child), 1);
+      child.parentElement = null;
+    }
+
+    public getBoundingClientRect(): { left: number; top: number; width: number; height: number } {
+      return { left: 10, top: 20, width: JOYSTICK_DIAMETER, height: JOYSTICK_DIAMETER };
+    }
+
+    public setPointerCapture(pointerId: number): void {
+      this.captures.push(pointerId);
+    }
+  }
+
+  function pointer(base: StickElement, type: string, pointerId: number, x: number, y: number): void {
+    const event = new Event(type, { cancelable: true });
+    Object.assign(event, { pointerId, clientX: x, clientY: y });
+    base.dispatchEvent(event);
+  }
+
+  function fixture(): {
+    parent: StickElement; base: StickElement; knob: StickElement;
+    handle: ReturnType<typeof createJoystick>; moves: Array<{ x: number; y: number }>; restore(): void;
+  } {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "document");
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: { createElement: (): StickElement => new StickElement() },
+    });
+    const parent = new StickElement();
+    const moves: Array<{ x: number; y: number }> = [];
+    const handle = createJoystick(parent as unknown as HTMLElement, { onMove: (vector): void => { moves.push(vector); } });
+    const base = handle.element as unknown as StickElement;
+    const knob = base.children[0]!;
+    return {
+      parent, base, knob, handle, moves,
+      restore(): void {
+        handle.destroy();
+        if (previous !== undefined) Object.defineProperty(globalThis, "document", previous);
+        else delete (globalThis as unknown as Record<string, unknown>)["document"];
+      },
+    };
+  }
+
+  it("centers the knob, emits zero and permits a fresh pointer without accepting stale pointer events", () => {
+    const { base, knob, handle, moves, restore } = fixture();
+    try {
+      pointer(base, "pointerdown", 11, 130, 80);
+      expect(handle.getVector()).toEqual({ x: 1, y: 0 });
+      expect(knob.style.transform).not.toBe("translate(0px, 0px)");
+      handle.reset();
+      expect(handle.getVector()).toEqual({ x: 0, y: 0 });
+      expect(knob.style.transform).toBe("translate(0px, 0px)");
+      expect(moves.at(-1)).toEqual({ x: 0, y: 0 });
+      const resetCalls = moves.length;
+      pointer(base, "pointermove", 11, 10, 80);
+      expect(moves).toHaveLength(resetCalls);
+      pointer(base, "pointerdown", 22, 70, 20);
+      expect(base.captures).toEqual([11, 22]);
+      expect(handle.getVector()).toEqual({ x: 0, y: 1 });
+      const freshCalls = moves.length;
+      pointer(base, "pointerup", 11, 130, 80);
+      expect(moves).toHaveLength(freshCalls);
+      expect(handle.getVector()).toEqual({ x: 0, y: 1 });
+      pointer(base, "pointerup", 22, 70, 20);
+      expect(handle.getVector()).toEqual({ x: 0, y: 0 });
+      expect(moves.at(-1)).toEqual({ x: 0, y: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not call onMove on reset or receive pointer events after destruction", () => {
+    const { parent, base, knob, handle, moves, restore } = fixture();
+    try {
+      pointer(base, "pointerdown", 11, 130, 80);
+      handle.destroy();
+      expect(handle.getVector()).toEqual({ x: 0, y: 0 });
+      expect(knob.style.transform).toBe("translate(0px, 0px)");
+      expect(parent.children).toHaveLength(0);
+      const destroyedCalls = moves.length;
+      handle.reset();
+      handle.reset();
+      pointer(base, "pointerdown", 22, 70, 20);
+      pointer(base, "pointermove", 22, 130, 80);
+      handle.destroy();
+      expect(moves).toHaveLength(destroyedCalls);
+      expect(handle.getVector()).toEqual({ x: 0, y: 0 });
+    } finally {
+      restore();
+    }
   });
 });
 

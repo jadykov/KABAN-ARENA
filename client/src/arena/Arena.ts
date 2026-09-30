@@ -238,6 +238,9 @@ export class ArenaBuilder {
   private fenceNightBlend = 0;
   private swampBubbles: THREE.InstancedMesh | null = null;
   private swampBubbleTime = 0;
+  private ambientInterval = 1 / 60;
+  private swampElapsedSinceUpload = 0;
+  private swampMatricesDirty = true;
   private readonly swampBubbleMatrix = new THREE.Matrix4();
   private readonly swampBubbleScale = new THREE.Vector3();
   private readonly swampBubbleLocations: Array<{ x: number; z: number; phase: number }> = [];
@@ -344,12 +347,24 @@ export class ArenaBuilder {
     }
   }
 
+  public setAmbientHz(hz: number): void {
+    const interval = 1 / (Number.isFinite(hz) ? Math.max(1, Math.min(60, hz)) : 60);
+    if (interval === this.ambientInterval) return;
+    this.ambientInterval = interval;
+    this.swampElapsedSinceUpload = 0;
+  }
+
   // Called from SceneManager.updateCombat in both play and spectator paths.
   // Only one instance buffer changes; bubbles share one geometry/material.
   public update(deltaSeconds: number): void {
     const bubbles = this.swampBubbles;
-    if (bubbles === null || deltaSeconds <= 0) return;
+    if (bubbles === null || !bubbles.visible || !Number.isFinite(deltaSeconds) || deltaSeconds < 0) return;
     this.swampBubbleTime += deltaSeconds;
+    this.swampElapsedSinceUpload += deltaSeconds;
+    if (!this.swampMatricesDirty && this.swampElapsedSinceUpload + 1e-9 < this.ambientInterval) return;
+    this.swampElapsedSinceUpload = this.swampMatricesDirty ? 0 : Math.max(0, this.swampElapsedSinceUpload
+      - this.ambientInterval * Math.floor((this.swampElapsedSinceUpload + 1e-9) / this.ambientInterval));
+    this.swampMatricesDirty = false;
     for (let i = 0; i < this.swampBubbleLocations.length; i += 1) {
       const bubble = this.swampBubbleLocations[i];
       if (bubble === undefined) continue;
@@ -376,6 +391,8 @@ export class ArenaBuilder {
     this.fenceNightBlend = 0;
     this.swampBubbles = null;
     this.swampBubbleTime = 0;
+    this.swampElapsedSinceUpload = 0;
+    this.swampMatricesDirty = true;
     this.swampBubbleLocations.length = 0;
     this.eveningAmount = 0;
     this.eveningEffects.length = 0;
@@ -927,6 +944,7 @@ export class ArenaBuilder {
     const bubbles = this.track(new THREE.InstancedMesh(bubbleGeometry, bubbleMaterial, zones.length * bubbleCountPerZone));
     bubbles.name = "swamp-bubbles";
     bubbles.frustumCulled = false;
+    bubbles.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     zones.forEach((zone, zoneIndex) => {
       for (let i = 0; i < bubbleCountPerZone; i += 1) {
         const angle = (i * 2.399963229728653) + zoneIndex * 0.45;

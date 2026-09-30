@@ -13,6 +13,7 @@ import {
   createAim,
   isTrajDotLit,
   trajDotLitThreshold,
+  type TrajSample,
 } from "./aim";
 
 // Minimal DOM stub: vitest runs in node (no jsdom installed, no installs
@@ -20,9 +21,22 @@ import {
 class FakeElement {
   public id = "";
   public className = "";
-  public textContent = "";
-  public readonly dataset: Record<string, string> = {};
-  public readonly style: Record<string, string> = {};
+  public readonly writes: string[] = [];
+  private text = "";
+  public get textContent(): string { return this.text; }
+  public set textContent(value: string) { this.text = value; this.writes.push("textContent"); }
+  public readonly dataset = new Proxy<Record<string, string>>({}, {
+    set: (target, name, value: string): boolean => {
+      this.writes.push(`dataset.${String(name)}`);
+      return Reflect.set(target, name, value);
+    },
+  });
+  public readonly style = new Proxy<Record<string, string>>({}, {
+    set: (target, name, value: string): boolean => {
+      this.writes.push(`style.${String(name)}`);
+      return Reflect.set(target, name, value);
+    },
+  });
   public readonly children: FakeElement[] = [];
   public parentElement: FakeElement | null = null;
 
@@ -69,6 +83,18 @@ function installFakeDocument(): void {
 
 function asHtml(element: FakeElement): HTMLElement {
   return element as unknown as HTMLElement;
+}
+
+function allElements(element: FakeElement): FakeElement[] {
+  return [element, ...element.children.flatMap(allElements)];
+}
+
+function clearWrites(element: FakeElement): void {
+  for (const child of allElements(element)) child.writes.length = 0;
+}
+
+function writesOf(element: FakeElement): string[] {
+  return allElements(element).flatMap((child) => child.writes);
 }
 
 beforeEach(() => {
@@ -245,6 +271,105 @@ describe("createAim honest trajectory preview", () => {
       expect(dots[3]?.style.opacity).not.toBe("0");
       handle.setTrajectory(null);
       expect(dots[0]?.style.transform).not.toBe("translate(10.0px, -20.0px)");
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("copies reused caller samples, sanitizes them and accepts subsequent changes to the same buffer", () => {
+    const parent = new FakeElement();
+    const handle = createAim(asHtml(parent));
+    const samples: TrajSample[] = Array.from({ length: TRAJ_DOT_COUNT }, (_, i) => ({ x: i + 10, y: -20, visible: true }));
+    try {
+      handle.setTrajectory(samples);
+      const first = samples[0]!;
+      first.x = 99;
+      first.visible = false;
+      // Other paints must read the owned copy, never caller mutations.
+      handle.setCharge01(0.5);
+      handle.setSuper(true);
+      const dots = (handle.el as unknown as FakeElement).querySelectorAll(".traj-dot");
+      expect(dots[0]?.style.transform).toBe("translate(10.0px, -20.0px)");
+      expect(dots[0]?.style.opacity).not.toBe("0");
+      handle.setTrajectory(samples);
+      expect(dots[0]?.style.transform).toBe("translate(99.0px, -20.0px)");
+      expect(dots[0]?.style.opacity).toBe("0");
+      const frozen = Object.freeze(samples.map((sample) => Object.freeze({ ...sample, x: Number.NaN, y: Infinity })));
+      handle.setTrajectory(frozen);
+      expect(dots.every((dot) => dot.style.transform === "translate(0.0px, 0.0px)")).toBe(true);
+      expect(frozen.every((sample) => Number.isNaN(sample.x) && sample.y === Infinity)).toBe(true);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("ignores excess samples and restores the fan for incomplete or reset input", () => {
+    const parent = new FakeElement();
+    const handle = createAim(asHtml(parent));
+    try {
+      const el = handle.el as unknown as FakeElement;
+      const fan = el.querySelectorAll(".traj-dot").map((dot) => dot.style.transform);
+      const samples = Array.from({ length: TRAJ_DOT_COUNT + 1 }, () => ({ x: 50, y: -80, visible: true }));
+      handle.setTrajectory(samples);
+      expect(el.querySelectorAll(".traj-dot").every((dot) => dot.style.transform === "translate(50.0px, -80.0px)")).toBe(true);
+      handle.setTrajectory(samples.slice(0, 2));
+      expect(el.querySelectorAll(".traj-dot").map((dot) => dot.style.transform)).toEqual(fan);
+      clearWrites(parent);
+      handle.setTrajectory(null);
+      expect(writesOf(parent)).toEqual([]);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("does no DOM writes for repeated idle/ready values and repaints only reload during its sweep", () => {
+    const parent = new FakeElement();
+    const handle = createAim(asHtml(parent));
+    try {
+      handle.setReload01(1);
+      handle.hide();
+      clearWrites(parent);
+      for (let i = 0; i < 120; i += 1) {
+        handle.setCharge01(0);
+        handle.setSuper(false);
+        handle.setTrajectory(null);
+        handle.setReload01(1);
+        handle.hide();
+      }
+      expect(writesOf(parent)).toEqual([]);
+      handle.setReload01(0.25);
+      expect(writesOf(handle.el as unknown as FakeElement)).toEqual([]);
+      const reload = parent.querySelector("#reload-bar")!;
+      expect(writesOf(reload)).toEqual(["style.display", "style.width"]);
+      clearWrites(parent);
+      handle.setReload01(0.251); // Same visible percent; no repaint.
+      expect(writesOf(parent)).toEqual([]);
+      handle.setReload01(1);
+      expect(reload.style.display).toBe("none");
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("updates a moved trajectory every call without rewriting unchanged dots or bar state", () => {
+    const parent = new FakeElement();
+    const handle = createAim(asHtml(parent));
+    try {
+      const samples = Array.from({ length: TRAJ_DOT_COUNT }, (_, i) => ({ x: i * 10, y: -20, visible: true }));
+      handle.setCharge01(0.4);
+      handle.setTrajectory(samples);
+      clearWrites(parent);
+      handle.setTrajectory(samples);
+      expect(writesOf(parent)).toEqual([]);
+      samples[2]!.x = 22;
+      handle.setTrajectory(samples);
+      const dots = (handle.el as unknown as FakeElement).querySelectorAll(".traj-dot");
+      expect(dots[2]?.style.transform).toBe("translate(22.0px, -20.0px)");
+      expect(writesOf(parent)).toEqual(["style.transform"]);
+      clearWrites(parent);
+      handle.setTrajectory(null);
+      expect(dots[2]?.style.transform).not.toBe("translate(22.0px, -20.0px)");
+      expect(parent.querySelector("#reload-bar")?.style.display).toBe("none");
     } finally {
       handle.dispose();
     }

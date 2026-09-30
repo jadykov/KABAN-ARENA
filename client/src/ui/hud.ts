@@ -68,6 +68,9 @@ export interface HudHandle {
   setHearts(halves: number): void;
   setHeartsFromHearts(hearts: number): void;
   setBuffs(buffs: HudBuffs): void;
+  // Allocation-free per-frame path. Nonpositive deadlines hide immediately;
+  // the visible timer still changes at the established tenth-second steps.
+  setBuffValues(shieldSeconds: number, shieldHp: number, speedSeconds: number, chargeSeconds: number): void;
   getHearts(): number;
   getHalves(): number;
   setSuperBadge(visible: boolean): void;
@@ -155,7 +158,9 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
   const buffsPanel = document.createElement("div");
   buffsPanel.id = "hud-buffs";
   buffsPanel.setAttribute("aria-label", "Активные бонусы");
-  const buffRows = {} as Record<keyof HudBuffs, { row: HTMLDivElement; timer: HTMLSpanElement }>;
+  const buffRows = {} as Record<keyof HudBuffs, {
+    row: HTMLDivElement; timer: HTMLSpanElement; label: string; active: boolean; tenths: number;
+  }>;
   for (const [kind, label] of [
     ["shield", "Щит"], ["speed", "Ускорение"], ["charge", "Быстрый заряд"],
   ] as const) {
@@ -175,7 +180,7 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
     row.appendChild(title);
     row.appendChild(timer);
     buffsPanel.appendChild(row);
-    buffRows[kind] = { row, timer };
+    buffRows[kind] = { row, timer, label, active: false, tenths: 0 };
   }
 
   const superBadge = document.createElement("div");
@@ -198,11 +203,17 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
 
   let currentHalves = maxHearts * 2;
   let currentShieldHp = 0;
+  let heartLabel = "";
+  let paintedShieldLabel = "";
   let disposed = false;
 
   const updateHeartLabel = (): void => {
     const shieldLabel = currentShieldHp > 0 ? `; щит: ${Math.ceil(currentShieldHp)} из 25 прочности` : "";
-    hearts.setAttribute("aria-label", `Здоровье: ${currentHalves} из ${maxHearts * 2} половинок сердца${shieldLabel}`);
+    const label = `Здоровье: ${currentHalves} из ${maxHearts * 2} половинок сердца${shieldLabel}`;
+    if (heartLabel !== label) {
+      hearts.setAttribute("aria-label", label);
+      heartLabel = label;
+    }
   };
 
   const renderHearts = (): void => {
@@ -229,59 +240,92 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
   };
   renderHearts();
 
+  const paintBuff = (kind: keyof HudBuffs, seconds: number): boolean => {
+    const buff = buffRows[kind];
+    const active = Number.isFinite(seconds) && seconds > 0;
+    if (buff.active !== active) {
+      buff.row.style.display = active ? "" : "none";
+      buff.active = active;
+    }
+    const tenths = active ? Math.ceil(seconds * 10) : 0;
+    if (buff.tenths !== tenths) {
+      const formatted = active ? `${(tenths / 10).toFixed(1)} с` : "";
+      buff.timer.textContent = formatted;
+      buff.row.setAttribute("aria-label", active ? `${buff.label}: ${formatted}` : `${buff.label}: неактивен`);
+      buff.tenths = tenths;
+    }
+    return active;
+  };
+
+  const paintBuffs = (shieldSeconds: number, hp: number, speedSeconds: number, chargeSeconds: number): void => {
+    const timedShield = paintBuff("shield", shieldSeconds);
+    paintBuff("speed", speedSeconds);
+    paintBuff("charge", chargeSeconds);
+    const shieldActive = timedShield && Number.isFinite(hp) && hp > 0;
+    const nextHp = shieldActive ? hp : 0;
+    const hpChanged = currentShieldHp !== nextHp;
+    if (hpChanged) {
+      currentShieldHp = nextHp;
+      updateHeartLabel();
+    }
+    const display = shieldActive ? "" : "none";
+    if (shieldHeart.style.display !== display) shieldHeart.style.display = display;
+    if (shieldActive && hpChanged) {
+      const fraction = Math.max(0, Math.min(1, hp / 25));
+      const width = `${Math.round(fraction * 100)}%`;
+      if (shieldCapacity.style.width !== width) shieldCapacity.style.width = width;
+      const label = `Щит: ${Math.ceil(hp)} из 25 прочности`;
+      if (paintedShieldLabel !== label) {
+        shieldHeart.setAttribute("aria-label", label);
+        paintedShieldLabel = label;
+      }
+    }
+  };
+
   const handle: HudHandle = {
     element: root,
     setTimer(totalSeconds: number): void {
-      infoTimer.textContent = formatTimer(totalSeconds);
+      const text = formatTimer(totalSeconds);
+      if (infoTimer.textContent !== text) infoTimer.textContent = text;
     },
     setScore(nextScore: number): void {
-      score.textContent = String(nextScore);
-      score.setAttribute("aria-label", `Счёт: ${nextScore}`);
+      const text = String(nextScore);
+      if (score.textContent !== text) {
+        score.textContent = text;
+        score.setAttribute("aria-label", `Счёт: ${nextScore}`);
+      }
     },
     setPlayers(count: number): void {
-      infoPlayers.textContent = `Игроки: ${count}`;
+      const text = `Игроки: ${count}`;
+      if (infoPlayers.textContent !== text) infoPlayers.textContent = text;
     },
     setWatching(count: number): void {
-      infoWatching.textContent = `Зрители: ${count}`;
+      const text = `Зрители: ${count}`;
+      if (infoWatching.textContent !== text) infoWatching.textContent = text;
     },
     setCounters(players: number, watching: number): void {
-      infoPlayers.textContent = `Игроки: ${players}`;
-      infoWatching.textContent = `Зрители: ${watching}`;
+      handle.setPlayers(players);
+      handle.setWatching(watching);
     },
     setHearts(nextHalves: number): void {
       const safe = Number.isFinite(nextHalves) ? Math.floor(nextHalves) : 0;
-      currentHalves = Math.max(0, Math.min(MAX_HALVES, safe));
+      const halves = Math.max(0, Math.min(MAX_HALVES, safe));
+      if (currentHalves === halves) return;
+      currentHalves = halves;
       renderHearts();
     },
     setHeartsFromHearts(nextHearts: number): void {
       const safe = Number.isFinite(nextHearts) ? Math.floor(nextHearts) : 0;
       const clamped = Math.max(0, Math.min(maxHearts, safe));
+      if (currentHalves === clamped * 2) return;
       currentHalves = clamped * 2;
       renderHearts();
     },
     setBuffs(buffs: HudBuffs): void {
-      for (const kind of ["shield", "speed", "charge"] as const) {
-        const value = buffs[kind];
-        const active = value !== undefined && Number.isFinite(value.seconds) && value.seconds > 0;
-        const { row, timer } = buffRows[kind];
-        row.style.display = active ? "" : "none";
-        if (active && value !== undefined) {
-          const seconds = Math.max(0, value.seconds);
-          const formatted = `${(Math.ceil(seconds * 10) / 10).toFixed(1)} с`;
-          if (timer.textContent !== formatted) timer.textContent = formatted;
-          row.setAttribute("aria-label", `${kind === "shield" ? "Щит" : kind === "speed" ? "Ускорение" : "Быстрый заряд"}: ${formatted}`);
-        }
-      }
-      const hp = buffs.shield?.hp ?? 0;
-      const shieldActive = hp > 0 && buffRows.shield.row.style.display !== "none";
-      currentShieldHp = shieldActive ? hp : 0;
-      updateHeartLabel();
-      shieldHeart.style.display = shieldActive ? "" : "none";
-      if (shieldActive) {
-        const fraction = Math.max(0, Math.min(1, hp / 25));
-        shieldCapacity.style.width = `${Math.round(fraction * 100)}%`;
-        shieldHeart.setAttribute("aria-label", `Щит: ${Math.ceil(hp)} из 25 прочности`);
-      }
+      paintBuffs(buffs.shield?.seconds ?? 0, buffs.shield?.hp ?? 0, buffs.speed?.seconds ?? 0, buffs.charge?.seconds ?? 0);
+    },
+    setBuffValues(shieldSeconds: number, hp: number, speedSeconds: number, chargeSeconds: number): void {
+      paintBuffs(shieldSeconds, hp, speedSeconds, chargeSeconds);
     },
     getHearts(): number {
       return Math.ceil(currentHalves / 2);
@@ -290,10 +334,11 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
       return currentHalves;
     },
     setSuperBadge(visible: boolean): void {
-      superBadge.style.display = visible ? "" : "none";
+      const display = visible ? "" : "none";
+      if (superBadge.style.display !== display) superBadge.style.display = display;
     },
     setStatus(text: string): void {
-      status.textContent = text;
+      if (status.textContent !== text) status.textContent = text;
     },
     // Event feed (owner 4d.4): brief one-liners for join/kill/pickup only —
     // newest on top, at most KILLFEED_MAX_LINES visible (older drop off, no

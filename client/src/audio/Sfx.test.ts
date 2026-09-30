@@ -2,7 +2,7 @@
 // cap, intensity/attenuation mapping, mute persistence parse, ricochet-onset
 // detection) plus headless no-op safety — all runnable in the vitest node env
 // with no AudioContext, same headless pattern as fx/Balls.ts.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   FOOTSTEP_MIN_SPEED01,
   SFX_AMBIENT_FADE_S,
@@ -395,6 +395,349 @@ describe("ambient music seam", () => {
     const sfx = createSfx();
     expect(sfx.startAmbient(notFound)).toBe(false);
     expect(sfx.startAmbient(found)).toBe(false);
+    expect(sfx.ambientActive).toBe(false);
+    sfx.dispose();
+  });
+});
+
+function pendingPromise<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: Error) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function mockAudioParam() {
+  return {
+    value: 1,
+    setValueAtTime: vi.fn(),
+    setTargetAtTime: vi.fn(),
+    linearRampToValueAtTime: vi.fn(),
+    cancelScheduledValues: vi.fn(),
+  };
+}
+
+function mockAudioNode() {
+  return { connect: vi.fn(), disconnect: vi.fn() };
+}
+
+function mockGainNode() {
+  return { ...mockAudioNode(), gain: mockAudioParam() };
+}
+
+class MockAmbientMedia extends EventTarget {
+  public src = "";
+  public preload = "auto";
+  public loop = false;
+  public paused = true;
+  public currentTime = 0;
+  public readonly playback = pendingPromise<void>();
+  public readonly play = vi.fn(() => {
+    this.paused = false;
+    return this.playback.promise;
+  });
+  public readonly pause = vi.fn(() => { this.paused = true; });
+  public readonly load = vi.fn();
+  public readonly removeAttribute = vi.fn((name: string) => {
+    if (name === "src") this.src = "";
+  });
+  public readonly addEventListener = vi.fn((type: string, listener: EventListenerOrEventListenerObject) => {
+    super.addEventListener(type, listener);
+  });
+  public readonly removeEventListener = vi.fn((type: string, listener: EventListenerOrEventListenerObject) => {
+    super.removeEventListener(type, listener);
+  });
+}
+
+class MockMusicContext {
+  public state: "running" | "suspended" | "closed" = "running";
+  public currentTime = 4;
+  public sampleRate = 1000;
+  public readonly destination = mockAudioNode();
+  public readonly resumePending = pendingPromise<void>();
+  public readonly resume = vi.fn(() => this.resumePending.promise);
+  public readonly close = vi.fn(() => {
+    this.state = "closed";
+    return Promise.resolve();
+  });
+  public readonly createGain = vi.fn(mockGainNode);
+  public readonly createDynamicsCompressor = vi.fn(() => ({
+    ...mockAudioNode(), threshold: mockAudioParam(), knee: mockAudioParam(),
+    ratio: mockAudioParam(), attack: mockAudioParam(), release: mockAudioParam(),
+  }));
+  public readonly createConvolver = vi.fn(() => ({ ...mockAudioNode(), buffer: null }));
+  public readonly createBuffer = vi.fn((_channels: number, length: number, rate: number) => ({
+    duration: length / rate,
+    getChannelData: () => new Float32Array(length),
+  }));
+  public readonly createMediaElementSource = vi.fn((_media: unknown) => mockAudioNode());
+  public readonly createBufferSource = vi.fn(() => ({
+    ...mockAudioNode(), buffer: null as { duration: number } | null,
+    loop: false, start: vi.fn(), stop: vi.fn(),
+  }));
+  public readonly decodeAudioData = vi.fn((_data: ArrayBuffer) => Promise.resolve({ duration: 180 }));
+}
+
+function installMusicBrowser(initialState: "running" | "suspended" = "running", withDom = true) {
+  const contexts: MockMusicContext[] = [];
+  const media: MockAmbientMedia[] = [];
+  class BrowserAudioContext extends MockMusicContext {
+    public constructor() {
+      super();
+      this.state = initialState;
+      contexts.push(this);
+    }
+  }
+  const createElement = vi.fn((tag: string) => {
+    expect(tag).toBe("audio");
+    const audio = new MockAmbientMedia();
+    media.push(audio);
+    return audio;
+  });
+  const fetch = vi.fn();
+  vi.stubGlobal("window", { AudioContext: BrowserAudioContext });
+  vi.stubGlobal("document", withDom ? { createElement } : undefined);
+  vi.stubGlobal("fetch", fetch);
+  vi.stubGlobal("localStorage", undefined);
+  return { contexts, media, createElement, fetch };
+}
+
+async function finishMusicPromises(): Promise<void> {
+  // Covers the play Promise and its rejection handler, plus the explicit
+  // fetch -> arrayBuffer -> decode compatibility chain.
+  for (let i = 0; i < 6; i += 1) await Promise.resolve();
+}
+
+describe("streaming ambient lifecycle", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("plays in the first gesture while context resume is pending, with native looping and no full decode", async () => {
+    const browser = installMusicBrowser("suspended");
+    const sfx = createSfx();
+    expect(browser.createElement).not.toHaveBeenCalled();
+    expect(sfx.unlock()).toBe(false);
+    const ctx = browser.contexts[0]!;
+    const media = browser.media[0]!;
+    expect(ctx.resume).toHaveBeenCalledOnce();
+    expect(media.play).toHaveBeenCalledOnce();
+    expect(media.src).toBe(SFX_AMBIENT_URL);
+    expect(media.loop).toBe(true);
+    expect(media.preload).toBe("none");
+    sfx.unlock();
+    expect(browser.media).toHaveLength(1);
+    expect(media.play).toHaveBeenCalledOnce();
+    expect(sfx.ambientActive).toBe(false);
+    ctx.state = "running";
+    ctx.resumePending.resolve();
+    media.playback.resolve();
+    await finishMusicPromises();
+    expect(sfx.ambientActive).toBe(true);
+    const source = ctx.createMediaElementSource.mock.results[0]!.value;
+    const ambientGain = ctx.createGain.mock.results[3]!.value;
+    const master = ctx.createGain.mock.results[0]!.value;
+    expect(source.connect).toHaveBeenCalledWith(ambientGain);
+    expect(ambientGain.connect).toHaveBeenCalledWith(master);
+    expect(ambientGain.gain.setValueAtTime).toHaveBeenCalledWith(0, 4);
+    expect(ambientGain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(SFX_AMBIENT_GAIN, 4 + SFX_AMBIENT_FADE_S);
+    expect(browser.fetch).not.toHaveBeenCalled();
+    expect(ctx.decodeAudioData).not.toHaveBeenCalled();
+    expect(ctx.createBufferSource).not.toHaveBeenCalled();
+    sfx.dispose();
+  });
+
+  it("retains the music gain and shares master mute with sound effects", async () => {
+    const browser = installMusicBrowser();
+    const sfx = createSfx();
+    sfx.setMuted(true);
+    sfx.unlock();
+    const ctx = browser.contexts[0]!;
+    const master = ctx.createGain.mock.results[0]!.value;
+    expect(master.gain.value).toBe(0);
+    browser.media[0]!.playback.resolve();
+    await finishMusicPromises();
+    expect(sfx.ambientActive).toBe(true);
+    sfx.setMuted(false);
+    expect(master.gain.setTargetAtTime).toHaveBeenLastCalledWith(SFX_MASTER_GAIN, ctx.currentTime, 0.02);
+    sfx.setMuted(true);
+    expect(master.gain.setTargetAtTime).toHaveBeenLastCalledWith(0, ctx.currentTime, 0.02);
+    expect(browser.media[0]!.pause).not.toHaveBeenCalled();
+    sfx.dispose();
+  });
+
+  it("quietly retries a rejected or throwing play on the next gesture without another media graph", async () => {
+    const browser = installMusicBrowser();
+    const sfx = createSfx();
+    sfx.unlock();
+    const media = browser.media[0]!;
+    media.playback.reject(new Error("autoplay denied"));
+    await finishMusicPromises();
+    expect(sfx.ambientActive).toBe(false);
+    media.play.mockImplementationOnce(() => { throw new Error("blocked play"); });
+    expect(() => sfx.unlock()).not.toThrow();
+    const retry = pendingPromise<void>();
+    media.play.mockReturnValueOnce(retry.promise);
+    sfx.unlock();
+    retry.resolve();
+    await finishMusicPromises();
+    expect(sfx.ambientActive).toBe(true);
+    expect(browser.media).toHaveLength(1);
+    expect(browser.contexts[0]!.createMediaElementSource).toHaveBeenCalledOnce();
+    expect(browser.fetch).not.toHaveBeenCalled();
+    expect(browser.contexts[0]!.decodeAudioData).not.toHaveBeenCalled();
+    sfx.dispose();
+  });
+
+  it("releases a failed resource/404 and ignores its late completion while a new stream starts", async () => {
+    const browser = installMusicBrowser();
+    const sfx = createSfx();
+    sfx.unlock();
+    const first = browser.media[0]!;
+    const ctx = browser.contexts[0]!;
+    const source = ctx.createMediaElementSource.mock.results[0]!.value;
+    const gain = ctx.createGain.mock.results[3]!.value;
+    first.dispatchEvent(new Event("error"));
+    expect(sfx.ambientActive).toBe(false);
+    expect(first.pause).toHaveBeenCalledOnce();
+    expect(first.src).toBe("");
+    expect(first.load).toHaveBeenCalledOnce();
+    expect(first.removeEventListener).toHaveBeenCalledWith("error", expect.any(Function));
+    expect(source.disconnect).toHaveBeenCalledOnce();
+    expect(gain.disconnect).toHaveBeenCalledOnce();
+    sfx.unlock();
+    const second = browser.media[1]!;
+    first.playback.resolve();
+    await finishMusicPromises();
+    expect(sfx.ambientActive).toBe(false);
+    expect(gain.gain.linearRampToValueAtTime).not.toHaveBeenCalled();
+    // A stale removed error listener cannot tear down the replacement.
+    first.dispatchEvent(new Event("error"));
+    second.playback.resolve();
+    await finishMusicPromises();
+    expect(sfx.ambientActive).toBe(true);
+    expect(browser.fetch).not.toHaveBeenCalled();
+    expect(ctx.decodeAudioData).not.toHaveBeenCalled();
+    sfx.dispose();
+  });
+
+  it("pauses pending playback when hidden and preserves position through a blocked visibility resume", async () => {
+    const browser = installMusicBrowser();
+    const sfx = createSfx();
+    sfx.unlock();
+    const media = browser.media[0]!;
+    media.currentTime = 83;
+    sfx.setAmbientPaused(true);
+    expect(media.paused).toBe(true);
+    expect(sfx.ambientActive).toBe(false);
+    media.playback.reject(new Error("pause aborts the old play"));
+    await finishMusicPromises();
+    sfx.unlock();
+    expect(media.play).toHaveBeenCalledOnce();
+    const visiblePlay = pendingPromise<void>();
+    media.play.mockReturnValueOnce(visiblePlay.promise);
+    sfx.setAmbientPaused(false);
+    visiblePlay.reject(new Error("resume requires gesture"));
+    await finishMusicPromises();
+    expect(sfx.ambientActive).toBe(false);
+    expect(media.src).toBe(SFX_AMBIENT_URL);
+    expect(media.currentTime).toBe(83);
+    const gesturePlay = pendingPromise<void>();
+    media.play.mockReturnValueOnce(gesturePlay.promise);
+    sfx.unlock();
+    gesturePlay.resolve();
+    await finishMusicPromises();
+    expect(sfx.ambientActive).toBe(true);
+    expect(browser.media).toHaveLength(1);
+    expect(media.currentTime).toBe(83);
+    sfx.dispose();
+  });
+
+  it.each(["resolve", "reject"] as const)("cleans up on dispose and ignores a late %s after a new unlock", async (completion) => {
+    const browser = installMusicBrowser();
+    const sfx = createSfx();
+    sfx.unlock();
+    const oldMedia = browser.media[0]!;
+    const oldCtx = browser.contexts[0]!;
+    const oldGain = oldCtx.createGain.mock.results[3]!.value;
+    sfx.dispose();
+    expect(oldMedia.paused).toBe(true);
+    expect(oldMedia.src).toBe("");
+    expect(oldMedia.load).toHaveBeenCalledOnce();
+    expect(oldCtx.close).toHaveBeenCalledOnce();
+    expect(oldCtx.createMediaElementSource.mock.results[0]!.value.disconnect).toHaveBeenCalledOnce();
+    expect(oldGain.disconnect).toHaveBeenCalledOnce();
+    sfx.unlock();
+    const fresh = browser.media[1]!;
+    if (completion === "resolve") oldMedia.playback.resolve();
+    else oldMedia.playback.reject(new Error("late dispose abort"));
+    await finishMusicPromises();
+    expect(sfx.ambientActive).toBe(false);
+    expect(oldGain.gain.linearRampToValueAtTime).not.toHaveBeenCalled();
+    sfx.unlock();
+    expect(fresh.play).toHaveBeenCalledOnce();
+    fresh.playback.resolve();
+    await finishMusicPromises();
+    expect(sfx.ambientActive).toBe(true);
+    sfx.dispose();
+    sfx.dispose();
+    expect(fresh.load).toHaveBeenCalledOnce();
+  });
+
+  it("stays silent without DOM media support and only decodes via an explicitly supplied fetcher", async () => {
+    const browser = installMusicBrowser("running", false);
+    const sfx = createSfx();
+    sfx.unlock();
+    const ctx = browser.contexts[0]!;
+    expect(browser.fetch).not.toHaveBeenCalled();
+    expect(ctx.decodeAudioData).not.toHaveBeenCalled();
+    const missing = vi.fn(() => Promise.resolve({ ok: false, arrayBuffer: vi.fn() }));
+    sfx.startAmbient(missing);
+    await finishMusicPromises();
+    expect(ctx.decodeAudioData).not.toHaveBeenCalled();
+    const oversized = vi.fn(() => Promise.resolve({ ok: true, arrayBuffer: () => Promise.resolve(new ArrayBuffer(9 * 1024 * 1024)) }));
+    sfx.startAmbient(oversized);
+    await finishMusicPromises();
+    expect(ctx.decodeAudioData).not.toHaveBeenCalled();
+    const data = new ArrayBuffer(8);
+    const found = vi.fn(() => Promise.resolve({ ok: true, arrayBuffer: () => Promise.resolve(data) }));
+    sfx.startAmbient(found);
+    await finishMusicPromises();
+    expect(ctx.decodeAudioData).toHaveBeenCalledWith(data);
+    expect(sfx.ambientActive).toBe(true);
+    const source = ctx.createBufferSource.mock.results[0]!.value;
+    expect(source.loop).toBe(true);
+    expect(source.buffer).not.toBeNull();
+    sfx.dispose();
+    expect(source.buffer).toBeNull();
+    expect(source.stop).toHaveBeenCalledOnce();
+  });
+
+  it("aborts an explicit fetch and cannot attach its late decoded buffer to a new context", async () => {
+    const browser = installMusicBrowser("running", false);
+    const sfx = createSfx();
+    sfx.unlock();
+    const ctx = browser.contexts[0]!;
+    const decoding = pendingPromise<{ duration: number }>();
+    ctx.decodeAudioData.mockReturnValueOnce(decoding.promise);
+    const found = vi.fn((_url: string, _init?: { signal?: AbortSignal }) => Promise.resolve({
+      ok: true, arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)),
+    }));
+    sfx.startAmbient(found);
+    await finishMusicPromises();
+    const signal = found.mock.calls[0]![1]!.signal!;
+    sfx.dispose();
+    expect(signal.aborted).toBe(true);
+    sfx.unlock();
+    decoding.resolve({ duration: 180 });
+    await finishMusicPromises();
+    expect(ctx.createBufferSource).not.toHaveBeenCalled();
+    expect(browser.contexts[1]!.createBufferSource).not.toHaveBeenCalled();
     expect(sfx.ambientActive).toBe(false);
     sfx.dispose();
   });

@@ -183,8 +183,9 @@ export const SFX_WORST_VOICE_PEAK =
 // dist/ via express.static — so this absolute path resolves in BOTH dev
 // (:5173) and prod. A missing file is silent either way: prod answers a clean
 // 404 (the SPA fallback only handles extensionless paths — verified against
-// server/src/index.ts), dev answers the HTML fallback, which then fails
-// decodeAudioData — both paths are silent no-ops, zero console spam.
+// server/src/index.ts); an unavailable/unsupported media resource stays a
+// silent no-op. The browser streams this file rather than decoding the whole
+// three-minute stereo track into a roughly 60–66 MiB WebAudio buffer.
 export const SFX_AMBIENT_URL = "/audio/ambient.mp3";
 // Ambient loop level (absolute gain into master): 5% under the previous
 // 0.16 (owner request 2026-09-24) — still clearly behind the SFX, routed
@@ -469,15 +470,18 @@ export interface AmbientFetcher {
   (url: string, init?: { signal?: AbortSignal }): Promise<AmbientFetchResult>;
 }
 
-function defaultAmbientFetch(): AmbientFetcher | null {
-  try {
-    if (typeof fetch === "undefined") {
-      return null;
-    }
-    return fetch;
-  } catch {
-    return null;
-  }
+// Only the explicit fetcher seam uses AudioBuffer playback. Bound its input
+// and duration; a failed browser stream never switches to this memory-heavy
+// compatibility path. Ordinary browser playback never calls fetch/decode.
+const AMBIENT_BUFFER_MAX_BYTES = 8 * 1024 * 1024;
+const AMBIENT_BUFFER_MAX_SECONDS = 300;
+
+interface AmbientStream {
+  readonly media: HTMLAudioElement;
+  readonly source: MediaElementAudioSourceNode;
+  readonly gain: GainNode;
+  readonly onError: () => void;
+  playSequence: number;
 }
 
 interface ToneSpec {
@@ -552,10 +556,13 @@ export class SfxEngine {
   private chargeNextTick = 0;
   // Next progress-domain tick threshold for the tension creaks (see
   // setChargeProgress): reset on every chargeStart.
-  // Ambient loop state (owner's /audio/ambient.mp3 when present, silent
-  // otherwise): fetch-once flags, abort handle for teardown, live nodes.
+  // Browser music uses the media decoder's streaming buffers. The buffer
+  // nodes/abort are only for the explicit fetcher compatibility seam.
   private ambientStarting = false;
   private ambientStarted = false;
+  private ambientPaused = false;
+  private ambientGeneration = 0;
+  private ambientStream: AmbientStream | null = null;
   private ambientAbort: AbortController | null = null;
   private ambientNodes: { source: AudioBufferSourceNode; gain: GainNode } | null = null;
 
@@ -635,13 +642,11 @@ export class SfxEngine {
         // cleanly until the context actually runs (see play()).
       });
     }
-    if (this.ctx.state === "running") {
-      // First running gesture kicks off the ambient loop fetch (fire and
-      // forget — missing file is a silent no-op, see startAmbient).
-      this.startAmbient();
-      return true;
-    }
-    return false;
+    // play() must run in this gesture, before the resume promise settles:
+    // waiting for a running context would lose media autoplay permission on
+    // the first tap in browsers that resume WebAudio asynchronously.
+    this.startAmbient();
+    return this.ctx.state === "running";
   }
 
   public get running(): boolean {
@@ -853,25 +858,183 @@ export class SfxEngine {
     }
   }
 
-  // Ambient music loop (owner's file at SFX_AMBIENT_URL when present):
-  // fetch + decode once after the first running unlock, loop with a fade-in,
-  // routed through master so mute kills it too. Missing file (404) or a
-  // decode failure is a silent no-op — zero console spam. Always-on once
-  // started (simplest honest behavior; documented). The fetcher is injectable
-  // for unit tests (404 fake -> false, 200 fake -> attached-or-false without
-  // a context). Returns true once the loop is live.
+  // Call directly inside a gesture: media.play() is synchronous even though
+  // its completion is asynchronous. Native loop + WebAudio gain retain the
+  // former track, level, fade and master mute without a full PCM allocation.
+  // A rejected play/404 is silent and retries on a subsequent gesture.
   public startAmbient(fetchImpl?: AmbientFetcher): boolean {
+    if (this.ambientPaused) {
+      return false;
+    }
     if (this.ambientStarted || this.ambientStarting) {
       return this.ambientStarted;
     }
-    if (this.ctx === null || this.master === null) {
+    const ctx = this.ctx;
+    const master = this.master;
+    if (ctx === null || master === null || ctx.state === "closed") {
       return false;
     }
-    const impl = fetchImpl ?? defaultAmbientFetch();
-    if (impl === null) {
+    if (this.ambientNodes !== null) {
+      this.fadeAmbient(this.ambientNodes.gain, ctx);
+      this.ambientStarted = true;
+      return true;
+    }
+    if (fetchImpl !== undefined) {
+      return this.startBufferedAmbient(fetchImpl, ctx, master);
+    }
+    if (typeof document === "undefined" || typeof ctx.createMediaElementSource !== "function") {
       return false;
     }
+    let stream = this.ambientStream;
+    if (stream === null) {
+      let media: HTMLAudioElement;
+      try {
+        media = document.createElement("audio");
+      } catch {
+        return false;
+      }
+      let source: MediaElementAudioSourceNode | null = null;
+      let gain: GainNode | null = null;
+      try {
+        media.preload = "none";
+        media.loop = true;
+        source = ctx.createMediaElementSource(media);
+        gain = ctx.createGain();
+        gain.gain.value = 0;
+        source.connect(gain);
+        gain.connect(master);
+        const onError = (): void => {
+          if (this.ambientStream?.media === media) {
+            this.clearAmbientStream();
+          }
+        };
+        stream = { media, source, gain, onError, playSequence: 0 };
+        this.ambientStream = stream;
+        media.addEventListener("error", onError);
+        media.src = resolveAmbientUrl();
+      } catch {
+        // No buffered fallback: preserve the phone memory budget when media
+        // graph setup fails. Partial resources are released too.
+        this.clearAmbientStream();
+        if (stream === null) {
+          try {
+            source?.disconnect();
+            gain?.disconnect();
+          } catch {
+            // Partial setup may already have disconnected itself.
+          }
+          this.releaseAmbientMedia(media);
+        }
+        return false;
+      }
+    }
+    this.playAmbientStream(stream, ctx);
+    return this.ambientStarted;
+  }
+
+  // Visibility hook: pause native decoding in the background and retain the
+  // cursor. A blocked automatic resume is retried by the next user gesture.
+  public setAmbientPaused(paused: boolean): void {
+    if (this.ambientPaused === paused) {
+      return;
+    }
+    this.ambientPaused = paused;
+    if (!paused) {
+      this.startAmbient();
+      return;
+    }
+    const stream = this.ambientStream;
+    if (stream !== null) {
+      stream.playSequence += 1;
+      stream.media.pause();
+    }
+    const gain = stream?.gain ?? this.ambientNodes?.gain;
+    if (gain !== undefined && this.ctx !== null) {
+      gain.gain.cancelScheduledValues(this.ctx.currentTime);
+      gain.gain.setValueAtTime(0, this.ctx.currentTime);
+    }
+    this.ambientStarting = false;
+    this.ambientStarted = false;
+    // Stop an explicitly injected pending fetch rather than letting it
+    // attach after the page has hidden.
+    this.ambientGeneration += 1;
+    this.ambientAbort?.abort();
+    this.ambientAbort = null;
+  }
+
+  private fadeAmbient(gain: GainNode, ctx: AudioContext): void {
+    const t0 = ctx.currentTime;
+    gain.gain.cancelScheduledValues(t0);
+    gain.gain.setValueAtTime(0, t0);
+    gain.gain.linearRampToValueAtTime(SFX_AMBIENT_GAIN, t0 + SFX_AMBIENT_FADE_S);
+  }
+
+  private playAmbientStream(stream: AmbientStream, ctx: AudioContext): void {
     this.ambientStarting = true;
+    const sequence = ++stream.playSequence;
+    const current = (): boolean =>
+      this.ctx === ctx && this.ambientStream === stream && stream.playSequence === sequence;
+    try {
+      // Never put this call behind an await, including ctx.resume().
+      const playing = stream.media.play();
+      void Promise.resolve(playing).then((): void => {
+        if (!current() || this.ambientPaused) {
+          return;
+        }
+        this.fadeAmbient(stream.gain, ctx);
+        this.ambientStarting = false;
+        this.ambientStarted = true;
+      }).catch((): void => {
+        if (current()) {
+          // Autoplay can block a visibility resume. Keep this element and
+          // its cursor so the next gesture resumes rather than restarts.
+          // Actual resource/404 errors use onError and release the stream.
+          this.ambientStarting = false;
+          this.ambientStarted = false;
+        }
+      });
+    } catch {
+      if (current()) {
+        this.ambientStarting = false;
+        this.ambientStarted = false;
+      }
+    }
+  }
+
+  private releaseAmbientMedia(media: HTMLAudioElement): void {
+    try {
+      media.pause();
+      media.removeAttribute("src");
+      // load() after removing src aborts pending media loads and releases
+      // the browser's decode/network buffers; it never selects an empty URL.
+      media.load();
+    } catch {
+      // Best-effort teardown for partial browser/shim support.
+    }
+  }
+
+  private clearAmbientStream(): void {
+    const stream = this.ambientStream;
+    this.ambientStream = null;
+    this.ambientStarting = false;
+    this.ambientStarted = false;
+    if (stream === null) {
+      return;
+    }
+    stream.playSequence += 1;
+    stream.media.removeEventListener("error", stream.onError);
+    this.releaseAmbientMedia(stream.media);
+    try {
+      stream.source.disconnect();
+      stream.gain.disconnect();
+    } catch {
+      // Already disconnected/closed — no live media remains.
+    }
+  }
+
+  private startBufferedAmbient(impl: AmbientFetcher, ctx: AudioContext, master: GainNode): boolean {
+    this.ambientStarting = true;
+    const generation = ++this.ambientGeneration;
     let abort: AbortController | null = null;
     try {
       abort = new AbortController();
@@ -880,51 +1043,34 @@ export class SfxEngine {
     }
     this.ambientAbort = abort;
     const signal = abort !== null ? abort.signal : undefined;
-    void impl(resolveAmbientUrl(), signal !== undefined ? { signal } : undefined)
-      .then((response) => {
-        if (!ambientAttachDecision(response.ok)) {
-          // No file dropped yet (clean 404): stay silent, allow a later
-          // retry (a fresh unlock after the owner adds the file).
+    const current = (): boolean => this.ctx === ctx && this.ambientGeneration === generation;
+    void (async (): Promise<void> => {
+      try {
+        const response = await impl(resolveAmbientUrl(), signal !== undefined ? { signal } : undefined);
+        if (!current() || !ambientAttachDecision(response.ok)) return;
+        const data = await response.arrayBuffer();
+        if (!current() || data.byteLength > AMBIENT_BUFFER_MAX_BYTES) return;
+        const buffer = await ctx.decodeAudioData(data);
+        if (!current() || buffer.duration > AMBIENT_BUFFER_MAX_SECONDS) return;
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.loop = true;
+        const gain = ctx.createGain();
+        this.fadeAmbient(gain, ctx);
+        source.connect(gain);
+        gain.connect(master);
+        source.start(ctx.currentTime);
+        this.ambientNodes = { source, gain };
+        this.ambientStarted = true;
+      } catch {
+        // Injected fetch/decode/network failures stay silent and retryable.
+      } finally {
+        if (current()) {
           this.ambientStarting = false;
-          return null;
+          this.ambientAbort = null;
         }
-        return response.arrayBuffer();
-      })
-      .then((data) => {
-        if (data === null || this.ctx === null || this.master === null) {
-          this.ambientStarting = false;
-          return;
-        }
-        void this.ctx
-          .decodeAudioData(data)
-          .then((buffer) => {
-            if (this.ctx === null || this.master === null) {
-              this.ambientStarting = false;
-              return;
-            }
-            const source = this.ctx.createBufferSource();
-            source.buffer = buffer;
-            source.loop = true;
-            const gain = this.ctx.createGain();
-            const t0 = this.ctx.currentTime;
-            gain.gain.setValueAtTime(0, t0);
-            gain.gain.linearRampToValueAtTime(SFX_AMBIENT_GAIN, t0 + SFX_AMBIENT_FADE_S);
-            source.connect(gain);
-            gain.connect(this.master);
-            source.start(t0);
-            this.ambientNodes = { source, gain };
-            this.ambientStarting = false;
-            this.ambientStarted = true;
-          })
-          .catch((): void => {
-            // Undecodable file: silent no-op, retry allowed later.
-            this.ambientStarting = false;
-          });
-      })
-      .catch((): void => {
-        // Fetch aborted at teardown or network failure: silent.
-        this.ambientStarting = false;
-      });
+      }
+    })();
     return false;
   }
 
@@ -948,7 +1094,12 @@ export class SfxEngine {
         // Already disconnected — safe to ignore.
       }
     }
-    // Ambient teardown: abort a pending fetch, fade-stop a live loop.
+    // Invalidate callbacks before aborting/closing: an old play/decode
+    // promise must never attach itself to a newly unlocked engine.
+    this.ambientGeneration += 1;
+    this.clearAmbientStream();
+    this.ambientPaused = false;
+    // The explicit fetcher seam owns its buffer until this teardown.
     const abort = this.ambientAbort;
     this.ambientAbort = null;
     if (abort !== null) {
@@ -964,10 +1115,8 @@ export class SfxEngine {
     this.ambientStarted = false;
     if (ambient !== null && this.ctx !== null) {
       try {
-        const t0 = this.ctx.currentTime;
-        ambient.gain.gain.cancelScheduledValues(t0);
-        ambient.gain.gain.setTargetAtTime(0, t0, 0.1);
-        ambient.source.stop(t0 + 0.4);
+        ambient.source.stop();
+        ambient.source.buffer = null;
       } catch {
         // Already stopped — safe to ignore.
       }

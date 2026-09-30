@@ -27,6 +27,25 @@ import {
 // Third-person follow camera (Q9-A confirmed 2026-09-11; distance 4m since
 // Stage 4d.2, charge zoom ~3.2m held until the actual shot).
 export const CAMERA_FOV = 75;
+// Stage 18: renderer budgets only; physics/server timesteps stay independent.
+export const PERF_MAX_PIXEL_RATIO = 1.5;
+export const PERF_BALANCED_PIXEL_RATIO = 1.25;
+export const PERF_LOW_PIXEL_RATIO = 1;
+export const PERF_REDUCED_SHADOW_SIZE = 512;
+export const PERF_SAMPLE_CAPACITY = 360;
+export const PERF_DIAGNOSTIC_INTERVAL_MS = 1000;
+export const PERF_STARTUP_GRACE_MS = 3000;
+export const PERF_DECISION_WINDOW_MS = 2000;
+export const PERF_OVERLOAD_RATIO = 1.28;
+export const PERF_BAD_WINDOWS = 3;
+export const PERF_RECOVERY_MS = 30000;
+export const PERF_PROBE_DURATION_MS = 4000;
+export const PERF_PROBE_SETTLE_MS = 500;
+export const PERF_MAX_PROBE_INTERVAL_MS = 120000;
+export const PERF_LONG_FRAME_MS = 50;
+export const PERF_VERY_LONG_FRAME_MS = 100;
+export const PERF_WARMUP_TIMEOUT_MS = 5000;
+export const PERF_PACING_TOLERANCE_MS = 1;
 export const CAMERA_FOLLOW_DISTANCE = 4;
 // Follow distance while fully charged (charge01 = 1): eased toward at
 // CAMERA_SMOOTH_RATE, held until the shot/cancel returns it to default.

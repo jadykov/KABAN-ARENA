@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import type { RenderQualityProfile } from "../perf";
 import { AdsManager, getShopfrontTransforms } from "../ads/AdsLoader";
 import { FOOTSTEP_MIN_SPEED01 } from "../audio/Sfx";
 import {
@@ -163,6 +164,8 @@ export type ArenaEvent =
   // SceneManager stays audio-agnostic; the engine-level cooldown keeps the
   // ~2-4 Hz hop cadence from ever machine-gunning.
   | { type: "footstep" };
+
+const EMPTY_ARENA_EVENTS: readonly ArenaEvent[] = Object.freeze([]);
 
 // Authoritative on-top level for the UP-snap: XZ footprint of one elevated
 // block plus the body-center Y the server derives on its top (topY +
@@ -461,6 +464,11 @@ export class SceneManager {
   private readonly environment = new SuburbanEnvironment();
   private roundProgress = 0;
   private skyProgress = ROUND_LIGHTING_DAY_SAMPLE_PROGRESS;
+  private appliedRoundProgress = Number.NaN;
+  private appliedLightingPhase = Number.NaN;
+  private appliedEveningAmount = Number.NaN;
+  private shadowMapSize = SHADOW_MAP_SIZE;
+  private ambientHz = 60;
   private sceneBackground: THREE.Color | null = null;
   private sceneFog: THREE.Fog | null = null;
   private ambientLight: THREE.AmbientLight | null = null;
@@ -506,13 +514,17 @@ export class SceneManager {
     chargeRemaining: 0,
   };
   private readonly pickups = new PowerUpPickups();
-  private readonly particles = new ParticlePool();
+  private particles = new ParticlePool();
+  private particlesDisposed = false;
   private readonly shake = new CameraShake();
   private readonly flash = new HitFlash();
   private readonly events: ArenaEvent[] = [];
 
   private physics: PhysicsWorld | null = null;
   private physicsFailed = false;
+  private physicsGeneration = 0;
+  private physicsInit: Promise<boolean> | null = null;
+  private disposed = false;
   private trampolineCooldown = 0;
 
   // R1 pre-join spectator: while spectating the local avatar stays hidden
@@ -670,15 +682,37 @@ export class SceneManager {
     this.camera = camera;
   }
 
+  public setQuality(profile: RenderQualityProfile): void {
+    this.shadowMapSize = Math.max(1, Math.min(SHADOW_MAP_SIZE, Math.round(profile.shadowMapSize)));
+    this.ambientHz = profile.ambientHz;
+    this.arena.setAmbientHz(this.ambientHz);
+    this.fireflies?.setAmbientHz(this.ambientHz);
+    const shadow = this.directionalLight?.shadow;
+    if (shadow === undefined || shadow.mapSize.x === this.shadowMapSize
+      && shadow.mapSize.y === this.shadowMapSize) return;
+    // WebGLShadowMap does not resize an existing render target itself. Drop
+    // both shadow targets once; the next normal shadow pass recreates them.
+    shadow.map?.dispose();
+    shadow.mapPass?.dispose();
+    shadow.map = null;
+    shadow.mapPass = null;
+    shadow.mapSize.set(this.shadowMapSize, this.shadowMapSize);
+    shadow.needsUpdate = true;
+  }
+
+  public async prepareTextures(renderer: Pick<THREE.WebGLRenderer, "initTexture">): Promise<void> {
+    await this.powerEffects?.prepareTextures(renderer);
+  }
+
   // Called with authoritative elapsed / total round time. Waiting and
   // countdown pass 0; the ended match keeps its final value until the next
   // round resets it. Mutates existing colors/materials only, with no frame
   // allocations or new lights.
   public setDayProgress(progress: number): void {
     this.roundProgress = Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0;
+    if (this.appliedRoundProgress === this.roundProgress) return;
+    this.appliedRoundProgress = this.built ? this.roundProgress : Number.NaN;
     const elapsed = this.roundProgress * ROUND_SECONDS;
-    this.arena.setFenceNightBlend(smooth01((elapsed - ROUND_LIGHTING_TRANSITION_START_S)
-      / (ROUND_LIGHTING_TRANSITION_END_S - ROUND_LIGHTING_TRANSITION_START_S)));
     let from = ROUND_DAY_LIGHTING;
     let to = ROUND_SUNSET_LIGHTING;
     let blend = smooth01((elapsed - ROUND_LIGHTING_TRANSITION_START_S)
@@ -708,21 +742,28 @@ export class SceneManager {
     } else {
       this.skyProgress = ROUND_LIGHTING_NIGHT_SAMPLE_PROGRESS;
     }
-    this.sceneBackground?.lerpColors(from.background, to.background, blend);
-    this.sceneFog?.color.lerpColors(from.fog, to.fog, blend);
-    if (this.skyMaterial !== null) {
-      (this.skyMaterial.uniforms.skyHorizon!.value as THREE.Color).lerpColors(from.skyHorizon, to.skyHorizon, blend);
-      (this.skyMaterial.uniforms.skyZenith!.value as THREE.Color).lerpColors(from.skyZenith, to.skyZenith, blend);
-    }
-    if (this.ambientLight !== null) {
-      this.ambientLight.color.lerpColors(from.ambient, to.ambient, blend);
-      this.ambientLight.intensity = from.ambientIntensity
-        + (to.ambientIntensity - from.ambientIntensity) * blend;
-    }
-    if (this.directionalLight !== null) {
-      this.directionalLight.color.lerpColors(from.key, to.key, blend);
-      this.directionalLight.intensity = from.keyIntensity
-        + (to.keyIntensity - from.keyIntensity) * blend;
+    const lightingPhase = Math.max(ROUND_LIGHTING_TRANSITION_START_S,
+      Math.min(ROUND_LIGHTING_TRANSITION_END_S, elapsed));
+    if (lightingPhase !== this.appliedLightingPhase) {
+      this.appliedLightingPhase = this.built ? lightingPhase : Number.NaN;
+      this.arena.setFenceNightBlend(smooth01((elapsed - ROUND_LIGHTING_TRANSITION_START_S)
+        / (ROUND_LIGHTING_TRANSITION_END_S - ROUND_LIGHTING_TRANSITION_START_S)));
+      this.sceneBackground?.lerpColors(from.background, to.background, blend);
+      this.sceneFog?.color.lerpColors(from.fog, to.fog, blend);
+      if (this.skyMaterial !== null) {
+        (this.skyMaterial.uniforms.skyHorizon!.value as THREE.Color).lerpColors(from.skyHorizon, to.skyHorizon, blend);
+        (this.skyMaterial.uniforms.skyZenith!.value as THREE.Color).lerpColors(from.skyZenith, to.skyZenith, blend);
+      }
+      if (this.ambientLight !== null) {
+        this.ambientLight.color.lerpColors(from.ambient, to.ambient, blend);
+        this.ambientLight.intensity = from.ambientIntensity
+          + (to.ambientIntensity - from.ambientIntensity) * blend;
+      }
+      if (this.directionalLight !== null) {
+        this.directionalLight.color.lerpColors(from.key, to.key, blend);
+        this.directionalLight.intensity = from.keyIntensity
+          + (to.keyIntensity - from.keyIntensity) * blend;
+      }
     }
     const sunArc = SUN_ORBIT_START + elapsed / SKY_ORBIT_HALF_PERIOD_S;
     const sunX = skyArcX(sunArc);
@@ -766,10 +807,14 @@ export class SceneManager {
       this.clouds.visible = fade > 0;
     }
     const eveningLights = eveningLightsAt(this.roundProgress);
-    this.ads.setPorchLighting(eveningLights);
-    this.arena.setEveningLighting(eveningLights);
-    this.environment.setEveningLighting(eveningLights);
-    this.fireflies?.setVisibility(eveningLights);
+    if (eveningLights !== this.appliedEveningAmount) {
+      this.appliedEveningAmount = this.built ? eveningLights : Number.NaN;
+      this.ads.setPorchLighting(eveningLights);
+      this.arena.setEveningLighting(eveningLights);
+      this.environment.setEveningLighting(eveningLights);
+      this.fireflies?.setVisibility(eveningLights);
+      this.fireflies?.update(0, this.camera);
+    }
     const stars = smooth01((this.skyProgress - 0.66) / 0.3);
     if (this.starMaterial !== null) this.starMaterial.opacity = 0.9 * stars;
     for (let i = 0; i < this.nebulaMaterials.length; i += 1) {
@@ -783,6 +828,7 @@ export class SceneManager {
       return;
     }
     this.built = true;
+    this.disposed = false;
 
     this.sceneBackground = new THREE.Color(SKY_DAWN_BG);
     this.sceneFog = new THREE.Fog(SKY_DAWN_FOG, 30, 85);
@@ -799,7 +845,7 @@ export class SceneManager {
     const directional = new THREE.DirectionalLight(SCENE_WARM_LIGHT, SCENE_DIRECTIONAL_INTENSITY);
     directional.position.set(5, 10, 5);
     directional.castShadow = true;
-    directional.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+    directional.shadow.mapSize.set(this.shadowMapSize, this.shadowMapSize);
     directional.shadow.normalBias = 0.025;
     directional.shadow.camera.left = -ARENA_HALF_SIZE;
     directional.shadow.camera.right = ARENA_HALF_SIZE;
@@ -853,9 +899,15 @@ export class SceneManager {
     this.ballsPool = new BallsPool(this.scene);
     this.superCore = new SuperCore(this.scene);
     this.fireflies = new Fireflies(this.scene);
+    this.fireflies.setAmbientHz(this.ambientHz);
     this.fireflies.setVisibility(eveningLightsAt(this.roundProgress));
+    this.fireflies.update(0, this.camera);
 
     this.scene.add(this.pickups.object);
+    if (this.particlesDisposed) {
+      this.particles = new ParticlePool();
+      this.particlesDisposed = false;
+    }
     this.scene.add(this.particles.object);
 
     this.updateCameraTransform(0);
@@ -863,20 +915,36 @@ export class SceneManager {
 
   // Async Rapier boot (WASM init). Idempotent; on failure the scene keeps
   // running on the legacy kinematic path and reports false.
-  public async initPhysics(): Promise<boolean> {
+  public initPhysics(): Promise<boolean> {
+    if (this.disposed) return Promise.resolve(false);
     if (this.physics !== null) {
-      return true;
+      return Promise.resolve(true);
     }
     if (this.physicsFailed) {
-      return false;
+      return Promise.resolve(false);
     }
+    if (this.physicsInit !== null) return this.physicsInit;
+    const pending = this.createPhysics(this.physicsGeneration).finally(() => {
+      if (this.physicsInit === pending) this.physicsInit = null;
+    });
+    this.physicsInit = pending;
+    return pending;
+  }
+
+  private async createPhysics(generation: number): Promise<boolean> {
+    let world: PhysicsWorld | null = null;
     try {
-      const world = await PhysicsWorld.create({ x: 0, y: 1.1, z: 0 });
+      world = await PhysicsWorld.create({ x: 0, y: 1.1, z: 0 });
+      if (this.disposed || generation !== this.physicsGeneration) {
+        world.dispose();
+        return false;
+      }
       this.arena.buildColliders(world);
       this.physicsReady(world);
       return true;
     } catch {
-      this.physicsFailed = true;
+      world?.dispose();
+      if (!this.disposed && generation === this.physicsGeneration) this.physicsFailed = true;
       return false;
     }
   }
@@ -1449,19 +1517,19 @@ export class SceneManager {
     return false;
   }
 
-  public drainEvents(): ArenaEvent[] {
-    return this.events.splice(0, this.events.length);
+  public drainEvents(): readonly ArenaEvent[] {
+    return this.events.length === 0 ? EMPTY_ARENA_EVENTS : this.events.splice(0, this.events.length);
   }
 
   public showBonusPickup(kind: PowerEffectKind): void {
     this.powerEffects?.showPickup(kind);
   }
 
-  public getAvatarPosition(): THREE.Vector3 {
+  public getAvatarPosition(target?: THREE.Vector3): THREE.Vector3 {
     if (this.avatar === null) {
-      return new THREE.Vector3();
+      return target?.set(0, 0, 0) ?? new THREE.Vector3();
     }
-    return this.avatar.position.clone();
+    return target?.copy(this.avatar.position) ?? this.avatar.position.clone();
   }
 
   // Hop reset (respawn/teleport/spectate/reset): exact identity transform +
@@ -2143,6 +2211,10 @@ export class SceneManager {
   }
 
   public dispose(): void {
+    this.disposed = true;
+    this.physicsGeneration += 1;
+    this.physicsInit = null;
+    this.physicsFailed = false;
     if (this.avatarVisuals !== null) {
       // Detaches ball + face groups from the avatar and disposes the
       // per-handle ball material (shared geos stay module-alive).
@@ -2177,6 +2249,7 @@ export class SceneManager {
     this.scene.remove(this.particles.object);
     this.pickups.dispose();
     this.particles.dispose();
+    this.particlesDisposed = true;
     this.arena.dispose(this.scene);
     this.environment.dispose(this.scene);
     this.ads.dispose(this.scene);
@@ -2200,6 +2273,7 @@ export class SceneManager {
     this.sceneBackground = null;
     this.sceneFog = null;
     this.ambientLight = null;
+    this.directionalLight?.shadow.dispose();
     this.directionalLight = null;
     this.skyMaterial = null;
     this.sunDisc = null;
@@ -2210,6 +2284,9 @@ export class SceneManager {
     this.nebulaBaseOpacities.length = 0;
     this.roundProgress = 0;
     this.skyProgress = ROUND_LIGHTING_DAY_SAMPLE_PROGRESS;
+    this.appliedRoundProgress = Number.NaN;
+    this.appliedLightingPhase = Number.NaN;
+    this.appliedEveningAmount = Number.NaN;
     this.built = false;
   }
 

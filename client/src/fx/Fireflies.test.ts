@@ -35,6 +35,44 @@ function instanceHex(mesh: THREE.InstancedMesh, index: number): number {
 }
 
 describe("Fireflies star swarm (visual round: tiny 4-point twinkles, starry colors)", () => {
+  it("reduces ambient uploads without changing drift time and seeds every new night immediately", () => {
+    const full = createSwarm();
+    const reduced = createSwarm();
+    reduced.swarm.setAmbientHz(15);
+    try {
+      for (const setup of [full, reduced]) {
+        setup.swarm.setVisibility(1);
+        setup.swarm.update(0, setup.camera);
+      }
+      const initialVersion = reduced.swarm.object.instanceMatrix.version;
+      const initialMatrix = Array.from(reduced.swarm.object.instanceMatrix.array);
+      for (let frame = 0; frame < 60; frame += 1) {
+        full.swarm.update(1 / 60, full.camera);
+        reduced.swarm.update(1 / 60, reduced.camera);
+      }
+      expect(reduced.swarm.object.instanceMatrix.version - initialVersion).toBe(15);
+      expect(Array.from(reduced.swarm.object.instanceMatrix.array))
+        .toEqual(Array.from(full.swarm.object.instanceMatrix.array));
+      reduced.swarm.setVisibility(0);
+      const hiddenVersion = reduced.swarm.object.instanceMatrix.version;
+      reduced.swarm.update(20, reduced.camera);
+      expect(reduced.swarm.object.instanceMatrix.version).toBe(hiddenVersion);
+      reduced.swarm.setVisibility(1);
+      reduced.swarm.update(0, reduced.camera);
+      expect(Array.from(reduced.swarm.object.instanceMatrix.array)).toEqual(initialMatrix);
+      expect(reduced.swarm.object.instanceMatrix.version).toBe(hiddenVersion + 1);
+      reduced.swarm.update(1 / 60, reduced.camera);
+      expect(reduced.swarm.object.instanceMatrix.version).toBe(hiddenVersion + 1);
+      reduced.swarm.setAmbientHz(60);
+      reduced.swarm.update(1 / 60, reduced.camera);
+      expect(reduced.swarm.object.instanceMatrix.version).toBe(hiddenVersion + 2);
+      reduced.swarm.update(Number.NaN, reduced.camera);
+      expect(reduced.swarm.object.instanceMatrix.version).toBe(hiddenVersion + 2);
+    } finally {
+      full.swarm.dispose();
+      reduced.swarm.dispose();
+    }
+  });
   it("holds 6 quads in ONE InstancedMesh and disposes cleanly", () => {
     expect(FIREFLY_COUNT).toBe(6);
     const { scene, swarm } = createSwarm();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_PIXEL_RATIO, getClampedPixelRatio } from "./perf";
+import { MAX_PIXEL_RATIO, getClampedPixelRatio, QUALITY_PROFILES } from "./perf";
 
 describe("client smoke", () => {
   it("boots", () => {
@@ -10,5 +10,7 @@ describe("client smoke", () => {
     expect(MAX_PIXEL_RATIO).toBe(1.5);
     expect(getClampedPixelRatio(1)).toBe(1);
     expect(getClampedPixelRatio(3)).toBe(1.5);
+    expect(getClampedPixelRatio(3, QUALITY_PROFILES.balanced)).toBe(1.25);
+    expect(getClampedPixelRatio(3, QUALITY_PROFILES.low)).toBe(1);
   });
 });

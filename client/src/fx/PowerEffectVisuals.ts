@@ -24,6 +24,17 @@ let shieldIconTexture: THREE.Texture | null = null;
 let speedIconTexture: THREE.Texture | null = null;
 let chargeIconTexture: THREE.Texture | null = null;
 let iconUsers = 0;
+let iconGeneration = 0;
+let iconsReady: Promise<void> = Promise.resolve();
+let iconLoads: ReadonlyArray<{ texture: THREE.Texture; ready: Promise<void> }> = [];
+
+function loadIcon(loader: THREE.TextureLoader, url: string): { texture: THREE.Texture; ready: Promise<void> } {
+  let texture: THREE.Texture;
+  const ready = new Promise<void>((resolve) => {
+    texture = loader.load(url, () => resolve(), undefined, () => resolve());
+  });
+  return { texture: texture!, ready };
+}
 
 function acquireIcons(): void {
   iconUsers += 1;
@@ -34,11 +45,17 @@ function acquireIcons(): void {
     shieldIconTexture = new THREE.Texture();
     speedIconTexture = new THREE.Texture();
     chargeIconTexture = new THREE.Texture();
+    iconsReady = Promise.resolve();
   } else {
     const loader = new THREE.TextureLoader();
-    shieldIconTexture = loader.load("/icons/bonus-shield.svg");
-    speedIconTexture = loader.load("/icons/bonus-speed.svg");
-    chargeIconTexture = loader.load("/icons/bonus-charge.svg");
+    const shield = loadIcon(loader, "/icons/bonus-shield.svg");
+    const speed = loadIcon(loader, "/icons/bonus-speed.svg");
+    const charge = loadIcon(loader, "/icons/bonus-charge.svg");
+    shieldIconTexture = shield.texture;
+    speedIconTexture = speed.texture;
+    chargeIconTexture = charge.texture;
+    iconLoads = [shield, speed, charge];
+    iconsReady = Promise.all([shield.ready, speed.ready, charge.ready]).then(() => undefined);
   }
   shieldIconTexture.colorSpace = THREE.SRGBColorSpace;
   speedIconTexture.colorSpace = THREE.SRGBColorSpace;
@@ -48,12 +65,15 @@ function acquireIcons(): void {
 function releaseIcons(): void {
   iconUsers = Math.max(0, iconUsers - 1);
   if (iconUsers !== 0) return;
+  iconGeneration += 1;
   shieldIconTexture?.dispose();
   speedIconTexture?.dispose();
   chargeIconTexture?.dispose();
   shieldIconTexture = null;
   speedIconTexture = null;
   chargeIconTexture = null;
+  iconsReady = Promise.resolve();
+  iconLoads = [];
 }
 
 // Two quiet, curved ribbons share one mesh. Their width tapers at both ends;
@@ -115,6 +135,7 @@ export class PowerEffectVisuals {
   private badgeLeft = 0;
   private phase = 0;
   private disposed = false;
+  private stopPreparing: (() => void) | null = null;
 
   public constructor(parent: THREE.Object3D) {
     this.parent = parent;
@@ -210,9 +231,40 @@ export class PowerEffectVisuals {
     const material = this.badge.material as THREE.SpriteMaterial;
     material.map = kind === "shield" ? shieldIconTexture
       : kind === "speed" ? speedIconTexture : chargeIconTexture;
-    material.needsUpdate = true;
     this.badgeLeft = Math.max(0, Math.min(BADGE_SECONDS, durationSeconds));
     this.badge.visible = this.badgeLeft > 0;
+  }
+
+  public async prepareTextures(renderer: Pick<THREE.WebGLRenderer, "initTexture">): Promise<void> {
+    if (this.disposed) return;
+    const ready = iconsReady;
+    const generation = iconGeneration;
+    const upload = (texture: THREE.Texture): void => {
+      if (this.disposed || generation !== iconGeneration) return;
+      if (texture.image === undefined || texture.image === null) return;
+      try {
+        renderer.initTexture(texture);
+      } catch {
+        // Preparation is optional: normal rendering remains the fallback.
+      }
+    };
+    // Prepare each loaded asset independently: one stalled SVG must not
+    // prevent the other badges from reaching the GPU before their pickup.
+    for (const load of iconLoads) void load.ready.then(() => upload(load.texture));
+    this.stopPreparing?.();
+    await new Promise<void>((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timeout);
+        if (this.stopPreparing === finish) this.stopPreparing = null;
+        resolve();
+      };
+      // Bound only the wait for SVG network loading, never shader compilation.
+      // A late success still uploads while this instance is alive, so the
+      // first pickup does not initiate its own texture upload.
+      const timeout = setTimeout(finish, 1500);
+      this.stopPreparing = finish;
+      void ready.then(finish);
+    });
   }
 
   public update(deltaSeconds: number): void {
@@ -245,6 +297,7 @@ export class PowerEffectVisuals {
   public dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.stopPreparing?.();
     this.parent.remove(this.shield, this.runTrail, this.chargeOrb, this.badge);
     this.shield.geometry.dispose();
     (this.shield.material as THREE.Material).dispose();

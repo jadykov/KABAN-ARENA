@@ -1,6 +1,8 @@
 import * as THREE from "three";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AdsManager } from "../ads/AdsLoader";
+import { ArenaBuilder } from "../arena/Arena";
+import { PhysicsWorld } from "../physics/World";
 import {
   AIRBORNE_VY_THRESHOLD,
   ARENA_HALF_SIZE,
@@ -69,6 +71,7 @@ import {
   FIREFLY_WANDER,
 } from "../fx/Fireflies";
 import { SceneManager } from "./SceneManager";
+import type { RenderQualityProfile } from "../perf";
 
 const FRAME = 1 / 60;
 const NO_MOVE = { x: 0, y: 0 };
@@ -127,6 +130,140 @@ afterEach(() => {
   }
 });
 
+describe("SceneManager async physics lifecycle", () => {
+  function deferredWorld(): { promise: Promise<PhysicsWorld>; resolve(world: PhysicsWorld): void;
+    reject(error: unknown): void } {
+    let resolve!: (world: PhysicsWorld) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<PhysicsWorld>((done, fail) => { resolve = done; reject = fail; });
+    return { promise, resolve, reject };
+  }
+
+  function buildScene(): SceneManager {
+    const manager = new SceneManager(new THREE.Scene(), new THREE.PerspectiveCamera());
+    manager.build();
+    managers.push(manager);
+    return manager;
+  }
+
+  it("shares pending initialization through reset and releases a world completed after disposal", async () => {
+    const world = await PhysicsWorld.create({ x: 0, y: 1.1, z: 0 });
+    const deferred = deferredWorld();
+    const create = vi.spyOn(PhysicsWorld, "create").mockReturnValue(deferred.promise);
+    const colliders = vi.spyOn(ArenaBuilder.prototype, "buildColliders");
+    const worldDispose = vi.spyOn(world, "dispose");
+    const manager = buildScene();
+    try {
+      const pending = manager.initPhysics();
+      expect(manager.initPhysics()).toBe(pending);
+      manager.reset();
+      expect(manager.initPhysics()).toBe(pending);
+      expect(create).toHaveBeenCalledOnce();
+      manager.dispose();
+      expect(await manager.initPhysics()).toBe(false);
+      deferred.resolve(world);
+      expect(await pending).toBe(false);
+      expect(manager.isPhysicsReady).toBe(false);
+      expect(colliders).not.toHaveBeenCalled();
+      expect(worldDispose).toHaveBeenCalledOnce();
+    } finally {
+      create.mockRestore();
+      colliders.mockRestore();
+      world.dispose();
+    }
+  });
+
+  it.each(["old-first", "new-first"] as const)("isolates rebuilt physics from an older request completing %s", async (order) => {
+    const oldWorld = await PhysicsWorld.create({ x: 0, y: 1.1, z: 0 });
+    const newWorld = await PhysicsWorld.create({ x: 0, y: 1.1, z: 0 });
+    const oldRequest = deferredWorld();
+    const newRequest = deferredWorld();
+    const create = vi.spyOn(PhysicsWorld, "create")
+      .mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(newRequest.promise);
+    const colliders = vi.spyOn(ArenaBuilder.prototype, "buildColliders");
+    const oldDispose = vi.spyOn(oldWorld, "dispose");
+    const newDispose = vi.spyOn(newWorld, "dispose");
+    const manager = buildScene();
+    try {
+      const oldPending = manager.initPhysics();
+      manager.dispose();
+      manager.build();
+      const newPending = manager.initPhysics();
+      expect(newPending).not.toBe(oldPending);
+      expect(create).toHaveBeenCalledTimes(2);
+      if (order === "old-first") {
+        oldRequest.resolve(oldWorld);
+        expect(await oldPending).toBe(false);
+        expect(manager.initPhysics()).toBe(newPending);
+        newRequest.resolve(newWorld);
+        expect(await newPending).toBe(true);
+      } else {
+        newRequest.resolve(newWorld);
+        expect(await newPending).toBe(true);
+        oldRequest.resolve(oldWorld);
+        expect(await oldPending).toBe(false);
+      }
+      expect(manager.isPhysicsReady).toBe(true);
+      expect(colliders).toHaveBeenCalledOnce();
+      expect(colliders).toHaveBeenCalledWith(newWorld);
+      expect(oldDispose).toHaveBeenCalledOnce();
+      expect(newDispose).not.toHaveBeenCalled();
+      manager.dispose();
+      expect(newDispose).toHaveBeenCalledOnce();
+    } finally {
+      create.mockRestore();
+      colliders.mockRestore();
+      oldWorld.dispose();
+      newWorld.dispose();
+    }
+  });
+
+  it("does not let an old failure poison a rebuilt pending initialization", async () => {
+    const world = await PhysicsWorld.create({ x: 0, y: 1.1, z: 0 });
+    const oldRequest = deferredWorld();
+    const newRequest = deferredWorld();
+    const create = vi.spyOn(PhysicsWorld, "create")
+      .mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(newRequest.promise);
+    const manager = buildScene();
+    try {
+      const oldPending = manager.initPhysics();
+      manager.dispose();
+      manager.build();
+      const newPending = manager.initPhysics();
+      oldRequest.reject(new Error("old WASM request failed"));
+      expect(await oldPending).toBe(false);
+      expect(manager.initPhysics()).toBe(newPending);
+      newRequest.resolve(world);
+      expect(await newPending).toBe(true);
+      expect(manager.isPhysicsReady).toBe(true);
+    } finally {
+      create.mockRestore();
+      manager.dispose();
+      world.dispose();
+    }
+  });
+
+  it("releases a created world if collider initialization fails", async () => {
+    const world = await PhysicsWorld.create({ x: 0, y: 1.1, z: 0 });
+    const create = vi.spyOn(PhysicsWorld, "create").mockResolvedValue(world);
+    const colliders = vi.spyOn(ArenaBuilder.prototype, "buildColliders")
+      .mockImplementation(() => { throw new Error("collider initialization failed"); });
+    const worldDispose = vi.spyOn(world, "dispose");
+    const manager = buildScene();
+    try {
+      expect(await manager.initPhysics()).toBe(false);
+      expect(manager.isPhysicsReady).toBe(false);
+      expect(worldDispose).toHaveBeenCalledOnce();
+      expect(await manager.initPhysics()).toBe(false);
+      expect(create).toHaveBeenCalledOnce();
+    } finally {
+      create.mockRestore();
+      colliders.mockRestore();
+      world.dispose();
+    }
+  });
+});
+
 describe("SceneManager camera clamp + wall fade", () => {
   it("clamps the follow camera within HALF+MARGIN", async () => {
     const manager = await createManager();
@@ -172,6 +309,94 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
     managers.push(manager);
     return { manager, scene, camera };
   }
+
+  it("keeps late reduced-quality builds lit, replaces shadow targets once and retains important buffs", () => {
+    const low: RenderQualityProfile = {
+      level: "low", maxPixelRatio: 1, shadowMapSize: 512, ambientHz: 15, targetFps: 30,
+    };
+    const high: RenderQualityProfile = {
+      level: "high", maxPixelRatio: 1.5, shadowMapSize: 1024, ambientHz: 60, targetFps: 60,
+    };
+    const scene = new THREE.Scene();
+    const manager = new SceneManager(scene, new THREE.PerspectiveCamera());
+    managers.push(manager);
+    manager.setQuality(low);
+    manager.setDayProgress(150 / 180);
+    manager.build();
+    expectLightingClose(readLightingChannels(scene), originalLightingAt(167.5));
+    const key = scene.children.find((child): child is THREE.DirectionalLight => child instanceof THREE.DirectionalLight)!;
+    expect(key.castShadow).toBe(true);
+    expect(key.shadow.mapSize.toArray()).toEqual([512, 512]);
+    const swarm = scene.getObjectByName("fireflies") as THREE.InstancedMesh;
+    expect(swarm.visible).toBe(true);
+    expect(swarm.instanceMatrix.version).toBeGreaterThan(0);
+    const map = new THREE.WebGLRenderTarget(512, 512);
+    const mapPass = new THREE.WebGLRenderTarget(512, 512);
+    key.shadow.map = map;
+    key.shadow.mapPass = mapPass;
+    const mapDispose = vi.spyOn(map, "dispose");
+    const mapPassDispose = vi.spyOn(mapPass, "dispose");
+    manager.setQuality({ ...low, targetFps: 60 });
+    expect(mapDispose).not.toHaveBeenCalled();
+    manager.setQuality(high);
+    manager.setQuality(high);
+    expect(mapDispose).toHaveBeenCalledOnce();
+    expect(mapPassDispose).toHaveBeenCalledOnce();
+    expect(key.shadow.map).toBe(null);
+    expect(key.shadow.mapPass).toBe(null);
+    expect(key.shadow.mapSize.toArray()).toEqual([1024, 1024]);
+    expect(key.shadow.needsUpdate).toBe(true);
+    expect(scene.children.filter((child) => child instanceof THREE.Light)).toHaveLength(2);
+    manager.syncPowerUps({
+      sessionId: "self", nick: "Self", x: 0, y: 1.1, z: 0, rotY: 0,
+      hp: 100, score: 0, alive: true, isBot: false, ready: true, spectator: false,
+      superBuff: false, reloadUntil: 0, shieldHp: 25, shieldUntil: 11_000,
+      speedUntil: 11_000, chargeUntil: 11_000, pickupKind: "", pickupAt: 0, pickupSeq: 0,
+    }, 1000, []);
+    manager.showBonusPickup("charge");
+    manager.setQuality(low);
+    expect(scene.getObjectByName("bonus-shield")?.visible).toBe(true);
+    expect(scene.getObjectByName("bonus-charge-orb")?.visible).toBe(true);
+    expect(scene.getObjectByName("bonus-badge")?.visible).toBe(true);
+    const finalMap = new THREE.WebGLRenderTarget(512, 512);
+    key.shadow.map = finalMap;
+    const finalMapDispose = vi.spyOn(finalMap, "dispose");
+    manager.dispose();
+    expect(finalMapDispose).toHaveBeenCalledOnce();
+    manager.build();
+    expectLightingClose(readLightingChannels(scene), originalLightingAt(20));
+    expect(scene.getObjectByName("fireflies")?.visible).toBe(false);
+    const rebuiltKey = scene.children.find((child): child is THREE.DirectionalLight => child instanceof THREE.DirectionalLight)!;
+    expect(rebuiltKey.shadow.mapSize.x).toBe(512);
+    manager.spawnBallHitBurst(0, 1, 0, false);
+    expect(manager.getAliveParticleCount()).toBeGreaterThan(0);
+  });
+
+  it("skips repeated lighting writes while sun and moon continue along their round orbit", () => {
+    const scene = new THREE.Scene();
+    const manager = new SceneManager(scene, new THREE.PerspectiveCamera());
+    manager.build();
+    managers.push(manager);
+    const background = vi.spyOn(scene.background as THREE.Color, "lerpColors");
+    const sun = scene.getObjectByName("sun") as THREE.Mesh;
+    const moon = scene.getObjectByName("moon") as THREE.Mesh;
+    const dawnSun = sun.position.clone();
+    manager.setDayProgress(60 / 180);
+    expect(background).not.toHaveBeenCalled();
+    expect(sun.position.equals(dawnSun)).toBe(false);
+    manager.setDayProgress(112.5 / 180);
+    expect(background).toHaveBeenCalledOnce();
+    manager.setDayProgress(112.5 / 180);
+    expect(background).toHaveBeenCalledOnce();
+    manager.setDayProgress(120 / 180);
+    const earlyMoon = moon.position.clone();
+    manager.setDayProgress(150 / 180);
+    expect(background).toHaveBeenCalledTimes(2);
+    expect(moon.position.equals(earlyMoon)).toBe(false);
+    manager.setDayProgress(0);
+    expect(background).toHaveBeenCalledTimes(3);
+    expectLightingClose(readLightingChannels(scene), originalLightingAt(20));
+  });
 
   it("starts with the former 2:40 look and one shadow key plus one ambient fill", async () => {
     const { scene } = await createManagerWithScene();

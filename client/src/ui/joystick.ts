@@ -39,6 +39,7 @@ export interface JoystickOptions {
 export interface JoystickHandle {
   element: HTMLDivElement;
   getVector(): MoveVector;
+  reset(): void;
   destroy(): void;
 }
 
@@ -139,6 +140,9 @@ export function createJoystick(
     element: base,
     getVector(): MoveVector {
       return { ...vector };
+    },
+    reset(): void {
+      if (!destroyed) release();
     },
     destroy(): void {
       if (destroyed) {

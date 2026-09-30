@@ -23,7 +23,7 @@ import {
 } from "../fx/AvatarVisuals";
 import { HitFlash } from "../fx/CameraShake";
 import { BADGE_SECONDS, PowerEffectVisuals, type PowerEffectKind } from "../fx/PowerEffectVisuals";
-import { RemoteTrack, type RemoteTarget } from "./interpolation";
+import { RemoteTrack } from "./interpolation";
 import { paletteForSession, type NetPlayerSnapshot } from "./protocol";
 import { ACCENT_HIT_FLASH, NEUTRAL_WHITE, NEUTRAL_WHITE_CSS } from "../palette";
 
@@ -95,6 +95,7 @@ interface RemoteEntry {
   // edge fires the death burst exactly once. First sighting of an
   // already-dead remote (late join, respawn window) never bursts.
   wasAlive: boolean;
+  seenGeneration: number;
 }
 
 // Damping rate (1/s) for the remote vertical-speed estimate.
@@ -108,6 +109,7 @@ export class RemoteAvatars {
   private readonly templateGeometry = new THREE.CapsuleGeometry(0.5, 1.0, 6, 12);
   private readonly entries = new Map<string, RemoteEntry>();
   private readonly pendingPickups = new Map<string, { kind: PowerEffectKind; at: number }>();
+  private syncGeneration = 0;
 
   public constructor(scene: THREE.Scene, onRemoteDeath: RemoteDeathHandler | null = null) {
     this.scene = scene;
@@ -128,7 +130,7 @@ export class RemoteAvatars {
     deltaSeconds: number,
     serverNow: number = Date.now(),
   ): void {
-    const seen = new Set<string>();
+    const generation = ++this.syncGeneration;
     for (const snapshot of snapshots) {
       if (snapshot.sessionId === selfId) {
         continue;
@@ -140,12 +142,12 @@ export class RemoteAvatars {
         }
         continue;
       }
-      seen.add(snapshot.sessionId);
       let entry = this.entries.get(snapshot.sessionId);
       if (entry === undefined) {
         entry = this.createEntry(snapshot);
         this.entries.set(snapshot.sessionId, entry);
       }
+      entry.seenGeneration = generation;
       entry.rig.visible = snapshot.alive;
       entry.label.visible = snapshot.alive;
       // Idle hold bob on the remote hand-ball (no charge data replicates, so
@@ -170,10 +172,11 @@ export class RemoteAvatars {
       const lastZ = entry.group.position.z;
       const died = entry.wasAlive && !snapshot.alive;
       entry.wasAlive = snapshot.alive;
-      const target: RemoteTarget = { x: snapshot.x, y: snapshot.y, z: snapshot.z, rotY: snapshot.rotY };
       const prevX = entry.group.position.x;
       const prevZ = entry.group.position.z;
-      entry.track.update(target, deltaSeconds);
+      // RemoteTrack reads scalars immediately and never retains or mutates
+      // the target. The immutable network snapshot already has these fields.
+      entry.track.update(snapshot, deltaSeconds);
       entry.group.position.set(entry.track.x, entry.track.y, entry.track.z);
       entry.group.rotation.y = entry.track.rotY;
       if (snapshot.alive) {
@@ -208,7 +211,7 @@ export class RemoteAvatars {
       }
     }
     for (const [sessionId, entry] of this.entries) {
-      if (!seen.has(sessionId)) {
+      if (entry.seenGeneration !== generation) {
         this.removeEntry(sessionId, entry);
       }
     }
@@ -265,6 +268,7 @@ export class RemoteAvatars {
       gate: new AirborneGate(),
       color: shirt,
       wasAlive: snapshot.alive,
+      seenGeneration: this.syncGeneration,
     };
     const pending = this.pendingPickups.get(snapshot.sessionId);
     if (pending !== undefined) {

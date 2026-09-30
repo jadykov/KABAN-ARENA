@@ -171,6 +171,11 @@ export class Fireflies {
   private readonly driftP2 = new Float32Array(FIREFLY_COUNT);
   private readonly envelopes = new Float32Array(FIREFLY_COUNT);
   private time = 0;
+  private updateInterval = 1 / 60;
+  private elapsedSinceUpload = 0;
+  private matricesDirty = true;
+  private visibility = 0;
+  private disposed = false;
   // Scratch state for update() (no per-frame alloc).
   private readonly scratchMatrix = new THREE.Matrix4();
   private readonly scratchPosition = new THREE.Vector3();
@@ -238,12 +243,23 @@ export class Fireflies {
   // lights. Invisible before the gate, including waiting and new rounds.
   public setVisibility(value: number): void {
     const visibility = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+    if (visibility === this.visibility) return;
+    this.visibility = visibility;
     if (visibility === 0 && this.mesh.visible) {
       this.time = 0;
+      this.elapsedSinceUpload = 0;
       this.envelopes.fill(0);
     }
+    if (!this.mesh.visible) this.matricesDirty = true;
     this.mesh.visible = visibility > 0;
     (this.mesh.material as THREE.MeshBasicMaterial).opacity = FIREFLY_OPACITY * visibility;
+  }
+
+  public setAmbientHz(hz: number): void {
+    const interval = 1 / (Number.isFinite(hz) ? Math.max(1, Math.min(60, hz)) : 60);
+    if (interval === this.updateInterval) return;
+    this.updateInterval = interval;
+    this.elapsedSinceUpload = 0;
   }
 
   // Per-frame drift: wander/hover XZ + sine Y bob, billboarded with the live
@@ -251,10 +267,15 @@ export class Fireflies {
   // across the staggered subset, so the swarm never flashes all at once).
   // Scalar math + reused scratch objects only — no allocations, no lights.
   public update(deltaSeconds: number, camera: THREE.Camera): void {
-    if (!(deltaSeconds > 0) || !this.mesh.visible) {
+    if (!Number.isFinite(deltaSeconds) || deltaSeconds < 0 || !this.mesh.visible || this.disposed) {
       return;
     }
     this.time += deltaSeconds;
+    this.elapsedSinceUpload += deltaSeconds;
+    if (!this.matricesDirty && this.elapsedSinceUpload + 1e-9 < this.updateInterval) return;
+    this.elapsedSinceUpload = this.matricesDirty ? 0 : Math.max(0, this.elapsedSinceUpload
+      - this.updateInterval * Math.floor((this.elapsedSinceUpload + 1e-9) / this.updateInterval));
+    this.matricesDirty = false;
     // Pass 1: twinkle envelopes + the concurrency cap (lowest index wins).
     let winner = -1;
     for (let i = 0; i < FIREFLY_COUNT; i += 1) {
@@ -296,6 +317,9 @@ export class Fireflies {
   }
 
   public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.mesh.visible = false;
     this.scene.remove(this.mesh);
     this.mesh.geometry.dispose();
     (this.mesh.material as THREE.Material).dispose();

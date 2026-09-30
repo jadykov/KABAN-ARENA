@@ -3,6 +3,97 @@ import { describe, expect, it, vi } from "vitest";
 import { BADGE_SECONDS, PowerEffectVisuals } from "./PowerEffectVisuals";
 
 describe("power effect visuals", () => {
+  it("loads all badge textures on construction and uploads successful assets before the first pickup", async () => {
+    const requests: Array<{ texture: THREE.Texture; loaded?: (texture: THREE.Texture) => void;
+      error?: (event: unknown) => void }> = [];
+    const load = vi.spyOn(THREE.TextureLoader.prototype, "load").mockImplementation((_url, loaded, _progress, error) => {
+      const texture = new THREE.Texture();
+      requests.push({ texture, loaded, error });
+      return texture;
+    });
+    vi.stubGlobal("document", { createElementNS: () => ({}) });
+    const rig = new THREE.Group();
+    const effects = new PowerEffectVisuals(rig);
+    const initTexture = vi.fn();
+    try {
+      expect(load.mock.calls.map(([url]) => url)).toEqual([
+        "/icons/bonus-shield.svg", "/icons/bonus-speed.svg", "/icons/bonus-charge.svg",
+      ]);
+      const preparing = effects.prepareTextures({ initTexture });
+      expect(initTexture).not.toHaveBeenCalled();
+      for (const request of [requests[0]!, requests[2]!]) {
+        request.texture.image = { width: 64, height: 64 };
+        request.loaded?.(request.texture);
+      }
+      requests[1]!.error?.(new Error("failed icon"));
+      await preparing;
+      expect(initTexture.mock.calls.map(([texture]) => texture))
+        .toEqual([requests[0]!.texture, requests[2]!.texture]);
+      const badge = rig.getObjectByName("bonus-badge") as THREE.Sprite;
+      const version = badge.material.version;
+      effects.showPickup("shield");
+      effects.showPickup("charge");
+      expect(badge.material.map).toBe(requests[2]!.texture);
+      expect(badge.material.version).toBe(version);
+      expect(load).toHaveBeenCalledTimes(3);
+      effects.update(1.49);
+      expect(badge.visible).toBe(true);
+      effects.update(0.01);
+      expect(badge.visible).toBe(false);
+    } finally {
+      effects.dispose();
+      load.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("bounds a stalled icon wait, uploads late assets and cancels preparation on disposal", async () => {
+    vi.useFakeTimers();
+    const requests: Array<{ texture: THREE.Texture; loaded?: (texture: THREE.Texture) => void }> = [];
+    const load = vi.spyOn(THREE.TextureLoader.prototype, "load").mockImplementation((_url, loaded) => {
+      const texture = new THREE.Texture();
+      requests.push({ texture, loaded });
+      return texture;
+    });
+    vi.stubGlobal("document", { createElementNS: () => ({}) });
+    const effects = new PowerEffectVisuals(new THREE.Group());
+    const initTexture = vi.fn();
+    try {
+      const preparing = effects.prepareTextures({ initTexture });
+      requests[0]!.texture.image = { width: 64, height: 64 };
+      requests[0]!.loaded?.(requests[0]!.texture);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(initTexture).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1500);
+      await preparing;
+      expect(initTexture).toHaveBeenCalledTimes(1);
+      for (const request of requests.slice(1)) {
+        request.texture.image = { width: 64, height: 64 };
+        request.loaded?.(request.texture);
+      }
+      await vi.advanceTimersByTimeAsync(0);
+      expect(initTexture).toHaveBeenCalledTimes(3);
+      effects.dispose();
+      const cancelled = new PowerEffectVisuals(new THREE.Group());
+      const pending = cancelled.prepareTextures({ initTexture });
+      const pendingTextures = requests.slice(3).map((request) => vi.spyOn(request.texture, "dispose"));
+      cancelled.dispose();
+      await pending;
+      for (const request of requests.slice(3)) {
+        request.texture.image = { width: 64, height: 64 };
+        request.loaded?.(request.texture);
+      }
+      await vi.advanceTimersByTimeAsync(0);
+      expect(initTexture).toHaveBeenCalledTimes(3);
+      expect(vi.getTimerCount()).toBe(0);
+      for (const disposed of pendingTextures) expect(disposed).toHaveBeenCalledOnce();
+    } finally {
+      effects.dispose();
+      load.mockRestore();
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
   it("keeps the shield animated and shows speed wind only for an active running buff", () => {
     const rig = new THREE.Group();
     const effects = new PowerEffectVisuals(rig);

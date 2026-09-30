@@ -68,6 +68,68 @@ afterEach(() => {
   delete (globalThis as unknown as Record<string, unknown>)["document"];
 });
 
+describe("RemoteAvatars reused snapshot and presence tracking", () => {
+  it("reads frozen snapshots without aliasing targets or mutating another remote's snapshot", () => {
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    const first = Object.freeze(makeSnapshot({ sessionId: "r1", x: 0, z: 0 }));
+    const other = Object.freeze(makeSnapshot({ sessionId: "r2", x: 3, z: 4, rotY: 0.7 }));
+    const initial = Object.freeze([first, other]);
+    try {
+      avatars.sync(initial, null, FRAME);
+      const groups = [...scene.children];
+      const moved = Object.freeze(makeSnapshot({ sessionId: "r1", x: 2, z: -1, rotY: -0.4 }));
+      const newest = Object.freeze([other, moved]); // Reordered wire list.
+      for (let i = 0; i < 60; i += 1) avatars.sync(newest, null, FRAME);
+      expect(scene.children).toEqual(groups);
+      expect(groups[0]?.position.x).toBeGreaterThan(1.9);
+      expect(groups[0]?.position.z).toBeLessThan(-0.9);
+      expect(groups[1]?.position.x).toBe(3);
+      expect(groups[1]?.position.z).toBe(4);
+      expect(groups[1]?.rotation.y).toBeCloseTo(0.7, 12);
+      expect(first.x).toBe(0);
+      expect(first.z).toBe(0);
+      expect(other).toEqual(makeSnapshot({ sessionId: "r2", x: 3, z: 4, rotY: 0.7 }));
+      expect(moved).toEqual(makeSnapshot({ sessionId: "r1", x: 2, z: -1, rotY: -0.4 }));
+    } finally {
+      avatars.dispose();
+    }
+  });
+
+  it("removes only absent or excluded entries and forgets presence across empty room/rejoin", () => {
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    const r1 = makeSnapshot({ sessionId: "r1" });
+    const r2 = makeSnapshot({ sessionId: "r2", x: 3 });
+    try {
+      avatars.sync([r1, r2], null, FRAME);
+      const originalR2 = scene.children[1];
+      avatars.sync([r2], null, FRAME);
+      expect(avatars.size).toBe(1);
+      expect(scene.children).toEqual([originalR2]);
+      avatars.sync([r1, r2], "r2", FRAME);
+      expect(avatars.size).toBe(1);
+      expect(scene.children).not.toContain(originalR2);
+      avatars.sync([{ ...r1, ready: false }], null, FRAME);
+      expect(avatars.size).toBe(0);
+      avatars.sync([r1, r2], null, FRAME);
+      avatars.sync([{ ...r1, spectator: true }, r2], null, FRAME);
+      expect(avatars.size).toBe(1);
+      expect(scene.children[0]?.position.x).toBe(3);
+      avatars.sync([], null, FRAME);
+      avatars.sync([], null, FRAME);
+      expect(scene.children).toHaveLength(0);
+      avatars.sync([r1], null, FRAME);
+      expect(avatars.size).toBe(1);
+      expect(scene.children[0]?.position.x).toBe(0);
+      avatars.sync([], null, FRAME);
+      expect(avatars.size).toBe(0);
+    } finally {
+      avatars.dispose();
+    }
+  });
+});
+
 describe("RemoteAvatars transparent compact nicknames", () => {
   function labelOf(group: THREE.Object3D): THREE.Sprite {
     const label = group.children.find((child) => child instanceof THREE.Sprite);

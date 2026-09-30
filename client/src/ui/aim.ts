@@ -106,7 +106,17 @@ export function createAim(parent: HTMLElement): AimHandle {
   let superMode = false;
   let lastCharge = 0;
   let lastReload = 0;
-  let customTraj: TrajSample[] | null = null;
+  // The caller reuses its projection buffer. Own five slots so later caller
+  // mutations cannot change this overlay until the next setTrajectory().
+  const customTraj: TrajSample[] = Array.from({ length: TRAJ_DOT_COUNT }, () => ({ x: 0, y: 0, visible: false }));
+  let hasCustomTraj = false;
+  const paintedDots = trajDots.map(() => ({
+    x: Number.NaN, y: Number.NaN, transform: "", opacityValue: Number.NaN, opacity: "", hidden: false, color: "",
+  }));
+  let paintedDotColor = "";
+  let paintedPowerColor = "";
+  let paintedPowerPercent = -1;
+  let paintedReloadPercent = -1;
 
   function finiteOr(value: number, fallback: number): number {
     return Number.isFinite(value) ? value : fallback;
@@ -115,13 +125,13 @@ export function createAim(parent: HTMLElement): AimHandle {
   const paintTraj = (): void => {
     const charge = lastCharge;
     const color = superMode ? CROSSHAIR_SUPER_COLOR : CROSSHAIR_IDLE_COLOR;
-    const useCustom = customTraj !== null && customTraj.length === trajDots.length;
     for (let i = 0; i < trajDots.length; i += 1) {
       const traj = trajDots[i];
-      if (traj === undefined) {
+      const painted = paintedDots[i];
+      if (traj === undefined || painted === undefined) {
         continue;
       }
-      const sample = useCustom && customTraj !== null ? customTraj[i] : undefined;
+      const sample = hasCustomTraj ? customTraj[i] : undefined;
       let x: number;
       let y: number;
       let hidden = false;
@@ -136,23 +146,45 @@ export function createAim(parent: HTMLElement): AimHandle {
         x = fanX * lengthScale;
         y = baseY * lengthScale;
       }
-      traj.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
+      if (painted.x !== x || painted.y !== y) {
+        const transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
+        if (painted.transform !== transform) {
+          traj.style.transform = transform;
+          painted.transform = transform;
+        }
+        painted.x = x;
+        painted.y = y;
+      }
       const fade = 1 - i * 0.12;
       const baseOpacity = (0.15 + 0.85 * charge) * fade;
       // Progressive glow: a lit dot paints at base x TRAJ_DOT_LIT_BOOST
       // (clamped to 1) — subtle one-by-one brightening with charge. Same
       // pooled divs, opacity scalar only: no new elements, no lights, no
-      // draw-call growth, no per-frame allocations beyond the existing style
-      // writes. Cancel/reset feeds charge 0 + setTrajectory(null), so every
+      // draw-call growth. Cancel/reset feeds charge 0 + setTrajectory(null), so every
       // dot falls back to base automatically. Dots are white-on-dark, so
       // opacity IS the brightness channel (a brightness() filter would be a
       // no-op on white — deliberately not used).
       const lit = isTrajDotLit(i, charge, trajDots.length);
       const boosted = lit ? Math.min(1, baseOpacity * TRAJ_DOT_LIT_BOOST) : baseOpacity;
-      traj.style.opacity = hidden ? "0" : boosted.toFixed(3);
-      traj.style.background = color;
+      const opacityValue = hidden ? 0 : boosted;
+      if (painted.opacityValue !== opacityValue || painted.hidden !== hidden) {
+        const opacity = hidden ? "0" : boosted.toFixed(3);
+        if (painted.opacity !== opacity) {
+          traj.style.opacity = opacity;
+          painted.opacity = opacity;
+        }
+        painted.opacityValue = opacityValue;
+        painted.hidden = hidden;
+      }
+      if (painted.color !== color) {
+        traj.style.background = color;
+        painted.color = color;
+      }
     }
-    dot.style.background = superMode ? CROSSHAIR_SUPER_COLOR : CROSSHAIR_IDLE_COLOR;
+    if (paintedDotColor !== color) {
+      dot.style.background = color;
+      paintedDotColor = color;
+    }
   };
 
   const paintBar = (): void => {
@@ -161,20 +193,21 @@ export function createAim(parent: HTMLElement): AimHandle {
     // Palette ramp (all stops are palette constants, no raw color math):
     // empty white -> charging chartreuse -> FULL muted red. Bar width
     // carries the fine granularity; color carries the band.
-    powerFill.style.width = `${Math.round(lastCharge * 100)}%`;
-    el.dataset.state = superMode ? "super" : lastCharge >= 1 ? "full" : lastCharge > 0 ? "charging" : "idle";
-    powerCaption.textContent = lastCharge >= 1 ? "ПОЛНЫЙ ЗАРЯД" : superMode ? "СУПЕРЗАРЯД" : "ЗАРЯД";
-    if (superMode && lastCharge > 0) {
-      powerFill.style.background = CROSSHAIR_SUPER_COLOR;
-      return;
+    const percent = Math.round(lastCharge * 100);
+    if (paintedPowerPercent !== percent) {
+      powerFill.style.width = `${percent}%`;
+      paintedPowerPercent = percent;
     }
+    const state = superMode ? "super" : lastCharge >= 1 ? "full" : lastCharge > 0 ? "charging" : "idle";
+    if (el.dataset.state !== state) el.dataset.state = state;
+    const caption = lastCharge >= 1 ? "ПОЛНЫЙ ЗАРЯД" : superMode ? "СУПЕРЗАРЯД" : "ЗАРЯД";
+    if (powerCaption.textContent !== caption) powerCaption.textContent = caption;
     const t = Math.max(0, Math.min(1, lastCharge));
-    if (t >= 1) {
-      powerFill.style.background = CROSSHAIR_FULL_COLOR;
-    } else if (t > 0) {
-      powerFill.style.background = HL_CHARTREUSE_CSS;
-    } else {
-      powerFill.style.background = CROSSHAIR_CHARGING_COLOR;
+    const color = superMode && t > 0 ? CROSSHAIR_SUPER_COLOR
+      : t >= 1 ? CROSSHAIR_FULL_COLOR : t > 0 ? HL_CHARTREUSE_CSS : CROSSHAIR_CHARGING_COLOR;
+    if (paintedPowerColor !== color) {
+      powerFill.style.background = color;
+      paintedPowerColor = color;
     }
   };
 
@@ -183,49 +216,67 @@ export function createAim(parent: HTMLElement): AimHandle {
   // is observable end-to-end after a shot; idle (0) and ready (1) hide it so
   // no permanent bar sits on screen (spectator/pre-join included).
   const paintReload = (): void => {
-    reloadFill.style.width = `${Math.round(lastReload * 100)}%`;
-    reloadFill.style.background = CROSSHAIR_RELOAD_COLOR;
-    reloadBar.style.display = lastReload > 0 && lastReload < 1 ? "" : "none";
+    const percent = Math.round(lastReload * 100);
+    if (paintedReloadPercent !== percent) {
+      reloadFill.style.width = `${percent}%`;
+      paintedReloadPercent = percent;
+    }
+    const display = lastReload > 0 && lastReload < 1 ? "" : "none";
+    if (reloadBar.style.display !== display) reloadBar.style.display = display;
   };
 
-  const repaint = (): void => {
-    paintTraj();
-    paintBar();
-    paintReload();
-  };
-  repaint();
+  reloadFill.style.background = CROSSHAIR_RELOAD_COLOR;
+  paintTraj();
+  paintBar();
+  paintReload();
 
   const handle: AimHandle = {
     el,
     setCharge01(value: number): void {
-      lastCharge = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
-      repaint();
+      const charge = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+      if (lastCharge === charge) return;
+      lastCharge = charge;
+      paintTraj();
+      paintBar();
     },
     setReload01(value: number): void {
-      lastReload = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
-      repaint();
+      const reload = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+      if (lastReload === reload) return;
+      lastReload = reload;
+      paintReload();
     },
     setSuper(active: boolean): void {
-      superMode = active === true;
-      repaint();
+      const superActive = active === true;
+      if (superMode === superActive) return;
+      superMode = superActive;
+      paintTraj();
+      paintBar();
     },
     setTrajectory(samples: readonly TrajSample[] | null): void {
-      if (samples === null) {
-        customTraj = null;
-      } else {
-        customTraj = samples.slice(0, TRAJ_DOT_COUNT).map((sample) => ({
-          x: finiteOr(sample.x, 0),
-          y: finiteOr(sample.y, 0),
-          visible: sample.visible === true,
-        }));
+      const useCustom = samples !== null && samples.length >= TRAJ_DOT_COUNT;
+      let changed = hasCustomTraj !== useCustom;
+      if (useCustom && samples !== null) {
+        for (let i = 0; i < TRAJ_DOT_COUNT; i += 1) {
+          const sample = samples[i];
+          const stored = customTraj[i];
+          if (sample === undefined || stored === undefined) continue;
+          const x = finiteOr(sample.x, 0);
+          const y = finiteOr(sample.y, 0);
+          const visible = sample.visible === true;
+          if (stored.x !== x || stored.y !== y || stored.visible !== visible) changed = true;
+          stored.x = x;
+          stored.y = y;
+          stored.visible = visible;
+        }
       }
-      repaint();
+      hasCustomTraj = useCustom;
+      if (changed) paintTraj();
     },
     show(): void {
-      el.style.display = "";
+      if (el.style.display !== "") el.style.display = "";
     },
     hide(): void {
-      el.style.display = "none";
+      if (el.style.display !== "none") el.style.display = "none";
     },
     dispose(): void {
       if (disposed) {

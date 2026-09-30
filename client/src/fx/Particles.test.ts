@@ -62,6 +62,46 @@ describe("ParticlePool fixed pool (QD4-A)", () => {
       pool.dispose();
     }
   });
+
+  it("skips uploads and rendering while idle, then restores bursts after expiry and clear", () => {
+    const pool = new ParticlePool(4);
+    const positions = pool.object.geometry.getAttribute("position") as THREE.BufferAttribute;
+    try {
+      const initialVersion = positions.version;
+      expect(pool.object.visible).toBe(false);
+      for (let i = 0; i < 120; i += 1) pool.update(1 / 60);
+      pool.clear();
+      expect(positions.version).toBe(initialVersion);
+      pool.spawn(4, 1, 0, 2, new THREE.Color(0xff5533), 0, 0, 0.1);
+      pool.spawn(5, 1, 0, 2, new THREE.Color(0x22eeff), 0, 0, 1);
+      // Overwrite one live ring slot; it must remain one inventory entry.
+      pool.spawn(6, 1, 0, 1, new THREE.Color(0x44ff66), 0, 0, 2);
+      expect(pool.aliveCount).toBe(4);
+      expect(pool.object.visible).toBe(true);
+      pool.update(0.2);
+      expect(pool.aliveCount).toBe(3);
+      pool.update(0.9);
+      expect(pool.aliveCount).toBe(1);
+      expect(positions.getX(0)).toBe(6);
+      pool.update(1);
+      expect(pool.aliveCount).toBe(0);
+      expect(pool.object.visible).toBe(false);
+      const expiredVersion = positions.version;
+      pool.update(10);
+      expect(positions.version).toBe(expiredVersion);
+      pool.spawn(7, 2, 0, 2, new THREE.Color(0xff5533));
+      pool.clear();
+      pool.spawn(8, 2, 0, 1, new THREE.Color(0xff5533));
+      expect(pool.aliveCount).toBe(1);
+      expect(pool.object.visible).toBe(true);
+      expect(positions.getX(0)).toBe(8);
+      pool.update(Number.NaN);
+      expect(pool.aliveCount).toBe(1);
+      expect(Number.isFinite(positions.getY(0))).toBe(true);
+    } finally {
+      pool.dispose();
+    }
+  });
 });
 
 describe("CameraShake light trauma shake (QD4-A)", () => {

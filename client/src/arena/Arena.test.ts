@@ -397,6 +397,46 @@ describe("swamp, ice, and trampolines", () => {
     expect(textureDispose).toHaveBeenCalledOnce();
   });
 
+  it("paces swamp uploads while retaining the same motion, including reduced quality before build", () => {
+    const fullScene = new THREE.Scene();
+    const reducedScene = new THREE.Scene();
+    const full = new ArenaBuilder();
+    const reduced = new ArenaBuilder();
+    reduced.setAmbientHz(15);
+    full.buildVisuals(fullScene);
+    reduced.buildVisuals(reducedScene);
+    const fullBubbles = fullScene.getObjectByName("swamp-bubbles") as THREE.InstancedMesh;
+    const reducedBubbles = reducedScene.getObjectByName("swamp-bubbles") as THREE.InstancedMesh;
+    try {
+      const first = Array.from(reducedBubbles.instanceMatrix.array);
+      expect(first).toEqual(Array.from(fullBubbles.instanceMatrix.array));
+      expect(reducedBubbles.instanceMatrix.usage).toBe(THREE.DynamicDrawUsage);
+      const initialVersion = reducedBubbles.instanceMatrix.version;
+      for (let frame = 0; frame < 60; frame += 1) {
+        full.update(1 / 60);
+        reduced.update(1 / 60);
+      }
+      expect(reducedBubbles.instanceMatrix.version - initialVersion).toBe(15);
+      expect(Array.from(reducedBubbles.instanceMatrix.array))
+        .toEqual(Array.from(fullBubbles.instanceMatrix.array));
+      reducedBubbles.visible = false;
+      const hiddenVersion = reducedBubbles.instanceMatrix.version;
+      reduced.update(1);
+      expect(reducedBubbles.instanceMatrix.version).toBe(hiddenVersion);
+      reducedBubbles.visible = true;
+      reduced.setAmbientHz(60);
+      reduced.update(1 / 60);
+      expect(reducedBubbles.instanceMatrix.version).toBe(hiddenVersion + 1);
+      reduced.dispose(reducedScene);
+      reduced.buildVisuals(reducedScene);
+      const rebuilt = reducedScene.getObjectByName("swamp-bubbles") as THREE.InstancedMesh;
+      expect(Array.from(rebuilt.instanceMatrix.array)).toEqual(first);
+    } finally {
+      full.dispose(fullScene);
+      reduced.dispose(reducedScene);
+    }
+  });
+
   it("puts two trampolines on the center lane, clear of obstacles", () => {
     const pads = getTrampolines();
     expect(pads).toHaveLength(2);

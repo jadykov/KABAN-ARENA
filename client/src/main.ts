@@ -13,7 +13,6 @@ import {
   FLOAT_DRAG_RADIUS_PX,
   IDLE_FOLLOW_RATE,
   IDLE_RECENTER_MOVE_MAX,
-  INPUT_SEND_INTERVAL_S,
   LOCAL_AVATAR_COLOR,
   MAX_HEARTS,
   MIRROR_PITCH_MAX,
@@ -41,6 +40,7 @@ import { SceneManager } from "./engine/SceneManager";
 import { clampIntensity, createSfx, detectRicochetOnsets } from "./audio/Sfx";
 import { NetworkManager, type RoomSnapshot } from "./net/NetworkManager";
 import { RemoteAvatars } from "./net/RemoteAvatars";
+import { InputSendScheduler } from "./net/InputSendScheduler";
 import { beginChargeLevel, mirrorChargeCameraPitch, pitchRateScale, shouldTrackAimFromCamera, stepChargeLevel, unmirrorChargeCameraPitch, yawRateScale, type ChargeLevel } from "./net/chargeAim";
 import { advanceEffectiveChargeMs } from "./net/chargeBoost";
 import { cameraYawBehindFacing, forwardnessRateScale, shouldIdleFollow, stepIdleFollowPitch, stepIdleFollowYaw, stickAngleFromForward, tolerantCameraPitchMin, type IdleFollowGate } from "./net/idleFollow";
@@ -50,7 +50,6 @@ import {
   chargeToPower01,
   countFighters,
   countSpectators,
-  directionFromYawPitch,
   halvesForHp,
   muzzleForShot,
   normalizePlayNick,
@@ -120,6 +119,8 @@ async function boot(): Promise<void> {
 
   const engine = new Engine(container);
   const sceneManager = new SceneManager(engine.scene, engine.camera);
+  const unsubscribeQuality = engine.onQualityChange((profile): void => sceneManager.setQuality(profile));
+  let pageDisposed = false;
   sceneManager.build();
   // F3 snap-gate debug overlay (diagnostic only): reads the telemetry
   // reconcileSelf populates plus live avatar/velocity reads — no gameplay
@@ -330,7 +331,7 @@ async function boot(): Promise<void> {
   let latest: RoomSnapshot | null = null;
   let isPlaying = false;
   let inputSeq = 0;
-  let inputAccumulator = 0;
+  const inputSendScheduler = new InputSendScheduler();
   let connecting = false;
   // Last seen self alive flag (null = no snapshot yet): false->true while
   // playing means an authoritative respawn — teleport to the server spawn.
@@ -379,7 +380,7 @@ async function boot(): Promise<void> {
   let floatPointerId: number | null = null;
   let floatOriginX = 0;
   let floatOriginY = 0;
-  let floatVector = { x: 0, y: 0 };
+  const floatVector = { x: 0, y: 0 };
   // Idle-follow gate scratch (Stage 4d.2-fix2 follow-up): mutated every
   // playing frame and passed to shouldIdleFollow so the gate check itself
   // allocates nothing per frame.
@@ -434,7 +435,8 @@ async function boot(): Promise<void> {
   const playButton = document.createElement("button");
   playButton.id = "join-play";
   playButton.type = "button";
-  playButton.textContent = "Играть";
+  playButton.textContent = "Загрузка…";
+  playButton.disabled = true;
   const controls = document.createElement("div");
   controls.id = "join-controls";
   const controlsLabel = document.createElement("div");
@@ -489,6 +491,7 @@ async function boot(): Promise<void> {
       // near-duplicate (reviewer cycle 2). Spawn/overlay logic below stays.
       void nick;
       isPlaying = true;
+      inputSendScheduler.reset();
       // Our session id is known from join time (ownSessionId set on room
       // join, before welcome): lock in our deterministic Nintendo-style face
       // variant + two-tone clothing now that identity exists (avatar built
@@ -526,6 +529,7 @@ async function boot(): Promise<void> {
       sceneManager.setChargeZoom01(0);
       sceneManager.setChargeTranslucent(false);
       aimOverlay.setCharge01(0);
+      aimOverlay.setTrajectory(null);
       aimOverlay.setReload01(1);
       aimOverlay.hide();
       hideJoinOverlay();
@@ -543,6 +547,7 @@ async function boot(): Promise<void> {
       // Explicit capacity rejection: never leave the player on a silent
       // overlay — show the plate again with feedback instead of hanging.
       isPlaying = false;
+      inputSendScheduler.reset();
       isCharging = false;
       chargeLevel.active = false;
       sceneManager.cancelShotBodyTurn();
@@ -552,9 +557,10 @@ async function boot(): Promise<void> {
       sceneManager.setChargeZoom01(0);
       sceneManager.setChargeTranslucent(false);
       aimOverlay.setCharge01(0);
+      aimOverlay.setTrajectory(null);
       aimOverlay.setReload01(1);
       aimOverlay.hide();
-      hud.setBuffs({});
+      hud.setBuffValues(0, 0, 0, 0);
       hud.addKillfeed("В комнате нет свободных мест");
       hud.setStatus("Комната заполнена. Попробуйте позже.");
       showJoinOverlay();
@@ -609,6 +615,7 @@ async function boot(): Promise<void> {
     onLeave: (): void => {
       latest = null;
       isPlaying = false;
+      inputSendScheduler.reset();
       isCharging = false;
       chargeLevel.active = false;
       sceneManager.cancelShotBodyTurn();
@@ -624,9 +631,10 @@ async function boot(): Promise<void> {
       sceneManager.setChargeTranslucent(false);
       sceneManager.setBattleSnapshot([], null);
       aimOverlay.setCharge01(0);
+      aimOverlay.setTrajectory(null);
       aimOverlay.setReload01(1);
       aimOverlay.hide();
-      hud.setBuffs({});
+      hud.setBuffValues(0, 0, 0, 0);
       hud.setSuperBadge(false);
       sceneManager.setSpectating(true);
       joystick.element.style.display = "none";
@@ -1173,7 +1181,8 @@ async function boot(): Promise<void> {
     floatPointerId = pointerId;
     floatOriginX = point.x;
     floatOriginY = point.y;
-    floatVector = { x: 0, y: 0 };
+    floatVector.x = 0;
+    floatVector.y = 0;
     startCharge();
   };
 
@@ -1198,7 +1207,8 @@ async function boot(): Promise<void> {
       dy /= length;
     }
     // Joystick convention: screen-up means +y (pitch up).
-    floatVector = { x: applyExpo(dx, AIM_EXPO), y: applyExpo(-dy, AIM_EXPO) };
+    floatVector.x = applyExpo(dx, AIM_EXPO);
+    floatVector.y = applyExpo(-dy, AIM_EXPO);
   };
 
   const handleFloatPointerUp = (event: Event): void => {
@@ -1211,7 +1221,8 @@ async function boot(): Promise<void> {
     }
     floatActive = false;
     floatPointerId = null;
-    floatVector = { x: 0, y: 0 };
+    floatVector.x = 0;
+    floatVector.y = 0;
     stopCharge();
   };
 
@@ -1225,7 +1236,8 @@ async function boot(): Promise<void> {
     }
     floatActive = false;
     floatPointerId = null;
-    floatVector = { x: 0, y: 0 };
+    floatVector.x = 0;
+    floatVector.y = 0;
     cancelCharge();
   };
 
@@ -1318,11 +1330,6 @@ async function boot(): Promise<void> {
   window.addEventListener("pointercancel", handleFirePointerCancel);
   window.addEventListener("pointercancel", handleCamPointerCancel);
 
-  // Async Rapier WASM boot. The scene stays playable on the legacy
-  // kinematic path when physics fails — never a fatal error. No feed line:
-  // the event feed shows join/kill/pickup one-liners only (owner 4d.4).
-  await sceneManager.initPhysics();
-
   const handleKeyDown = (event: KeyboardEvent): void => {
     // F3 snap-gate debug overlay: handled BEFORE the typing guard so the
     // toggle works even with the nick/chat input focused (F3 types nothing).
@@ -1372,7 +1379,8 @@ async function boot(): Promise<void> {
       touchState.reset();
       floatActive = false;
       floatPointerId = null;
-      floatVector = { x: 0, y: 0 };
+      floatVector.x = 0;
+      floatVector.y = 0;
       sceneManager.setCharge01(0);
       aimOverlay.setCharge01(0);
       aimOverlay.setReload01(1);
@@ -1395,7 +1403,33 @@ async function boot(): Promise<void> {
   };
   window.addEventListener("keyup", handleKeyUp);
 
+  const handleVisibility = (): void => {
+    if (pageDisposed) return;
+    sfx.setAmbientPaused(document.hidden);
+    if (!document.hidden) return;
+    inputSendScheduler.reset();
+    cancelCharge();
+    input.reset();
+    joystick.reset();
+    touchState.reset();
+    floatActive = false;
+    floatPointerId = null;
+    floatVector.x = 0;
+    floatVector.y = 0;
+    if (net.isConnected && isPlaying && lastSelfAlive !== false) {
+      inputSeq += 1;
+      net.sendInput(buildInputPayload(0, 0, sceneManager.getAvatarFacing(), inputSeq, false));
+    }
+  };
+  document.addEventListener("visibilitychange", handleVisibility);
+
   const handlePageHide = (): void => {
+    if (pageDisposed) return;
+    pageDisposed = true;
+    document.removeEventListener("visibilitychange", handleVisibility);
+    window.removeEventListener("pagehide", handlePageHide);
+    unsubscribeQuality();
+    engine.dispose();
     window.removeEventListener("keydown", handleKeyDown);
     window.removeEventListener("keyup", handleKeyUp);
     window.removeEventListener("pointerdown", handleFloatPointerDown);
@@ -1421,7 +1455,6 @@ async function boot(): Promise<void> {
     input.dispose();
     remotes.dispose();
     sceneManager.dispose();
-    engine.dispose();
     // Stage 5 audio teardown (matches the SceneManager cleanup convention):
     // release the shared AudioContext so no node outlives the session.
     sfx.dispose();
@@ -1451,11 +1484,14 @@ async function boot(): Promise<void> {
   // the server first-tick hold (previewTimeAt), matching the first patched
   // ball frame.
   const projScratch = new THREE.Vector3();
-  function computeAimTrajectory(): TrajSample[] {
+  const originScratch = new THREE.Vector3();
+  const trajectorySamples: TrajSample[] = Array.from({ length: TRAJ_DOT_COUNT }, () => ({ x: 0, y: 0, visible: false }));
+  const zeroMove = { x: 0, y: 0 };
+  const zeroLook = { dx: 0, dy: 0 };
+  function computeAimTrajectory(): readonly TrajSample[] {
     const chargeS = chargeEffectiveMs / 1000;
     const speed = powerToSpeed(chargeToPower01(chargeS));
-    const dir = directionFromYawPitch(aimYaw, aimPitch);
-    const origin = sceneManager.getAvatarPosition();
+    const origin = sceneManager.getAvatarPosition(originScratch);
     // Identical muzzle helper as the fire path (bodyCenter XZ + dir*0.7,
     // y = bodyY + torso offset) so the preview tracks elevation too.
     const muzzle = muzzleForShot(origin.x, origin.y, origin.z, aimYaw, aimPitch);
@@ -1465,28 +1501,27 @@ async function boot(): Promise<void> {
     const width = window.innerWidth;
     const height = window.innerHeight;
     engine.camera.updateMatrixWorld();
-    const samples: TrajSample[] = [];
     // Start at the first-tick hold (muzzle + one server tick) so the first
     // dot matches the first patched ball frame — same origin/offset/height/
     // gravity as the authoritative spawn.
     for (let i = 0; i < TRAJ_DOT_COUNT; i += 1) {
+      const sample = trajectorySamples[i];
+      if (sample === undefined) continue;
       const t = previewTimeAt(i);
       projScratch.set(
-        muzzleX + dir.x * speed * t,
-        muzzleY + dir.y * speed * t - 0.5 * BALL_GRAVITY * t * t,
-        muzzleZ + dir.z * speed * t,
+        muzzleX + muzzle.dirX * speed * t,
+        muzzleY + muzzle.dirY * speed * t - 0.5 * BALL_GRAVITY * t * t,
+        muzzleZ + muzzle.dirZ * speed * t,
       );
       projScratch.project(engine.camera);
       const behind = projScratch.z > 1 || projScratch.z < -1;
       const rawX = projScratch.x * (width / 2);
       const rawY = -projScratch.y * (height / 2);
-      samples.push({
-        x: Math.max(-width / 2 + 6, Math.min(width / 2 - 6, rawX)),
-        y: Math.max(-height / 2 + 6, Math.min(height / 2 - 6, rawY)),
-        visible: !behind,
-      });
+      sample.x = Math.max(-width / 2 + 6, Math.min(width / 2 - 6, rawX));
+      sample.y = Math.max(-height / 2 + 6, Math.min(height / 2 - 6, rawY));
+      sample.visible = !behind;
     }
-    return samples;
+    return trajectorySamples;
   }
 
   engine.onUpdate((deltaSeconds): void => {
@@ -1504,10 +1539,10 @@ async function boot(): Promise<void> {
     const rawLook = input.consumeLookDelta();
     const playing = isPlaying && !sceneManager.isSpectating();
     const selfAlive = lastSelfAlive !== false;
-    const move = playing && selfAlive ? rawMove : { x: 0, y: 0 };
+    const move = playing && selfAlive ? rawMove : zeroMove;
     // While charging the camera mirrors aim (one-thumb 360 turn); RMB
     // free-look applies only when NOT charging.
-    const look = playing ? (isCharging ? { dx: 0, dy: 0 } : rawLook) : { dx: 0, dy: 0 };
+    const look = playing && !isCharging ? rawLook : zeroLook;
     // R2 aim + charge + reload tick (fighters only, spectators gated out).
     // Aim rule: a deflected FIRE/float vector integrates yaw/pitch at the
     // shared rate (aiming, also while charging); idle FIRE AND idle float AND
@@ -1703,13 +1738,9 @@ async function boot(): Promise<void> {
     sceneManager.update(deltaSeconds, move, look);
     if (playing && selfAlive && isPlaying) {
       const buffs = sceneManager.getPowerUpHudState();
-      hud.setBuffs({
-        shield: buffs.shieldRemaining > 0 ? { seconds: buffs.shieldRemaining, hp: buffs.shieldHp } : undefined,
-        speed: buffs.speedRemaining > 0 ? { seconds: buffs.speedRemaining } : undefined,
-        charge: buffs.chargeRemaining > 0 ? { seconds: buffs.chargeRemaining } : undefined,
-      });
+      hud.setBuffValues(buffs.shieldRemaining, buffs.shieldHp, buffs.speedRemaining, buffs.chargeRemaining);
     } else {
-      hud.setBuffs({});
+      hud.setBuffValues(0, 0, 0, 0);
     }
     // F3 overlay refresh (internally throttled to ~10Hz; no-op when hidden).
     snapDebug.refresh();
@@ -1740,18 +1771,28 @@ async function boot(): Promise<void> {
     // never drive the corpse for even a frame).
     // R2: charging flag slows the server 50% while aiming a shot.
     if (net.isConnected && isPlaying && selfAlive) {
-      inputAccumulator += deltaSeconds;
-      if (inputAccumulator >= INPUT_SEND_INTERVAL_S) {
-        inputAccumulator = 0;
+      if (inputSendScheduler.advance(deltaSeconds)) {
         inputSeq += 1;
         const facing = sceneManager.getAvatarFacing();
         const cameraYaw = sceneManager.getCameraAngles().yaw;
         const world = worldMoveFromYaw(move.x, move.y, cameraYaw);
         net.sendInput(buildInputPayload(world.x, world.y, facing, inputSeq, isCharging));
       }
+    } else {
+      inputSendScheduler.reset();
     }
   });
-  // R1: join immediately as a spectator so boot shows the live arena.
+  // Register teardown before awaiting resources. Hidden bonus materials and
+  // icons are prepared before the player can enter the active game.
+  await sceneManager.initPhysics();
+  if (pageDisposed) return;
+  await sceneManager.prepareTextures(engine.renderer);
+  if (pageDisposed) return;
+  await engine.prepare();
+  if (pageDisposed) return;
+  playButton.disabled = false;
+  playButton.textContent = "Играть";
+  // R1: join as a spectator so boot shows the live arena.
   connectAsSpectator();
   engine.start();
 }

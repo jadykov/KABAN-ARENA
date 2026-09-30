@@ -9,15 +9,24 @@ import { createHud, localizeKillfeed, localizePowerUp } from "./hud";
 class FakeElement {
   public id = "";
   public className = "";
-  public textContent = "";
+  public readonly writes: string[] = [];
+  private text = "";
+  public get textContent(): string { return this.text; }
+  public set textContent(value: string) { this.text = value; this.writes.push("textContent"); }
   public readonly dataset: Record<string, string> = {};
-  public readonly style: Record<string, string> = {};
+  public readonly style = new Proxy<Record<string, string>>({}, {
+    set: (target, name, value: string): boolean => {
+      this.writes.push(`style.${String(name)}`);
+      return Reflect.set(target, name, value);
+    },
+  });
   public readonly attributes: Record<string, string> = {};
   public readonly children: FakeElement[] = [];
   public parentElement: FakeElement | null = null;
 
   public setAttribute(name: string, value: string): void {
     this.attributes[name] = value;
+    this.writes.push(`attribute.${name}`);
   }
 
   public appendChild(child: FakeElement): FakeElement {
@@ -94,6 +103,18 @@ function byId(handle: { element: HTMLDivElement }, id: string): FakeElement {
     queue.push(...current.children);
   }
   throw new Error(`hud element #${id} missing`);
+}
+
+function allElements(element: FakeElement): FakeElement[] {
+  return [element, ...element.children.flatMap(allElements)];
+}
+
+function clearWrites(handle: { element: HTMLDivElement }): void {
+  for (const child of allElements(handle.element as unknown as FakeElement)) child.writes.length = 0;
+}
+
+function writesOf(handle: { element: HTMLDivElement }): string[] {
+  return allElements(handle.element as unknown as FakeElement).flatMap((child) => child.writes);
 }
 
 beforeEach(() => {
@@ -275,6 +296,106 @@ describe("createHud top-left info list", () => {
       expect(byId(handle, "hud-shield-heart").style.display).toBe("none");
       handle.setBuffs({});
       expect(rows.every((row) => row.style.display === "none")).toBe(true);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("preserves health nodes and avoids repeated score/status/counter/buff writes", () => {
+    const parent = new FakeElement();
+    const handle = createHud(asHtml(parent));
+    try {
+      handle.setHearts(5);
+      handle.setScore(7);
+      handle.setCounters(4, 2);
+      handle.setTimer(65);
+      handle.setStatus("Игра");
+      handle.setSuperBadge(true);
+      handle.setBuffValues(9.96, 12.5, 4.25, 5.94);
+      const originalHearts = [...byId(handle, "hud-hearts").children];
+      clearWrites(handle);
+      for (let i = 0; i < 120; i += 1) {
+        handle.setHearts(5);
+        handle.setScore(7);
+        handle.setCounters(4, 2);
+        handle.setTimer(65.8);
+        handle.setStatus("Игра");
+        handle.setSuperBadge(true);
+        handle.setBuffValues(9.92, 12.5, 4.22, 5.91);
+      }
+      expect(byId(handle, "hud-hearts").children).toEqual(originalHearts);
+      expect(writesOf(handle)).toEqual([]);
+      // Hearts-from-hearts also keeps unchanged nodes, then still handles damage.
+      handle.setHeartsFromHearts(2);
+      const changedHearts = [...byId(handle, "hud-hearts").children];
+      expect(handle.getHalves()).toBe(4);
+      clearWrites(handle);
+      handle.setHeartsFromHearts(2);
+      expect(byId(handle, "hud-hearts").children).toEqual(changedHearts);
+      expect(writesOf(handle)).toEqual([]);
+      handle.simulateHit("test");
+      expect(handle.getHalves()).toBe(2);
+      expect(byId(handle, "hud-hearts").attributes["aria-label"]).toContain("Здоровье: 2");
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("paints exact tenths, applies shield damage immediately and hides at expiry/reset", () => {
+    const parent = new FakeElement();
+    const handle = createHud(asHtml(parent));
+    try {
+      const rows = byId(handle, "hud-buffs").children;
+      handle.setBuffValues(0.101, 25, 0.04, 0.101);
+      expect(rows.map((row) => row.children[2]?.textContent)).toEqual(["0.2 с", "0.1 с", "0.2 с"]);
+      clearWrites(handle);
+      handle.setBuffValues(0.1, 12.5, 0.03, 0.1);
+      expect(rows.map((row) => row.children[2]?.textContent)).toEqual(["0.1 с", "0.1 с", "0.1 с"]);
+      expect(byId(handle, "hud-shield-capacity").style.width).toBe("50%");
+      expect(byId(handle, "hud-hearts").attributes["aria-label"]).toContain("щит: 13 из 25");
+      clearWrites(handle);
+      handle.setBuffValues(0.001, 12.5, 0.001, 0.001);
+      expect(writesOf(handle)).toEqual([]);
+      handle.setBuffValues(0, 12.5, -0.001, 0);
+      expect(rows.every((row) => row.style.display === "none")).toBe(true);
+      expect(rows.map((row) => row.children[2]?.textContent)).toEqual(["", "", ""]);
+      expect(rows.every((row) => row.attributes["aria-label"]?.endsWith(": неактивен"))).toBe(true);
+      expect(byId(handle, "hud-shield-heart").style.display).toBe("none");
+      expect(byId(handle, "hud-hearts").attributes["aria-label"]).not.toContain("щит:");
+      clearWrites(handle);
+      handle.setBuffs({});
+      handle.setBuffValues(0, 0, 0, 0);
+      expect(writesOf(handle)).toEqual([]);
+      // New life / room: no cached former duration can leak into the timer.
+      handle.setBuffValues(10, 25, 5, 10);
+      expect(rows.map((row) => row.children[2]?.textContent)).toEqual(["10.0 с", "5.0 с", "10.0 с"]);
+      expect(byId(handle, "hud-shield-capacity").style.width).toBe("100%");
+      handle.setBuffs({}); // disconnect/death path
+      expect(rows.every((row) => row.style.display === "none")).toBe(true);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("does not retain or mutate caller buffs and ignores nonfinite timers/capacity", () => {
+    const parent = new FakeElement();
+    const handle = createHud(asHtml(parent));
+    try {
+      const buffs = Object.freeze({
+        shield: Object.freeze({ seconds: 7.23, hp: 15 }),
+        speed: Object.freeze({ seconds: 2.99 }),
+        charge: Object.freeze({ seconds: 9.01 }),
+      });
+      handle.setBuffs(buffs);
+      const rows = byId(handle, "hud-buffs").children;
+      expect(rows.map((row) => row.children[2]?.textContent)).toEqual(["7.3 с", "3.0 с", "9.1 с"]);
+      expect(buffs.shield).toEqual({ seconds: 7.23, hp: 15 });
+      handle.setBuffValues(Number.NaN, 25, Infinity, -1);
+      expect(rows.every((row) => row.style.display === "none")).toBe(true);
+      handle.setBuffValues(1, Number.NaN, 0, 0);
+      expect(byId(handle, "hud-shield-heart").style.display).toBe("none");
+      expect(byId(handle, "hud-hearts").attributes["aria-label"]).not.toContain("щит:");
+      handle.setBuffs({});
     } finally {
       handle.dispose();
     }
