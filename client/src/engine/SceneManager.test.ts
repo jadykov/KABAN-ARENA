@@ -75,6 +75,40 @@ const NO_LOOK = { dx: 0, dy: 0 };
 
 const managers: SceneManager[] = [];
 
+function readLightingChannels(scene: THREE.Scene): number[] {
+  const ambient = scene.children.find((child): child is THREE.AmbientLight => child instanceof THREE.AmbientLight)!;
+  const key = scene.children.find((child): child is THREE.DirectionalLight => child instanceof THREE.DirectionalLight)!;
+  return [
+    ...(scene.background as THREE.Color).toArray(),
+    ...(scene.fog as THREE.Fog).color.toArray(),
+    ...ambient.color.toArray(),
+    ...key.color.toArray(),
+    ambient.intensity, key.intensity,
+  ];
+}
+
+// Independent reference calculation for the owner's two samples of the old
+// palette. THREE.Color interpolates linear RGB, not the encoded hex values.
+function originalLightingAt(elapsed: 20 | 167.5): number[] {
+  const day = elapsed === 20;
+  const t = day ? (20 / 180) / 0.32 : ((167.5 / 180) - 0.68) / 0.32;
+  const blend = 3 * t * t - 2 * t * t * t;
+  const pairs = day
+    ? [[SKY_DAWN_BG, SKY_DAY_BG], [SKY_DAWN_FOG, SKY_DAY_FOG],
+      [SCENE_DAWN_FILL, SCENE_DAY_FILL], [SCENE_DAWN_KEY, SCENE_DAY_KEY]]
+    : [[SKY_SUNSET_BG, BASE_BG], [SKY_SUNSET_FOG, BASE_BG],
+      [SCENE_SUNSET_FILL, SCENE_COOL_FILL], [SCENE_SUNSET_KEY, SCENE_WARM_LIGHT]];
+  const colors = pairs.flatMap(([from, to]) => new THREE.Color(from).lerp(new THREE.Color(to), blend).toArray());
+  return [...colors,
+    day ? 0.98 - 0.2 * blend : 0.49 - 0.18 * blend,
+    day ? 1.28 + 0.35 * blend : 1.28 - 0.8 * blend];
+}
+
+function expectLightingClose(actual: number[], expected: number[]): void {
+  expect(actual).toHaveLength(expected.length);
+  actual.forEach((value, i) => expect(value).toBeCloseTo(expected[i]!, 12));
+}
+
 async function createManager(): Promise<SceneManager> {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 200);
@@ -144,7 +178,7 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     return { manager, scene, camera };
   }
 
-  it("starts at dawn with one shadow key and one ambient fill", async () => {
+  it("starts with the former 2:40 look and one shadow key plus one ambient fill", async () => {
     const { scene } = await createManagerWithScene();
     const directional = scene.children.filter((child): child is THREE.DirectionalLight => child instanceof THREE.DirectionalLight);
     const ambient = scene.children.filter((child): child is THREE.AmbientLight => child instanceof THREE.AmbientLight);
@@ -152,8 +186,7 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     expect(directional).toHaveLength(1);
     expect(ambient).toHaveLength(1);
     expect(spots).toHaveLength(0);
-    expect(directional[0]!.color.getHex()).toBe(SCENE_DAWN_KEY);
-    expect(ambient[0]!.color.getHex()).toBe(SCENE_DAWN_FILL);
+    expectLightingClose(readLightingChannels(scene), originalLightingAt(20));
     expect(directional[0]!.shadow.mapSize.x).toBeLessThanOrEqual(SHADOW_MAP_SIZE);
     expect(directional[0]!.shadow.mapSize.y).toBeLessThanOrEqual(SHADOW_MAP_SIZE);
   });
@@ -230,63 +263,81 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     expect(lights).toHaveLength(2);
   });
 
-  it("moves continuously from dawn through day and sunset to deep night", async () => {
+  it("holds the former 2:40 lighting through 1:15, and the former 0:12.5 from 1:00 to the end", async () => {
     const { manager, scene } = await createManagerWithScene();
-    const background = scene.background as THREE.Color;
-    const fog = scene.fog as THREE.Fog;
-    const ambient = scene.children.find((child): child is THREE.AmbientLight => child instanceof THREE.AmbientLight)!;
-    const key = scene.children.find((child): child is THREE.DirectionalLight => child instanceof THREE.DirectionalLight)!;
-    const moon = scene.getObjectByName("moon") as THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
+    const background = scene.background;
+    const fog = scene.fog;
+    const lights = scene.children.filter((child) => child instanceof THREE.Light);
     const stars = scene.getObjectByName("stars") as THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
-    const lightCount = scene.children.filter((child) => child instanceof THREE.Light).length;
-    expect(background.getHex()).toBe(SKY_DAWN_BG);
-    expect(fog.color.getHex()).toBe(SKY_DAWN_FOG);
-    expect(moon.material.opacity).toBe(0);
-    expect(stars.material.opacity).toBe(0);
-    const dawnLight = ambient.intensity + key.intensity;
+    const dayChannels = readLightingChannels(scene);
+    for (const elapsed of [0, 20, 57.6, 90, 104.999, 105]) {
+      manager.setDayProgress(elapsed / 180);
+      expectLightingClose(readLightingChannels(scene), originalLightingAt(20));
+      expect(readLightingChannels(scene)).toEqual(dayChannels);
+      expect(stars.material.opacity).toBe(0);
+    }
 
-    manager.setDayProgress(0.32);
-    expect(background.getHex()).toBe(SKY_DAY_BG);
-    expect(fog.color.getHex()).toBe(SKY_DAY_FOG);
-    expect(ambient.color.getHex()).toBe(SCENE_DAY_FILL);
-    expect(key.color.getHex()).toBe(SCENE_DAY_KEY);
-    const dayLight = ambient.intensity + key.intensity;
-    expect(dayLight).toBeGreaterThan(dawnLight);
-    expect(dayLight / dawnLight).toBeLessThan(1.1);
-    expect(ambient.intensity).toBeLessThan(0.98);
-    expect(key.intensity).toBeGreaterThan(1.5);
-    manager.setDayProgress(0.68);
-    expect(background.getHex()).toBe(SKY_SUNSET_BG);
-    expect(fog.color.getHex()).toBe(SKY_SUNSET_FOG);
+    manager.setDayProgress(112.5 / 180);
+    const ambient = lights.find((child): child is THREE.AmbientLight => child instanceof THREE.AmbientLight)!;
+    const key = lights.find((child): child is THREE.DirectionalLight => child instanceof THREE.DirectionalLight)!;
+    expect((background as THREE.Color).getHex()).toBe(SKY_SUNSET_BG);
+    expect((fog as THREE.Fog).color.getHex()).toBe(SKY_SUNSET_FOG);
     expect(ambient.color.getHex()).toBe(SCENE_SUNSET_FILL);
     expect(key.color.getHex()).toBe(SCENE_SUNSET_KEY);
-    const sunsetLight = ambient.intensity + key.intensity;
-    expect(sunsetLight).toBeLessThan(dawnLight);
-    expect(key.intensity / ambient.intensity).toBeGreaterThan(2);
-    expect(stars.material.opacity).toBeGreaterThan(0);
-    expect(moon.material.opacity).toBeGreaterThan(0);
-    manager.setDayProgress(0.69);
-    const afterSunset = background.clone();
-    manager.setDayProgress(0.691);
-    expect(Math.abs(background.r - afterSunset.r)
-      + Math.abs(background.g - afterSunset.g)
-      + Math.abs(background.b - afterSunset.b)).toBeLessThan(0.01);
+    expect(ambient.intensity).toBe(0.49);
+    expect(key.intensity).toBe(1.28);
 
-    manager.setDayProgress(1);
-    expect(background.getHex()).toBe(BASE_BG);
-    expect(fog.color.getHex()).toBe(BASE_BG);
-    expect(ambient.color.getHex()).toBe(SCENE_COOL_FILL);
-    expect(key.color.getHex()).toBe(SCENE_WARM_LIGHT);
-    expect(stars.material.opacity).toBeCloseTo(0.9);
-    expect(moon.material.opacity).toBeCloseTo(0.92);
-    expect(ambient.intensity + key.intensity).toBeLessThan(sunsetLight * 0.5);
-    expect(scene.children.filter((child) => child instanceof THREE.Light)).toHaveLength(lightCount);
+    manager.setDayProgress(120 / 180);
+    const nightChannels = readLightingChannels(scene);
+    for (const elapsed of [120, 125, 150, 165, 167.5, 170, 180]) {
+      manager.setDayProgress(elapsed / 180);
+      expectLightingClose(readLightingChannels(scene), originalLightingAt(167.5));
+      expect(readLightingChannels(scene)).toEqual(nightChannels);
+      expect(stars.material.opacity).toBeGreaterThan(0.85);
+    }
+    expect(scene.background).toBe(background);
+    expect(scene.fog).toBe(fog);
+    expect(scene.children.filter((child) => child instanceof THREE.Light)).toEqual(lights);
     manager.setDayProgress(0);
-    expect(background.getHex()).toBe(SKY_DAWN_BG);
+    expect(readLightingChannels(scene)).toEqual(dayChannels);
     expect(stars.material.opacity).toBe(0);
   });
 
-  it("moves the sun and following moon on the same tilted arc", async () => {
+  it("dims through the 15-second transition without a noon flash and has soft continuous edges", async () => {
+    const { manager, scene } = await createManagerWithScene();
+    manager.setDayProgress(105 / 180);
+    let previous = readLightingChannels(scene);
+    let previousBrightness = previous[12]! + previous[13]!;
+    let previousSkyBrightness = 0.2126 * previous[0]! + 0.7152 * previous[1]! + 0.0722 * previous[2]!;
+    for (let elapsed = 105.25; elapsed <= 120; elapsed += 0.25) {
+      manager.setDayProgress(elapsed / 180);
+      const current = readLightingChannels(scene);
+      const brightness = current[12]! + current[13]!;
+      const skyBrightness = 0.2126 * current[0]! + 0.7152 * current[1]! + 0.0722 * current[2]!;
+      expect(brightness).toBeLessThan(previousBrightness);
+      expect(skyBrightness).toBeLessThan(previousSkyBrightness);
+      expect(Math.max(...current.map((value, i) => Math.abs(value - previous[i]!)))).toBeLessThan(0.055);
+      previous = current;
+      previousBrightness = brightness;
+      previousSkyBrightness = skyBrightness;
+    }
+    const sample = (elapsed: number): number[] => {
+      manager.setDayProgress(elapsed / 180);
+      return readLightingChannels(scene);
+    };
+    const distance = (a: number[], b: number[]): number => Math.max(...a.map((value, i) => Math.abs(value - b[i]!)));
+    for (const edge of [105, 112.5, 120]) {
+      expect(distance(sample(edge - 0.001), sample(edge + 0.001))).toBeLessThan(0.000001);
+      // The slope approaches zero at the start, warm-sunset join and end.
+      for (const direction of [-1, 1]) {
+        const closeChange = distance(sample(edge), sample(edge + direction * 0.01));
+        const fartherChange = distance(sample(edge), sample(edge + direction * 0.1));
+        expect(closeChange).toBeLessThanOrEqual(fartherChange * 0.02 + 1e-12);
+      }
+    }
+  });
+
+  it("moves the sun and following moon on the same tilted arc during the compressed sunset", async () => {
     const { manager, scene, camera } = await createManagerWithScene();
     const sun = scene.getObjectByName("sun") as THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
     const moon = scene.getObjectByName("moon") as THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
@@ -295,58 +346,70 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld(true);
     const projectedSun = new THREE.Vector3();
-    const expectInPortraitView = (maxY = 1): void => {
+    const expectInPortraitView = (): void => {
       sun.getWorldPosition(projectedSun).project(camera);
       expect(Math.abs(projectedSun.x)).toBeLessThan(1);
-      expect(projectedSun.y).toBeLessThanOrEqual(maxY);
+      expect(projectedSun.y).toBeLessThan(1);
       expect(projectedSun.y).toBeGreaterThan(-1);
     };
     expect(sun.geometry.parameters.radius).toBe(2.8);
     expect(sun.material.color.getHex()).toBe(SKY_SUN_DISC);
-    expect(sun.position.y).toBeCloseTo(0);
     expect(sun.material.opacity).toBeGreaterThan(0.9);
     expect(moon.visible).toBe(false);
     expect(key.position.x).toBeLessThan(0);
     expectInPortraitView();
-    const dawnX = sun.position.x;
-
-    manager.setDayProgress(0.35);
-    expect(sun.position.x).toBeGreaterThan(dawnX);
+    const startSun = sun.position.clone();
+    manager.setDayProgress(60 / 180);
+    expect(sun.position.x).toBeGreaterThan(startSun.x);
     expect(sun.position.y).toBeGreaterThan(5.5);
     expect(sun.position.y).toBeLessThan(7);
     expect(sun.material.opacity).toBeGreaterThan(0.9);
-    expectInPortraitView(0.95);
-    const highSun = sun.position.clone();
-
-    manager.setDayProgress(0.68);
+    expectInPortraitView();
+    manager.setDayProgress(105 / 180);
+    expect(sun.position.y).toBeGreaterThan(5.5);
+    expect(moon.visible).toBe(false);
+    manager.setDayProgress(112.5 / 180);
     expect(sun.position.x).toBeGreaterThan(0);
     expect(sun.position.y).toBeGreaterThan(0);
     expect(sun.position.y).toBeLessThan(3);
     expect(sun.material.color.getHex()).toBe(SKY_SUNSET_DISC);
-    expect(sun.material.opacity).toBeGreaterThan(0);
+    expect(sun.visible).toBe(true);
+    expect(moon.visible).toBe(true);
     expect(key.position.x).toBeGreaterThan(0);
     expectInPortraitView();
-
-    manager.setDayProgress(0.78);
-    expect(sun.position.y).toBeLessThan(0);
-    expect(sun.material.opacity).toBe(0);
+    manager.setDayProgress(116 / 180);
     expect(sun.visible).toBe(false);
-    expect(moon.position.x).toBeGreaterThan(dawnX);
-    expect(moon.material.opacity).toBeGreaterThan(0);
-    // Sun at 0.35 / 0.78 and moon at 0.66 + 0.64 * that same arc fraction.
-    manager.setDayProgress(0.66 + 0.64 * (0.35 / 0.78));
-    expect(moon.position.distanceTo(highSun)).toBeLessThan(0.001);
-    expect(moon.material.opacity).toBeGreaterThan(0.8);
-    manager.setDayProgress(1);
-    expect(moon.position.x).toBeGreaterThan(0);
+    expect(sun.position.y).toBeLessThan(0);
+    expect(moon.position.y).toBeGreaterThan(0);
+
+    // Both discs fit exactly the same slanted arc, and travel forwards.
+    let lastSunX = -Infinity;
+    let lastMoonX = -Infinity;
+    for (let elapsed = 0; elapsed <= 180; elapsed += 0.5) {
+      manager.setDayProgress(elapsed / 180);
+      expect(sun.position.x).toBeGreaterThanOrEqual(lastSunX);
+      expect(moon.position.x).toBeGreaterThanOrEqual(lastMoonX);
+      lastSunX = sun.position.x;
+      lastMoonX = moon.position.x;
+      for (const disc of [sun, moon]) {
+        const arc = (disc.position.x + 22) / 44;
+        expect(disc.position.y).toBeCloseTo(7.5 * Math.sin(Math.PI * arc) - 2.2 * arc, 10);
+        expect(disc.position.z).toBeCloseTo(-62 + 5 * (arc - 0.5), 10);
+      }
+    }
+    expect(moon.position.x).toBeGreaterThan(startSun.x);
     expect(moon.position.y).toBeGreaterThan(5);
     expect(moon.position.y).toBeLessThan(8);
+    expect(moon.material.opacity).toBeCloseTo(0.92);
     expect(moon.visible).toBe(true);
+    const nightMoon = moon.position.clone();
+    manager.setDayProgress(120 / 180);
+    expect(moon.position.equals(nightMoon)).toBe(true);
     expect(scene.children.filter((child) => child instanceof THREE.Light)).toHaveLength(2);
     manager.setDayProgress(0);
     expect(sun.visible).toBe(true);
     expect(moon.visible).toBe(false);
-    expect(sun.position.x).toBeCloseTo(dawnX);
+    expect(sun.position.equals(startSun)).toBe(true);
   });
 
   it("uses one sparse batch of soft irregular cloud hints and fades it by night", async () => {
@@ -401,12 +464,12 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     expect(onRight).toBeGreaterThan(0);
     expect(heights.size).toBeGreaterThan(5);
     const dawnOpacity = clouds.material.opacity;
-    manager.setDayProgress(0.32);
+    manager.setDayProgress(60 / 180);
     expect(clouds.material.opacity).toBeGreaterThan(dawnOpacity);
-    manager.setDayProgress(0.68);
+    manager.setDayProgress(112.5 / 180);
     expect(clouds.material.color.getHex()).toBe(SKY_CLOUD_SUNSET);
     expect(clouds.material.opacity).toBeGreaterThan(0);
-    manager.setDayProgress(0.86);
+    manager.setDayProgress(120 / 180);
     expect(clouds.material.opacity).toBe(0);
     expect(clouds.visible).toBe(false);
     manager.setDayProgress(0);
@@ -414,10 +477,14 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     expect(clouds.material.opacity).toBeCloseTo(dawnOpacity);
   });
 
-  it("turns shop porches on in the final minute and resets them for dawn", async () => {
+  it("turns shop porches on by real final-minute time and resets them for day", async () => {
     const porch = vi.spyOn(AdsManager.prototype, "setPorchLighting");
     try {
       const { manager } = await createManagerWithScene();
+      expect(porch).toHaveBeenLastCalledWith(0);
+      manager.setDayProgress(112.5 / 180);
+      expect(porch).toHaveBeenLastCalledWith(0);
+      manager.setDayProgress(119.999 / 180);
       expect(porch).toHaveBeenLastCalledWith(0);
       manager.setDayProgress(2 / 3);
       expect(porch).toHaveBeenLastCalledWith(0);
@@ -440,6 +507,64 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
       expect(porch).toHaveBeenLastCalledWith(1);
     } finally {
       porch.mockRestore();
+    }
+  });
+
+  it("restores lighting, sky and real-time firefly fades when time arrives before or after build", () => {
+    const porch = vi.spyOn(AdsManager.prototype, "setPorchLighting");
+    try {
+      for (const elapsed of [0, 20, 105, 110, 112.5, 119, 120, 123, 167.5, 180]) {
+        const lateScene = new THREE.Scene();
+        const late = new SceneManager(lateScene, new THREE.PerspectiveCamera());
+        const readyScene = new THREE.Scene();
+        const ready = new SceneManager(readyScene, new THREE.PerspectiveCamera());
+        managers.push(late, ready);
+        ready.build();
+        ready.setDayProgress(elapsed / 180);
+        late.setDayProgress(elapsed / 180);
+        late.build();
+        expect(readLightingChannels(lateScene)).toEqual(readLightingChannels(readyScene));
+        for (const name of ["sun", "moon", "day-clouds", "stars", "fireflies"]) {
+          const before = lateScene.getObjectByName(name) as THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+          const after = readyScene.getObjectByName(name) as THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+          expect(before.visible).toBe(after.visible);
+          expect(before.position.equals(after.position)).toBe(true);
+          expect(before.material.opacity).toBe(after.material.opacity);
+        }
+        // This expected fade is based on actual elapsed time, not sky progress.
+        const fadeTime = Math.max(0, Math.min(1, (elapsed - 120) / 6.3));
+        const fade = fadeTime * fadeTime * (3 - 2 * fadeTime);
+        expect(porch).toHaveBeenLastCalledWith(expect.closeTo(fade, 12));
+        const swarm = lateScene.getObjectByName("fireflies") as THREE.InstancedMesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+        expect(swarm.visible).toBe(elapsed > 120);
+        expect(swarm.material.opacity).toBeCloseTo(FIREFLY_OPACITY * fade, 12);
+        if (elapsed <= 105) expectLightingClose(readLightingChannels(lateScene), originalLightingAt(20));
+        if (elapsed >= 120) expectLightingClose(readLightingChannels(lateScene), originalLightingAt(167.5));
+
+        // A new round restores the same day sample and hides every night effect.
+        late.setDayProgress(0);
+        expectLightingClose(readLightingChannels(lateScene), originalLightingAt(20));
+        expect(swarm.visible).toBe(false);
+        expect(swarm.material.opacity).toBe(0);
+        expect(porch).toHaveBeenLastCalledWith(0);
+        expect((lateScene.getObjectByName("moon") as THREE.Mesh).visible).toBe(false);
+        const stars = lateScene.getObjectByName("stars") as THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
+        expect(stars.material.opacity).toBe(0);
+      }
+    } finally {
+      porch.mockRestore();
+    }
+  });
+
+  it("clamps out-of-range round time and handles invalid time as a day reset", async () => {
+    const { manager, scene } = await createManagerWithScene();
+    manager.setDayProgress(2);
+    expectLightingClose(readLightingChannels(scene), originalLightingAt(167.5));
+    for (const progress of [-1, Number.NaN, Infinity, -Infinity]) {
+      manager.setDayProgress(1);
+      manager.setDayProgress(progress);
+      expectLightingClose(readLightingChannels(scene), originalLightingAt(20));
+      expect((scene.getObjectByName("fireflies") as THREE.Mesh).visible).toBe(false);
     }
   });
 
@@ -490,6 +615,12 @@ describe("SceneManager Stage 4d.3 dressing (glass walls, nebulae, fireflies)", (
     expect(material.depthWrite).toBe(false);
     expect(swarm.visible).toBe(false);
     expect(material.opacity).toBe(0);
+    manager.setDayProgress(115 / 180);
+    expect((scene.getObjectByName("moon") as THREE.Mesh).visible).toBe(true);
+    expect((scene.getObjectByName("stars") as THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>).material.opacity).toBeGreaterThan(0);
+    expect(swarm.visible).toBe(false);
+    manager.setDayProgress(119.999 / 180);
+    expect(swarm.visible).toBe(false);
     manager.setDayProgress(2 / 3);
     expect(swarm.visible).toBe(false);
     manager.setDayProgress(0.685);

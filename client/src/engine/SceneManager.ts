@@ -42,6 +42,16 @@ import {
   RECOIL_FULL_M,
   RECOIL_RECONCILE_GRACE_S,
   RECOIL_WEAK_M,
+  ROUND_EVENING_LIGHTS_FADE_S,
+  ROUND_EVENING_LIGHTS_START_S,
+  ROUND_LIGHTING_DAY_SAMPLE_PROGRESS,
+  ROUND_LIGHTING_NIGHT_SAMPLE_PROGRESS,
+  ROUND_LIGHTING_SUNSET_AT_S,
+  ROUND_LIGHTING_SUNSET_SAMPLE_PROGRESS,
+  ROUND_LIGHTING_TRANSITION_END_S,
+  ROUND_LIGHTING_TRANSITION_START_S,
+  ROUND_SECONDS,
+  ROUND_SKY_TRANSITION_START_PROGRESS,
   SELF_RECONCILE_MIN_M,
   SELF_RECONCILE_RATE,
   SELF_RECONCILE_SNAP_M,
@@ -298,8 +308,6 @@ const MOON_ARC_DURATION = 0.64;
 const MOON_FADE_DURATION = 0.18;
 const CLOUD_FADE_START = 0.68;
 const CLOUD_FADE_END = 0.86;
-const PORCH_LIGHT_START = 2 / 3;
-const PORCH_LIGHT_RAMP = 0.035;
 const SUN_DAY_COLOR = new THREE.Color(SKY_SUN_DISC);
 const SUN_SUNSET_COLOR = new THREE.Color(SKY_SUNSET_DISC);
 const CLOUD_DAY_COLOR = new THREE.Color(SKY_CLOUD_DAY);
@@ -308,6 +316,48 @@ const CLOUD_SUNSET_COLOR = new THREE.Color(SKY_CLOUD_SUNSET);
 function smooth01(value: number): number {
   const t = Math.max(0, Math.min(1, value));
   return t * t * (3 - 2 * t);
+}
+
+// Preserve exact colors and intensities from the previous full-round cycle.
+// These three samples allocate once, never in the per-frame lighting path.
+interface DayLighting {
+  background: THREE.Color;
+  fog: THREE.Color;
+  ambient: THREE.Color;
+  key: THREE.Color;
+  ambientIntensity: number;
+  keyIntensity: number;
+}
+
+function sampleDayLighting(progress: number): DayLighting {
+  let from: (typeof DAY_PHASES)[number] = DAY_PHASES[0];
+  let to: (typeof DAY_PHASES)[number] = DAY_PHASES[1];
+  for (let i = 1; i < DAY_PHASES.length; i += 1) {
+    const next = DAY_PHASES[i];
+    if (progress <= next.at) {
+      to = next;
+      break;
+    }
+    from = next;
+  }
+  const blend = smooth01((progress - from.at) / (to.at - from.at));
+  return {
+    background: new THREE.Color().lerpColors(from.background, to.background, blend),
+    fog: new THREE.Color().lerpColors(from.fog, to.fog, blend),
+    ambient: new THREE.Color().lerpColors(from.ambient, to.ambient, blend),
+    key: new THREE.Color().lerpColors(from.key, to.key, blend),
+    ambientIntensity: from.ambientIntensity + (to.ambientIntensity - from.ambientIntensity) * blend,
+    keyIntensity: from.keyIntensity + (to.keyIntensity - from.keyIntensity) * blend,
+  };
+}
+
+const ROUND_DAY_LIGHTING = sampleDayLighting(ROUND_LIGHTING_DAY_SAMPLE_PROGRESS);
+const ROUND_SUNSET_LIGHTING = sampleDayLighting(ROUND_LIGHTING_SUNSET_SAMPLE_PROGRESS);
+const ROUND_NIGHT_LIGHTING = sampleDayLighting(ROUND_LIGHTING_NIGHT_SAMPLE_PROGRESS);
+
+function eveningLightsAt(progress: number): number {
+  return smooth01((progress * ROUND_SECONDS - ROUND_EVENING_LIGHTS_START_S)
+    / ROUND_EVENING_LIGHTS_FADE_S);
 }
 
 function skyArcX(t: number): number {
@@ -360,7 +410,8 @@ export class SceneManager {
   private readonly scene: THREE.Scene;
   private readonly camera: THREE.PerspectiveCamera;
   private readonly disposables: Array<{ dispose(): void }> = [];
-  private dayProgress = 0;
+  private roundProgress = 0;
+  private skyProgress = ROUND_LIGHTING_DAY_SAMPLE_PROGRESS;
   private sceneBackground: THREE.Color | null = null;
   private sceneFog: THREE.Fog | null = null;
   private ambientLight: THREE.AmbientLight | null = null;
@@ -574,18 +625,37 @@ export class SceneManager {
   // round resets it. Mutates existing colors/materials only, with no frame
   // allocations or new lights.
   public setDayProgress(progress: number): void {
-    this.dayProgress = Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0;
-    let from: (typeof DAY_PHASES)[number] = DAY_PHASES[0];
-    let to: (typeof DAY_PHASES)[number] = DAY_PHASES[1];
-    for (let i = 1; i < DAY_PHASES.length; i += 1) {
-      const next = DAY_PHASES[i];
-      if (this.dayProgress <= next.at) {
-        to = next;
-        break;
-      }
-      from = next;
+    this.roundProgress = Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0;
+    const elapsed = this.roundProgress * ROUND_SECONDS;
+    let from = ROUND_DAY_LIGHTING;
+    let to = ROUND_SUNSET_LIGHTING;
+    let blend = smooth01((elapsed - ROUND_LIGHTING_TRANSITION_START_S)
+      / (ROUND_LIGHTING_SUNSET_AT_S - ROUND_LIGHTING_TRANSITION_START_S));
+    if (elapsed >= ROUND_LIGHTING_TRANSITION_END_S) {
+      from = ROUND_NIGHT_LIGHTING;
+      to = ROUND_NIGHT_LIGHTING;
+      blend = 0;
+    } else if (elapsed >= ROUND_LIGHTING_SUNSET_AT_S) {
+      from = ROUND_SUNSET_LIGHTING;
+      to = ROUND_NIGHT_LIGHTING;
+      blend = smooth01((elapsed - ROUND_LIGHTING_SUNSET_AT_S)
+        / (ROUND_LIGHTING_TRANSITION_END_S - ROUND_LIGHTING_SUNSET_AT_S));
     }
-    const blend = smooth01((this.dayProgress - from.at) / (to.at - from.at));
+    // Main grading stays fixed during the day. The sky can still travel,
+    // then crosses the same sunset anchor as the accelerated color change.
+    if (elapsed <= ROUND_LIGHTING_TRANSITION_START_S) {
+      this.skyProgress = ROUND_LIGHTING_DAY_SAMPLE_PROGRESS
+        + (ROUND_SKY_TRANSITION_START_PROGRESS - ROUND_LIGHTING_DAY_SAMPLE_PROGRESS)
+        * smooth01(elapsed / ROUND_LIGHTING_TRANSITION_START_S);
+    } else if (elapsed < ROUND_LIGHTING_SUNSET_AT_S) {
+      this.skyProgress = ROUND_SKY_TRANSITION_START_PROGRESS
+        + (ROUND_LIGHTING_SUNSET_SAMPLE_PROGRESS - ROUND_SKY_TRANSITION_START_PROGRESS) * blend;
+    } else if (elapsed < ROUND_LIGHTING_TRANSITION_END_S) {
+      this.skyProgress = ROUND_LIGHTING_SUNSET_SAMPLE_PROGRESS
+        + (ROUND_LIGHTING_NIGHT_SAMPLE_PROGRESS - ROUND_LIGHTING_SUNSET_SAMPLE_PROGRESS) * blend;
+    } else {
+      this.skyProgress = ROUND_LIGHTING_NIGHT_SAMPLE_PROGRESS;
+    }
     this.sceneBackground?.lerpColors(from.background, to.background, blend);
     this.sceneFog?.color.lerpColors(from.fog, to.fog, blend);
     if (this.ambientLight !== null) {
@@ -598,15 +668,15 @@ export class SceneManager {
       this.directionalLight.intensity = from.keyIntensity
         + (to.keyIntensity - from.keyIntensity) * blend;
     }
-    const sunArc = Math.min(1, this.dayProgress / SUN_ARC_END);
+    const sunArc = Math.min(1, this.skyProgress / SUN_ARC_END);
     const sunX = skyArcX(sunArc);
     const sunY = skyArcY(sunArc);
-    const sunOpacity = smooth01((SUN_ARC_END - this.dayProgress) / (SUN_ARC_END - SUN_FADE_START));
+    const sunOpacity = smooth01((SUN_ARC_END - this.skyProgress) / (SUN_ARC_END - SUN_FADE_START));
     if (this.sunDisc !== null) {
       this.sunDisc.position.set(sunX, sunY, skyArcZ(sunArc));
       this.sunDisc.lookAt(0, 7, 0);
       this.sunDisc.material.color.lerpColors(
-        SUN_DAY_COLOR, SUN_SUNSET_COLOR, smooth01((this.dayProgress - 0.43) / 0.25),
+        SUN_DAY_COLOR, SUN_SUNSET_COLOR, smooth01((this.skyProgress - 0.43) / 0.25),
       );
       this.sunDisc.material.opacity = 0.94 * sunOpacity;
       this.sunDisc.visible = sunOpacity > 0;
@@ -621,8 +691,8 @@ export class SceneManager {
         skyArcZ(sunArc) * 0.22 * sunOpacity + 5 * (1 - sunOpacity),
       );
     }
-    const moonArc = Math.max(0, Math.min(1, (this.dayProgress - MOON_ARC_START) / MOON_ARC_DURATION));
-    const moonOpacity = 0.92 * smooth01((this.dayProgress - MOON_ARC_START) / MOON_FADE_DURATION);
+    const moonArc = Math.max(0, Math.min(1, (this.skyProgress - MOON_ARC_START) / MOON_ARC_DURATION));
+    const moonOpacity = 0.92 * smooth01((this.skyProgress - MOON_ARC_START) / MOON_FADE_DURATION);
     if (this.moonDisc !== null) {
       this.moonDisc.position.set(skyArcX(moonArc), skyArcY(moonArc), skyArcZ(moonArc));
       this.moonDisc.lookAt(0, 7, 0);
@@ -630,19 +700,19 @@ export class SceneManager {
       this.moonDisc.visible = moonOpacity > 0;
     }
     if (this.clouds !== null) {
-      const fade = 1 - smooth01((this.dayProgress - CLOUD_FADE_START)
+      const fade = 1 - smooth01((this.skyProgress - CLOUD_FADE_START)
         / (CLOUD_FADE_END - CLOUD_FADE_START));
       this.clouds.material.color.lerpColors(
-        CLOUD_DAY_COLOR, CLOUD_SUNSET_COLOR, smooth01((this.dayProgress - 0.38) / 0.3),
+        CLOUD_DAY_COLOR, CLOUD_SUNSET_COLOR, smooth01((this.skyProgress - 0.38) / 0.3),
       );
-      this.clouds.material.opacity = (0.24 + 0.15 * smooth01(this.dayProgress / 0.32)) * fade;
-      this.clouds.position.x = this.dayProgress * 1.8;
+      this.clouds.material.opacity = (0.24 + 0.15 * smooth01(this.skyProgress / 0.32)) * fade;
+      this.clouds.position.x = this.skyProgress * 1.8;
       this.clouds.visible = fade > 0;
     }
-    const eveningLights = smooth01((this.dayProgress - PORCH_LIGHT_START) / PORCH_LIGHT_RAMP);
+    const eveningLights = eveningLightsAt(this.roundProgress);
     this.ads.setPorchLighting(eveningLights);
     this.fireflies?.setVisibility(eveningLights);
-    const stars = smooth01((this.dayProgress - 0.66) / 0.3);
+    const stars = smooth01((this.skyProgress - 0.66) / 0.3);
     if (this.starMaterial !== null) this.starMaterial.opacity = 0.9 * stars;
     for (let i = 0; i < this.nebulaMaterials.length; i += 1) {
       const material = this.nebulaMaterials[i];
@@ -662,7 +732,7 @@ export class SceneManager {
     this.scene.fog = this.sceneFog;
 
     // One warm key and one cool fill supply a clear face hierarchy. Their
-    // colors/intensities vary with round progress; the fixed shadow map stays
+    // colors/intensities follow the day/transition/night schedule; the shadow map stays
     // within 1024px.
     const ambient = new THREE.AmbientLight(SCENE_COOL_FILL, SCENE_AMBIENT_INTENSITY);
     this.scene.add(ambient);
@@ -683,7 +753,7 @@ export class SceneManager {
     this.arena.buildVisuals(this.scene);
     this.buildSky(this.scene);
     this.ads.buildVisuals(this.scene);
-    this.setDayProgress(this.dayProgress);
+    this.setDayProgress(this.roundProgress);
     void this.ads.load().catch(() => {
       // Ads always fall back to generated placeholders; never fatal.
     });
@@ -724,7 +794,7 @@ export class SceneManager {
     this.ballsPool = new BallsPool(this.scene);
     this.superCore = new SuperCore(this.scene);
     this.fireflies = new Fireflies(this.scene);
-    this.fireflies.setVisibility(smooth01((this.dayProgress - PORCH_LIGHT_START) / PORCH_LIGHT_RAMP));
+    this.fireflies.setVisibility(eveningLightsAt(this.roundProgress));
 
     this.scene.add(this.pickups.object);
     this.scene.add(this.particles.object);
@@ -2070,7 +2140,8 @@ export class SceneManager {
     this.starMaterial = null;
     this.nebulaMaterials.length = 0;
     this.nebulaBaseOpacities.length = 0;
-    this.dayProgress = 0;
+    this.roundProgress = 0;
+    this.skyProgress = ROUND_LIGHTING_DAY_SAMPLE_PROGRESS;
     this.built = false;
   }
 

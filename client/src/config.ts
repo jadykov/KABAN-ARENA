@@ -99,6 +99,21 @@ export const SWAMP_SPEED_MULT = 0.22;
 // HUD placeholder round (QD3 hybrid; real loop lands in Stage 4).
 export const MAX_HEARTS = 4;
 export const ROUND_SECONDS = 180;
+// Hold the owner's former 2:40 look, cross a warm sunset in 15 seconds,
+// then hold the former 0:12.5 look for the last minute. Sample progress is
+// from the original full-round palette, not the authoritative clock.
+export const ROUND_LIGHTING_DAY_SAMPLE_PROGRESS = 20 / ROUND_SECONDS;
+export const ROUND_LIGHTING_SUNSET_SAMPLE_PROGRESS = 0.68;
+export const ROUND_LIGHTING_NIGHT_SAMPLE_PROGRESS = (ROUND_SECONDS - 12.5) / ROUND_SECONDS;
+export const ROUND_LIGHTING_TRANSITION_START_S = ROUND_SECONDS - 75;
+export const ROUND_LIGHTING_TRANSITION_END_S = ROUND_SECONDS - 60;
+export const ROUND_LIGHTING_SUNSET_AT_S = (ROUND_LIGHTING_TRANSITION_START_S
+  + ROUND_LIGHTING_TRANSITION_END_S) / 2;
+export const ROUND_SKY_TRANSITION_START_PROGRESS = 0.43;
+// Porch/firefly onset uses real elapsed time, independently of the faster sky.
+// Keep the existing 6.3-second smooth fade after the last minute begins.
+export const ROUND_EVENING_LIGHTS_START_S = ROUND_SECONDS - 60;
+export const ROUND_EVENING_LIGHTS_FADE_S = ROUND_SECONDS * 0.035;
 export const START_SCORE = 0;
 // Event feed (owner 4d.4: top-right, brief, semi-transparent, never in the
 // way): at most MAX lines visible (newest on top, older drop off — no
@@ -110,8 +125,8 @@ export const KILLFEED_OPACITY = 0.7;
 
 // Perf budget (AGENTS.md pitfalls): shadow map stays at or below 1024.
 export const SHADOW_MAP_SIZE = 1024;
-// Scene light budget: exactly one ambient and one directional light. These
-// night values anchor the round's continuous dawn-to-night progression.
+// Scene light budget: exactly one ambient and one directional light. Build
+// defaults are immediately replaced by the round's sampled lighting state.
 export const SCENE_AMBIENT_INTENSITY = 0.78;
 export const SCENE_DIRECTIONAL_INTENSITY = 0.82;
 
