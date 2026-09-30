@@ -677,6 +677,8 @@ export class SceneManager {
   public setDayProgress(progress: number): void {
     this.roundProgress = Number.isFinite(progress) ? Math.max(0, Math.min(1, progress)) : 0;
     const elapsed = this.roundProgress * ROUND_SECONDS;
+    this.arena.setFenceNightBlend(smooth01((elapsed - ROUND_LIGHTING_TRANSITION_START_S)
+      / (ROUND_LIGHTING_TRANSITION_END_S - ROUND_LIGHTING_TRANSITION_START_S)));
     let from = ROUND_DAY_LIGHTING;
     let to = ROUND_SUNSET_LIGHTING;
     let blend = smooth01((elapsed - ROUND_LIGHTING_TRANSITION_START_S)

@@ -23,6 +23,8 @@ import {
   ACCENT_SWAMP_MUD_EDGE,
   ACCENT_SWAMP_MUD_LIGHT,
   ACCENT_STRIP,
+  BASE_FENCE_NET_DAY,
+  BASE_FENCE_NET_NIGHT,
   BASE_FLOOR,
   BASE_FLOOR_GROUT,
   BASE_FLOOR_LIGHT,
@@ -80,6 +82,8 @@ export interface SpawnSpec {
 }
 
 const FENCE_BOARD_HEIGHT = 0.6;
+const FENCE_NET_DAY_COLOR = new THREE.Color(BASE_FENCE_NET_DAY);
+const FENCE_NET_NIGHT_COLOR = new THREE.Color(BASE_FENCE_NET_NIGHT);
 const TRAMPOLINE_NIGHT_GAIN = 1.3;
 
 // The shared JSON stores topY; Rapier's centered box needs half-height hy.
@@ -230,6 +234,8 @@ export class ArenaBuilder {
   private readonly actors: THREE.Object3D[] = [];
   private readonly fenceMaterials: THREE.Material[] = [];
   private wallOpacity = WALL_GLASS_OPACITY;
+  private fenceNetMaterial: THREE.LineBasicMaterial | null = null;
+  private fenceNightBlend = 0;
   private swampBubbles: THREE.InstancedMesh | null = null;
   private swampBubbleTime = 0;
   private readonly swampBubbleMatrix = new THREE.Matrix4();
@@ -319,6 +325,15 @@ export class ArenaBuilder {
     return this.wallOpacity;
   }
 
+  // The unlit wire needs its own night tone; camera opacity stays independent.
+  // Retain the blend before a late build, without allocating colors per frame.
+  public setFenceNightBlend(amount: number): void {
+    this.fenceNightBlend = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0;
+    this.fenceNetMaterial?.color.lerpColors(
+      FENCE_NET_DAY_COLOR, FENCE_NET_NIGHT_COLOR, this.fenceNightBlend,
+    );
+  }
+
   // The authoritative round's evening phase is supplied by SceneManager.
   // Keep it before a late build as well; updates only touch existing materials.
   public setEveningLighting(amount: number): void {
@@ -357,6 +372,8 @@ export class ArenaBuilder {
     this.actors.length = 0;
     this.fenceMaterials.length = 0;
     this.wallOpacity = WALL_GLASS_OPACITY;
+    this.fenceNetMaterial = null;
+    this.fenceNightBlend = 0;
     this.swampBubbles = null;
     this.swampBubbleTime = 0;
     this.swampBubbleLocations.length = 0;
@@ -479,7 +496,9 @@ export class ArenaBuilder {
     const netGeometry = this.track(new THREE.BufferGeometry());
     netGeometry.setAttribute("position", new THREE.Float32BufferAttribute(netPositions, 3));
     netGeometry.computeBoundingSphere();
-    const netMaterial = this.track(new THREE.LineBasicMaterial({ color: 0x667a70 }));
+    const netMaterial = this.track(new THREE.LineBasicMaterial({ color: BASE_FENCE_NET_DAY }));
+    this.fenceNetMaterial = netMaterial;
+    this.setFenceNightBlend(this.fenceNightBlend);
     const net = new THREE.LineSegments(netGeometry, netMaterial);
     net.name = "sports-fence-diamond-net";
     this.place(net, scene);

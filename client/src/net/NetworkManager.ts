@@ -315,7 +315,7 @@ export function decodePickupGranted(payload: unknown): PickupGrantedInfo | null 
   const seq = body["seq"];
   if (typeof playerId !== "string" || playerId === ""
     || typeof slotId !== "number" || !Number.isSafeInteger(slotId) || slotId < 0
-    || (kind !== "shield" && kind !== "speed")
+    || (kind !== "shield" && kind !== "speed" && kind !== "charge")
     || typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 1) {
     return null;
   }

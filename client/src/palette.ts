@@ -27,6 +27,8 @@ export const BASE_FLOOR_STAR = 0x69868c;
 // are painted directly into vertex colors, with cooler shade-facing sides.
 export const BASE_WALL = 0x4a9276;
 export const BASE_WALL_PLINTH = 0x315d59;
+export const BASE_FENCE_NET_DAY = 0x667a70;
+export const BASE_FENCE_NET_NIGHT = 0x39463f;
 export const BASE_OBSTACLE = 0x739879;
 export const BASE_OBSTACLE_TOP = 0xc6dcaa;
 export const BASE_OBSTACLE_EDGE = 0xd4dda9;

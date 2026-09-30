@@ -527,6 +527,30 @@ describe("pickup-granted event decode", () => {
       .toEqual({ playerId: "s2", slotId: 0, kind: "speed", seq: 1 });
   });
 
+  it("accepts the server-format charge grant that triggers its pickup badge", () => {
+    const payload = { playerId: "s1", slotId: 2, kind: "charge", seq: 3 };
+    expect(decodePickupGranted(payload)).toEqual(payload);
+  });
+
+  it("still rejects malformed fields on charge grants", () => {
+    const payload = { playerId: "s1", slotId: 2, kind: "charge", seq: 3 };
+    const malformed = [
+      { ...payload, playerId: "" },
+      { ...payload, playerId: 1 },
+      { ...payload, slotId: -1 },
+      { ...payload, slotId: 1.5 },
+      { ...payload, slotId: "2" },
+      { ...payload, slotId: Number.MAX_SAFE_INTEGER + 1 },
+      { ...payload, seq: 0 },
+      { ...payload, seq: 1.5 },
+      { ...payload, seq: "3" },
+      { ...payload, seq: Number.POSITIVE_INFINITY },
+    ];
+    for (const grant of malformed) {
+      expect(decodePickupGranted(grant)).toBe(null);
+    }
+  });
+
   it("rejects malformed or removed effect grants", () => {
     expect(decodePickupGranted(null)).toBe(null);
     expect(decodePickupGranted({ playerId: "", slotId: 0, kind: "shield", seq: 1 })).toBe(null);
