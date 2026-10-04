@@ -32,6 +32,13 @@ describe("selected central items", () => {
 });
 
 describe("shared temporary surface prediction", () => {
+  it.each([["swamp", 3], ["ice", 3.6]] as const)("%s predicts coverage in the expanded outer band and stops at the new boundary", (kind, radius) => {
+    const patch = surface("wide", kind, { radius });
+    expect(activeTemporarySurface([patch], radius * 0.75, 1.1, 0, 200)).toBe(patch);
+    expect(activeTemporarySurface([patch], radius, 1.1, 0, 200)).toBe(patch);
+    expect(activeTemporarySurface([patch], radius + 0.01, 1.1, 0, 200)).toBeUndefined();
+  });
+
   it("selects newest overlapping coverage and restores the previous patch on expiry", () => {
     const swamp = surface("a", "swamp");
     const ice = surface("b", "ice", { createdAt: 200, expiresAt: 600 });

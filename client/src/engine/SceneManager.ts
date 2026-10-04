@@ -110,7 +110,7 @@ import { PowerEffectVisuals, type PowerEffectKind } from "../fx/PowerEffectVisua
 import { PhysicsWorld, type Vector3Like } from "../physics/World";
 import { BonusControlState } from "../net/BonusControlState";
 import { SuperBonusVisuals } from "../fx/SuperBonusVisuals";
-import { activeTemporarySurface } from "../../../shared/super-bonuses.mjs";
+import { activeTemporarySurface, TEMPORARY_SWAMP_SPEED_MULT } from "../../../shared/super-bonuses.mjs";
 import type { NetBallSnapshot, NetBonusEffectSnapshot, NetPickupSnapshot, NetPlayerSnapshot, NetSuperSnapshot } from "../net/protocol";
 import {
   bodyFacingForShotYaw,
@@ -1507,7 +1507,7 @@ export class SceneManager {
     // prediction diverged ~2.25 m/s during charge+walk and reconcile tugged
     // the preview origin every frame (bug C jitter source).
     const chargeMult = this.charging ? CHARGE_MOVE_MULT : 1;
-    const surfaceMult = onSwamp ? temporary !== undefined ? 0.6 : SWAMP_SPEED_MULT : onIce ? ICE_SPEED_MULT : 1;
+    const surfaceMult = onSwamp ? temporary !== undefined ? TEMPORARY_SWAMP_SPEED_MULT : SWAMP_SPEED_MULT : onIce ? ICE_SPEED_MULT : 1;
     const speed = MOVE_SPEED * chargeMult * this.powerState.getSpeedMultiplier() * surfaceMult;
     const iceInputActive = worldMove.lengthSq() >= ICE_INPUT_THRESHOLD * ICE_INPUT_THRESHOLD;
     const targetX = onIce && !iceInputActive ? 0 : worldMove.x * speed;

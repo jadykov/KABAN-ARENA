@@ -1,6 +1,6 @@
 import {
   CONTROL_IMMUNITY_MS, directBonusDamage, FREEZE_MS, MAX_SHEEP,
-  SUPER_BONUS_KINDS, SUPER_BONUS_SLOT_MS, TURKEY_MS,
+  SUPER_BONUS_KINDS, SUPER_BONUS_SLOT_MS, TEMPORARY_SWAMP_SPEED_MULT, TURKEY_MS,
   type SuperBonusKind,
 } from "../../shared/super-bonuses.mjs";
 import {
@@ -295,12 +295,12 @@ export class SuperBonusSystem {
     effect.z = z;
     effect.createdAt = now;
     effect.phase = "active";
-    if (effect.kind === "herring") { effect.radius = 1.8; effect.expiresAt = now + 4000; effect.armedAt = now + 600; effect.phase = "warning"; }
-    if (effect.kind === "swamp") { effect.radius = 1.5; effect.expiresAt = now + 5000; }
-    if (effect.kind === "ice") { effect.radius = 1.8; effect.expiresAt = now + 5000; }
-    if (effect.kind === "vacuum") { effect.radius = 2; effect.expiresAt = now + 2000; }
-    if (effect.kind === "soda") { effect.radius = 1.5; effect.expiresAt = now + 6000; effect.armedAt = now + 800; effect.phase = "arming"; }
-    if (effect.kind === "sheep") { effect.radius = 2; effect.expiresAt = now + 6000; effect.phase = "chase"; }
+    if (effect.kind === "herring") { effect.radius = 3.6; effect.expiresAt = now + 4000; effect.armedAt = now + 600; effect.phase = "warning"; }
+    if (effect.kind === "swamp") { effect.radius = 3; effect.expiresAt = now + 5000; }
+    if (effect.kind === "ice") { effect.radius = 3.6; effect.expiresAt = now + 5000; }
+    if (effect.kind === "vacuum") { effect.radius = 4; effect.expiresAt = now + 2000; }
+    if (effect.kind === "soda") { effect.radius = 3; effect.expiresAt = now + 6000; effect.armedAt = now + 800; effect.phase = "arming"; }
+    if (effect.kind === "sheep") { effect.radius = 4; effect.expiresAt = now + 6000; effect.phase = "chase"; }
     this.host.state.bonusEffects.set(effect.effectId, effect);
     this.runtime.set(effect.effectId, { pull: new Map(), path: [], pathAt: 0, airVelocity: 0, airborne: false });
   }
@@ -346,7 +346,7 @@ export class SuperBonusSystem {
       if (effect.kind === "soda" && now >= effect.armedAt && effect.phase !== "warning") {
         effect.phase = "armed";
         for (const player of this.host.state.players.values()) {
-          if (this.reachable(effect, player, 1) && now + 600 < effect.expiresAt) { effect.phase = "warning"; effect.triggerAt = now + 600; break; }
+          if (this.reachable(effect, player, 2) && now + 600 < effect.expiresAt) { effect.phase = "warning"; effect.triggerAt = now + 600; break; }
         }
       }
       if (effect.kind === "herring" && now >= effect.armedAt) {
@@ -482,7 +482,7 @@ export class SuperBonusSystem {
     const dz = waypoint !== undefined ? waypoint.z - effect.z : 0;
     const length = Math.hypot(dx, dz);
     const surface = runtime.airborne ? "normal" : this.host.surface(effect.x, effect.y + BODY_CENTER_Y, effect.z);
-    const speed = 3.2 * (surface === "swamp" ? 0.22 : surface === "temporary-swamp" ? 0.6 : 1);
+    const speed = 3.2 * (surface === "swamp" ? 0.22 : surface === "temporary-swamp" ? TEMPORARY_SWAMP_SPEED_MULT : 1);
     const vx = length > 0 ? dx / length * speed : 0; const vz = length > 0 ? dz / length * speed : 0;
     if (surface === "ice") {
       const acceleration = Math.min(1, 4 * dt);

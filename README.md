@@ -3,7 +3,7 @@
 ## Project
 
 - KABAN ARENA: browser-based 3D multiplayer mobile-first arena game.
-- FFA (every-man-for-himself), 2-6 players per room; solo players get up to 4 weak bots (`server/src/config.ts:6-10`).
+- FFA (every-man-for-himself), 2-6 players per room; a solo participant gets two weak bots, subject to room capacity. Bots leave as soon as a second human starts playing and return if only one participant remains.
 - Guest flow, no auth: pick nick + press Play; empty nick falls back to `Guest-XXXX`; late join mid-match till round end.
 - Every round lasts 3 minutes; the highest score at the end wins (`server/src/config.ts`, `server/src/rooms/ArenaRoom.ts`).
 - Performance priority over graphics: stable ~60fps target on mid phones (mid Android 2021, iPhones 14/15/16).
@@ -95,6 +95,8 @@
 
 Stage 20 implements the ten chosen super bonuses locally. Stage 21 applies the owner's playtest feedback: a hidden random gift in the center, first spawn after 10s and respawn 10s after collection/expiry, and the 15s transition to night at 1:45–1:30 remaining. Gift lifetime is 15s; the collected item lasts 20s. The server retains the unrevealed kind privately. The owner requested committing and pushing Stages 20–21 on 2026-10-04; the VPS still uses the last recorded accepted Stage 18 deployment. Full phone/two-player acceptance of the new set remains open in `map.md` and `plan.md`.
 
+Stage 22 doubles bonus-created zone radii: herring/ice 3.6m, swamp/soda 3m, vacuum/sheep 4m; soda proximity trigger 2m. Temporary swamp now retains 80% movement speed instead of 60%, halving its slowdown while leaving the fixed map swamp unchanged. Bots are disabled at two participating humans, counting dead players awaiting respawn and excluding spectators; removing bots also removes their projectiles and effects. With one participant left, bots return without restarting the round. Stage 22 validation and owner playtesting are tracked in `map.md` and `plan.md`; the owner requested commit/push and a local LOG entry for this stage on 2026-10-04; VPS deployment has not been requested.
+
 ## Gameplay model
 
 - Server-authoritative; client prediction-lite: world-space move intents + `reconcileSelf` XZ easing toward snapshot (`SELF_RECONCILE_MIN_M 0.7 / SNAP 6m / RATE 8`, `client/src/config.ts:125-127`).
@@ -106,7 +108,7 @@ Stage 20 implements the ten chosen super bonuses locally. Stage 21 applies the o
 - Scene light follows the server's three-minute round clock. Daytime light colors and brightness retain the former 2:40 sample through 1:45 remaining; the new sky backdrop grades from a pale blue-green horizon to a colder blue zenith along world up. A smooth 15-second transition passes through red-gold sunset and reaches the accepted night at 1:30 remaining, holding it through round end. Night light intensities retain the Stage 11 gain of 1.06 × 1.15 over the former 0:12.5 sample. The sun and moon follow their accepted tilted orbit; their visible diameters are now 50% and 70% of Stage 11, and the moon keeps moving and remains above the horizon through the end of the longer night. Two thick/dense and two wispy asymmetric cloud variants share a 128×128 atlas across ten irregularly placed planes in one batch, fading by night. Shop porches and fireflies appear during the final minute without adding light sources. Porch emission and glow are a further 20% stronger than Stage 11, with compact luminous fixture cores and the accepted halo reach and soft floor falloff. A new round restores daytime. The player-facing interface is Russian.
 - Trampolines: trigger band y 1.7, cooldown 0.5s. Swamp: 0.22 movement speed, no glide, 15% smaller radius than the old ice circles. Ice: 0.65 movement speed, low friction (0.07), quick input acceleration, gentle coast, and a 0.06 input deadzone for touch-stick drift.
 - Round loop C2: lobby countdown 3s, respawn 3s, invuln 2s; late join till round end; rematch reset 5s after end.
-- Room guards: human-entry-counted capacity (bots ignored), explicit `room-full` reject, `ensureBots` capped by `players.size < MAX_PLAYERS`.
+- Room guards: human-entry-counted capacity, explicit `room-full` reject, and bot filling capped by total entity capacity. Spectators do not suppress bots; two participating humans do, including while dead and awaiting respawn. Bots return for one participant and are removed when none remain.
 - Controls: left stick moves, right thumb/floating zone aims (camera follows aim while charging); desktop WASD + hold-right-mouse camera; Space/FIRE hold also charges.
 
 ## Hard constraints

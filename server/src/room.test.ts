@@ -132,12 +132,12 @@ function isolateDuel(room: ArenaRoom): { shooter: PlayerState; target: PlayerSta
   return { shooter, target };
 }
 
-async function playingRoom(): Promise<ArenaRoom> {
+async function playingRoom(solo = false): Promise<ArenaRoom> {
   const room = new ArenaRoom();
   room.testNow = 0;
   await room.onCreate();
   await joinRoom(room, "s1", "Alpha");
-  await joinRoom(room, "s2", "Beta");
+  if (!solo) await joinRoom(room, "s2", "Beta");
   room.testNow = 1;
   room.tickRoom();
   room.testNow = 1 + LOBBY_COUNTDOWN_MS + 1;
@@ -520,7 +520,7 @@ describe("R2 cannon fire: balls, damage, reload, arming, cap", () => {
   });
 
   it("bots fire cannonballs at nearby fighters", async () => {
-    const room = await playingRoom();
+    const room = await playingRoom(true);
     const human = getPlayer(room, "s1");
     if (human === undefined) {
       throw new Error("missing s1");
@@ -861,7 +861,7 @@ describe("R1 pre-join spectator", () => {
     expect(getPlayer(room, "s1")?.hp).toBe(100);
     fireAs(room, "s1", { power01: 1, yaw: 0, pitch: 0.2, super: false });
     expect(getPlayer(room, "watcher")?.alive).toBe(false);
-    // Counters: 2 fighters + bots, 1 watching.
+    // Counters: 2 human fighters, 1 watching.
     expect(room.watchingCount()).toBe(1);
     expect(room.readyFighterCount()).toBeGreaterThanOrEqual(2);
   });
@@ -897,30 +897,32 @@ describe("B1 capacity regression: bots must not block spectator joins", () => {
     const room = new ArenaRoom();
     room.testNow = 0;
     await room.onCreate();
-    // B1 scenario: 3 ready humans fill bots to desired = max(3, 3*2) = 6,
-    // so total entities reach MAX_PLAYERS before the 4th human arrives.
+    // One ready human, two bots and three spectators fill the entity cap.
+    // A further human must be admitted by retiring a bot first.
     await joinRoom(room, "s1", "Alpha");
-    await joinRoom(room, "s2", "Beta");
-    await joinRoom(room, "s3", "Gamma");
+    await joinAsSpectator(room, "s2", "Beta");
+    await joinAsSpectator(room, "s3", "Gamma");
+    await joinAsSpectator(room, "s4", "Delta");
     expect(playerCount(room)).toBe(MAX_PLAYERS);
-    // 4th human passes matchmaking (only 3 connected clients) and must get
+    // 5th human passes matchmaking (only 4 connected clients) and must get
     // a spectator entry plus an explicit spectator message — never a silent
     // no-op that leaves the client stuck on the overlay.
-    const fourth = capturingClient("s4");
-    await room.onJoin(fourth.client, { nick: "Delta" });
-    const entry = getPlayer(room, "s4");
+    const fifth = capturingClient("s5");
+    await room.onJoin(fifth.client, { nick: "Epsilon" });
+    const entry = getPlayer(room, "s5");
     expect(entry).toBeDefined();
     expect(entry?.spectator).toBe(true);
     expect(entry?.ready).toBe(false);
-    expect(fourth.sent.some((message) => message.type === "spectator")).toBe(true);
-    expect(fourth.sent.some((message) => message.type === "room-full")).toBe(false);
+    expect(fifth.sent.some((message) => message.type === "spectator")).toBe(true);
+    expect(fifth.sent.some((message) => message.type === "room-full")).toBe(false);
+    expect(playerCount(room)).toBe(MAX_PLAYERS);
     // Play must either enter the arena or get an explicit full message —
     // never a silent no-op.
-    const playInbox = capturingClient("s4");
+    const playInbox = capturingClient("s5");
     (room as unknown as { handlePlay(client: Client, payload: unknown): void }).handlePlay(playInbox.client, {
-      nick: "Delta",
+      nick: "Epsilon",
     });
-    const fighter = getPlayer(room, "s4");
+    const fighter = getPlayer(room, "s5");
     const gotWelcome = playInbox.sent.some((message) => message.type === "welcome");
     const gotFull = playInbox.sent.some((message) => message.type === "room-full");
     if (fighter?.ready === true && fighter.spectator === false) {
@@ -1170,7 +1172,7 @@ describe("server movement collision (humans + bots stop/slide, never pass)", () 
   });
 
   it("bots never penetrate solids (same resolver as humans)", async () => {
-    const room = await playingRoom();
+    const room = await playingRoom(true);
     godmode(room);
     const botIds: string[] = [];
     room.state.players.forEach((player: PlayerState, key: string): void => {
@@ -1648,7 +1650,7 @@ describe("server elevation (tower tops walkable, ground impenetrable)", () => {
   it("a bot follows the same raised-ramp underpass at ground height", async () => {
     const platform = SERVER_PLATFORMS.find((entry) => entry.rampSide === "+z" && entry.topY > 2.5);
     if (platform === undefined) throw new Error("no tall +z ramp defined");
-    const room = await playingRoom();
+    const room = await playingRoom(true);
     let bot: PlayerState | undefined;
     room.state.players.forEach((candidate): void => {
       if (candidate.isBot && bot === undefined) bot = candidate;

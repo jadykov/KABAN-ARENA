@@ -1465,8 +1465,8 @@ describe("SceneManager super bonus prediction", () => {
       const effects = [zone({ effectId: "old", kind: "ice", createdAt: 900 }), zone()];
       manager.syncBonuses(player(), effects, [], 1000);
       for (let i = 0; i < 10; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
-      expect(manager.getPlayerVelocity()?.x).toBeGreaterThan(2);
-      expect(manager.getPlayerVelocity()?.x).toBeLessThan(2.8);
+      expect(manager.getPlayerVelocity()?.x).toBeGreaterThan(3);
+      expect(manager.getPlayerVelocity()?.x).toBeLessThan(3.7);
       now = 6000;
       for (let i = 0; i < 15; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
       expect(manager.getPlayerVelocity()?.x).toBeGreaterThan(2.7);
@@ -1479,6 +1479,36 @@ describe("SceneManager super bonus prediction", () => {
       manager.syncBonuses(player(), [], [], 6000);
       for (let i = 0; i < 15; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
       expect(manager.getPlayerVelocity()!.x).toBeCloseTo(underRoof, 6);
+    } finally { clock.mockRestore(); }
+  });
+
+  it("predicts the weaker bonus swamp in the expanded region while fixed map swamp keeps its original penalty", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+    try {
+      const manager = await createManager();
+      const effect = zone({ x: 0, z: 8, radius: 3 });
+      manager.debugSetPlayerState({ x: 2.25, y: 1.1, z: 8 }, { x: 0, y: 0, z: 0 });
+      manager.syncBonuses(player(), [effect], [], 1000);
+      manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
+      const bonusSpeed = manager.getPlayerVelocity()!.x;
+      expect(bonusSpeed).toBeGreaterThan(3.2); expect(bonusSpeed).toBeLessThan(3.7);
+      expect(manager.getAvatarPosition().x).toBeGreaterThan(2.25);
+
+      manager.debugSetPlayerState({ x: -14.5, y: 1.1, z: 0 }, { x: 0, y: 0, z: 0 });
+      manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
+      const mapSpeed = manager.getPlayerVelocity()!.x;
+      expect(mapSpeed).toBeGreaterThan(0.85); expect(mapSpeed).toBeLessThan(1.05);
+      expect(bonusSpeed / mapSpeed).toBeCloseTo(0.8 / 0.22, 5);
+
+      manager.debugSetPlayerState({ x: 3.01, y: 1.1, z: 8 }, { x: 0, y: 0, z: 0 });
+      for (let i = 0; i < 15; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
+      const outsideSpeed = manager.getPlayerVelocity()!.x;
+      const outsideX = manager.getAvatarPosition().x;
+      manager.debugSetPlayerState({ x: 3.01, y: 1.1, z: 8 }, { x: 0, y: 0, z: 0 });
+      manager.syncBonuses(player(), [], [], 1000);
+      for (let i = 0; i < 15; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
+      expect(manager.getPlayerVelocity()!.x).toBeCloseTo(outsideSpeed, 6);
+      expect(manager.getAvatarPosition().x).toBeCloseTo(outsideX, 6);
     } finally { clock.mockRestore(); }
   });
 });

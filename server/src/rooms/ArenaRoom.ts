@@ -1,5 +1,5 @@
 import { Room, type Client } from "colyseus";
-import { activeTemporarySurface, getSuperBonus, isSuperBonusKind } from "../../../shared/super-bonuses.mjs";
+import { activeTemporarySurface, getSuperBonus, isSuperBonusKind, TEMPORARY_SWAMP_SPEED_MULT } from "../../../shared/super-bonuses.mjs";
 import { SuperBonusSystem, bonusLineOfSight } from "../super-bonuses.js";
 import { PICKUP_VISUAL_Y } from "../../../shared/arena-layout.mjs";
 import {
@@ -629,6 +629,16 @@ export class ArenaRoom extends Room<ArenaState> {
       client.send("room-full", { reason: "Комната заполнена" });
       return;
     }
+    // A connected spectator needs an entity slot too. Retire enough bots
+    // before adding the entry, preserving the total cap without rejecting
+    // a human because server-controlled fighters occupied the room.
+    if (this.state.players.size >= MAX_PLAYERS) {
+      for (const [id, entry] of this.state.players) {
+        if (!entry.isBot) continue;
+        this.removeBot(id);
+        if (this.state.players.size < MAX_PLAYERS) break;
+      }
+    }
     const taken = new Set<string>();
     this.state.players.forEach((player: PlayerState): void => {
       taken.add(player.nick);
@@ -720,8 +730,9 @@ export class ArenaRoom extends Room<ArenaState> {
     this.planarMotion.delete(client.sessionId);
     this.respawnAt.delete(client.sessionId);
     this.airSince.delete(client.sessionId);
-    // Bots persist for the next joiner; with no humans left the room idles
-    // back in lobby instead of running a bot-only round.
+    // Restore the solo opponents immediately, including during a live
+    // round; no participants means no bots even if spectators remain.
+    this.ensureBots();
     if (this.humanCount() === 0 && this.state.phase !== "lobby") {
       this.toLobby();
     }
@@ -733,6 +744,9 @@ export class ArenaRoom extends Room<ArenaState> {
     const now = this.currentTime();
     this.state.tick += 1;
     this.state.serverNow = now;
+    // Enforce suppression/cap before combat in every phase. Joins/leaves
+    // restore the population; live ticks do not spawn opponents each frame.
+    this.ensureBots(false);
     const phase = this.state.phase as RoundPhase;
     if (phase === "lobby") {
       this.tickLobby(now);
@@ -1774,7 +1788,7 @@ export class ArenaRoom extends Room<ArenaState> {
     const surface = this.bonusSurface(x, bodyY, z);
     if (surface === "temporary-swamp" || (touchingFloor && surface === "swamp")) {
       // Mud cancels inherited planar momentum each tick, including for bots.
-      const multiplier = surface === "temporary-swamp" ? 0.6 : SWAMP_SPEED_MULT;
+      const multiplier = surface === "temporary-swamp" ? TEMPORARY_SWAMP_SPEED_MULT : SWAMP_SPEED_MULT;
       motion.vx = desiredX * multiplier;
       motion.vz = desiredZ * multiplier;
       return;
@@ -2113,22 +2127,41 @@ export class ArenaRoom extends Room<ArenaState> {
     return count;
   }
 
-  // Fill empty slots with weak bots: total target is
-  // max(MIN_TOTAL_PLAYERS, humans * 2) capped by MAX_PLAYERS/MAX_BOTS.
-  // R1: humans = ready humans; spectators alone never trigger bots. The
-  // total-entity cap (players.size < MAX_PLAYERS) keeps bot fills from
-  // crowding out spectator slots when several watchers are already in.
-  private ensureBots(): void {
-    if (this.state.phase !== "lobby" && this.state.phase !== "countdown") {
-      return;
+  private removeBot(sessionId: string): void {
+    for (const [id, ball] of this.state.balls) {
+      if (ball.ownerId === sessionId) this.state.balls.delete(id);
     }
+    // Releases owned effects, projectiles, their runtime/throw ledgers and
+    // sheep reservations. Held sheep cease reserving a slot with the player.
+    this.bonuses.removeOwner(sessionId);
+    this.state.players.delete(sessionId);
+    this.inputs.delete(sessionId);
+    this.planarMotion.delete(sessionId);
+    this.respawnAt.delete(sessionId);
+    this.brains.delete(sessionId);
+    this.airSince.delete(sessionId);
+    this.bonusAir.delete(sessionId);
+  }
+
+  // Exactly one participating human gets the normal two weak opponents.
+  // A dead human awaiting respawn still participates; spectators do not.
+  // Lifecycle calls fill in any phase without restarting the round. Room
+  // ticks also retire excess bots, keeping the entity cap with spectators.
+  private ensureBots(allowFill = true): void {
     const humans = this.humanCount();
-    if (humans === 0) {
-      return;
+    const desired = humans === 1
+      ? Math.max(0, Math.min(MAX_BOTS, MIN_TOTAL_PLAYERS - 1, MAX_PLAYERS - this.humanEntryCount()))
+      : 0;
+    let count = this.botCount();
+    for (const [id, player] of this.state.players) {
+      if (count <= desired) break;
+      if (!player.isBot) continue;
+      this.removeBot(id);
+      count -= 1;
     }
-    const desired = Math.min(MAX_PLAYERS, Math.max(MIN_TOTAL_PLAYERS, humans * 2));
+    if (!allowFill || desired === 0) return;
     const now = this.currentTime();
-    while (this.readyCount() < desired && this.botCount() < MAX_BOTS && this.state.players.size < MAX_PLAYERS) {
+    while (count < desired && this.state.players.size < MAX_PLAYERS) {
       this.botCounter += 1;
       const id = `bot-${this.botCounter}`;
       const bot = new PlayerState();
@@ -2140,15 +2173,16 @@ export class ArenaRoom extends Room<ArenaState> {
       bot.z = spawn.z;
       bot.y = 1.1;
       bot.rotY = 0;
-      bot.hp = 100;
+      bot.hp = MAX_HP;
       bot.score = 0;
       bot.alive = true;
       bot.isBot = true;
-      bot.invulnUntil = 0;
+      bot.invulnUntil = this.state.phase === "playing" ? now + INVULN_MS : 0;
       bot.ready = true;
       bot.spectator = false;
       this.state.players.set(id, bot);
       this.brains.set(id, createBrain(now, this.botCounter * 131 + 7));
+      count += 1;
     }
   }
 

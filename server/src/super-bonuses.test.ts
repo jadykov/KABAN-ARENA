@@ -165,10 +165,43 @@ describe("ten authoritative super bonuses in ArenaRoom", () => {
     target.frozenUntil = room.testNow! + 1000; const y = target.y; tick(room, 3); expect(target.y).not.toBe(y);
   });
 
-  it.each(["herring", "swamp", "ice", "vacuum", "soda", "sheep"])("%s installs on a real support after direct B", async (kind) => {
+  it.each([["herring", 3.6], ["swamp", 3], ["ice", 3.6], ["vacuum", 4], ["soda", 3], ["sheep", 4]] as const)("%s installs its doubled radius on a real support after direct B", async (kind, radius) => {
     const { room, owner, target } = await match(); shoot(room, owner, kind); tick(room, 4);
     expect(target.hp).toBe(75);
     const effect = [...room.state.bonusEffects.values()][0]; expect(effect?.kind).toBe(kind); expect(effect?.y).toBe(0);
+    expect(effect?.radius).toBe(radius);
+  });
+
+  it("herring damages the expanded outer region and vacuum pulls there while their new outer boundaries remain safe", async () => {
+    const { room, owner, target } = await match(); const cloud = drop(room, owner, "herring");
+    owner.x = cloud.x + 3.61; owner.z = cloud.z; target.x = cloud.x + 3; target.z = cloud.z;
+    tick(room, 20);
+    expect(target.hp).toBeLessThan(100); expect(owner.hp).toBe(100);
+    const { room: r, owner: p, target: q } = await match(); const vacuum = drop(r, p, "vacuum");
+    p.x = vacuum.x + 4.01; p.z = vacuum.z; q.x = vacuum.x + 3; q.z = vacuum.z;
+    const outside = p.x; const inside = q.x; tick(r);
+    expect(q.x).toBeCloseTo(inside - 0.5 * 0.05); expect(p.x).toBe(outside);
+    expect(q.hp).toBe(100); expect(p.hp).toBe(100);
+  });
+
+  it.each([["soda", 3], ["sheep", 4]] as const)("%s expands both blast damage bands and stops at its doubled radius", async (kind, radius) => {
+    for (const [fraction, expectedHp] of [[0.4, 75], [0.75, 87.5]] as const) {
+      const { room, owner, target } = await match(); const effect = drop(room, owner, kind);
+      owner.x = effect.x + radius + 0.01; owner.z = effect.z;
+      target.x = effect.x + radius * fraction; target.z = effect.z;
+      effect.phase = "warning"; effect.triggerAt = room.testNow! + 50; tick(room);
+      expect(target.hp).toBe(expectedHp); expect(owner.hp).toBe(100); expect(owner.score).toBe(1);
+      expect(room.state.bonusEffects.has(effect.effectId)).toBe(false);
+    }
+  });
+
+  it("soda's doubled trigger area warns from the former outer region, keeping the same 600ms delay", async () => {
+    const { room, owner, target } = await match(); const soda = drop(room, owner, "soda");
+    owner.x = 14; owner.z = 14; target.x = soda.x + 2.01; target.z = soda.z;
+    tick(room, 16); expect(soda.phase).toBe("armed"); expect(soda.triggerAt).toBe(0);
+    target.x = soda.x + 1.5; tick(room);
+    expect(soda.phase).toBe("warning"); expect(soda.triggerAt).toBe(room.testNow! + 600);
+    expect(target.hp).toBe(100);
   });
 
   it("herring miss never grants B, repeated entries cap each source at 25 and concurrent sources at 12.5/s", async () => {
@@ -213,11 +246,28 @@ describe("ten authoritative super bonuses in ArenaRoom", () => {
 
   it("temporary surfaces override only their support, newest wins and restores previous surface", async () => {
     const { room, owner, target } = await match(); target.x = 14; target.z = 14;
-    const swamp = drop(room, owner, "swamp"); owner.x = 0; owner.z = 8; input(room, owner.sessionId, 1, 0); const x = owner.x; tick(room); expect(owner.x - x).toBeCloseTo(PLAYER_SPEED * 0.6 * 0.05);
+    const swamp = drop(room, owner, "swamp"); owner.x = 0; owner.z = 8; input(room, owner.sessionId, 1, 0); const x = owner.x; tick(room); expect(owner.x - x).toBeCloseTo(PLAYER_SPEED * 0.8 * 0.05);
     input(room, owner.sessionId, 0, 0); const ice = drop(room, owner, "ice"); owner.x = 0; owner.z = 8;
-    input(room, owner.sessionId, 1, 0); const before = owner.x; tick(room); expect(owner.x - before).toBeLessThan(PLAYER_SPEED * 0.6 * 0.05);
-    ice.expiresAt = room.testNow! + 50; owner.x = 0; owner.z = 8; const previous = owner.x; tick(room); expect(owner.x - previous).toBeCloseTo(PLAYER_SPEED * 0.6 * 0.05);
+    input(room, owner.sessionId, 1, 0); const before = owner.x; tick(room); expect(owner.x - before).toBeLessThan(PLAYER_SPEED * 0.8 * 0.05);
+    ice.expiresAt = room.testNow! + 50; owner.x = 0; owner.z = 8; const previous = owner.x; tick(room); expect(owner.x - previous).toBeCloseTo(PLAYER_SPEED * 0.8 * 0.05);
     swamp.y = 2; owner.x = 0; owner.z = 8; const floorX = owner.x; tick(room); expect(owner.x - floorX).toBeCloseTo(PLAYER_SPEED * 0.05);
+  });
+
+  it.each([["swamp", 2.25, 3], ["ice", 2.7, 3.6]] as const)("%s changes motion in the newly covered region but leaves motion outside its enlarged boundary free", async (kind, inside, radius) => {
+    const { room, owner } = await match(); const effect = drop(room, owner, kind);
+    owner.x = effect.x + inside; owner.z = effect.z; input(room, owner.sessionId, 1, 0);
+    const start = owner.x; tick(room);
+    if (kind === "swamp") expect(owner.x - start).toBeCloseTo(PLAYER_SPEED * 0.8 * 0.05);
+    else { expect(owner.x - start).toBeGreaterThan(0); expect(owner.x - start).toBeLessThan(PLAYER_SPEED * 0.05); }
+    owner.x = effect.x + radius + 0.01; owner.z = effect.z;
+    const outside = owner.x; tick(room); expect(owner.x - outside).toBeCloseTo(PLAYER_SPEED * 0.05);
+    expect(owner.hp).toBe(100);
+  });
+
+  it("the fixed map swamp retains its original slowdown without an installed bonus patch", async () => {
+    const { room, owner } = await match(); owner.x = -14.5; owner.z = 0;
+    input(room, owner.sessionId, 1, 0); const x = owner.x; tick(room);
+    expect(owner.x - x).toBeCloseTo(PLAYER_SPEED * 0.22 * 0.05);
   });
 
   it("vacuum has no zone damage, bounded shared pull and allows stronger opposing movement", async () => {
@@ -380,7 +430,7 @@ describe("ten authoritative super bonuses in ArenaRoom", () => {
 
   it("sheep uses temporary swamp/ice and trampoline gravity while keeping finite lifetime", async () => {
     const { room, owner } = await match(); drop(room, owner, "swamp"); const sheep = drop(room, owner, "sheep");
-    const x = sheep.x; const z = sheep.z; tick(room); expect(Math.hypot(sheep.x - x, sheep.z - z)).toBeCloseTo(3.2 * 0.6 * 0.05);
+    const x = sheep.x; const z = sheep.z; tick(room); expect(Math.hypot(sheep.x - x, sheep.z - z)).toBeCloseTo(3.2 * 0.8 * 0.05);
     const { room: r, owner: p } = await match(); const jumper = drop(r, p, "sheep", 0, 5); expect(jumper.vy).toBe(13.5); tick(r, 3); expect(jumper.y).toBeGreaterThan(0); expect(jumper.vy).toBeLessThan(13.5); tick(r, 120); expect(r.state.bonusEffects.size).toBe(0);
     const { room: r2, owner: p2 } = await match(); drop(r2, p2, "ice"); const slider = drop(r2, p2, "sheep"); const sx = slider.x; const sz = slider.z; tick(r2); expect(Math.hypot(slider.x - sx, slider.z - sz)).toBeLessThan(3.2 * 0.05);
   });

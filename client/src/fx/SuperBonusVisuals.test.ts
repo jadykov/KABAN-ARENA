@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import type { NetBonusEffectSnapshot, NetPlayerSnapshot } from "../net/protocol";
-import { BONUS_DECAL_OFFSET, MAX_BONUS_VISUALS, SuperBonusVisuals } from "./SuperBonusVisuals";
+import { BONUS_BURST_LIFE_S, BONUS_DECAL_OFFSET, MAX_BONUS_VISUALS, SuperBonusVisuals } from "./SuperBonusVisuals";
 
 function effect(overrides: Partial<NetBonusEffectSnapshot> = {}): NetBonusEffectSnapshot {
   return { effectId: "zone", throwId: "throw", ownerId: "owner", kind: "ice", phase: "active", x: 2, y: 4, z: 3, radius: 1.8, createdAt: 1000, expiresAt: 6000, armedAt: 0, triggerAt: 0, vx: 0, vy: 0, vz: 0, ...overrides };
@@ -21,7 +21,51 @@ function activeEffects(scene: THREE.Scene): THREE.Object3D[] {
   return root(scene).children.filter((object) => object.visible && object.name.startsWith("bonus-effect-"));
 }
 
+function horizontalRadius(mesh: THREE.Mesh, center: THREE.Vector3): number {
+  mesh.updateWorldMatrix(true, false);
+  const points = mesh.geometry.getAttribute("position");
+  const point = new THREE.Vector3();
+  let radius = 0;
+  for (let i = 0; i < points.count; i += 1) {
+    point.fromBufferAttribute(points, i).applyMatrix4(mesh.matrixWorld);
+    radius = Math.max(radius, Math.hypot(point.x - center.x, point.z - center.z));
+  }
+  return radius;
+}
+
 describe("authoritative bonus effects", () => {
+  it.each([["herring", 3.6], ["swamp", 3], ["ice", 3.6], ["vacuum", 4], ["soda", 3], ["sheep", 4]] as const)("%s draws its fill and contour at the expanded authoritative radius", (kind, radius) => {
+    const scene = new THREE.Scene(); const visuals = new SuperBonusVisuals(scene);
+    try {
+      const snapshot = effect({ kind, radius }); visuals.sync([snapshot], [], 3000);
+      const center = new THREE.Vector3(snapshot.x, snapshot.y, snapshot.z);
+      for (const name of ["bonus-zone-fill", "bonus-zone-contour"]) {
+        const mesh = scene.getObjectByName(name) as THREE.Mesh;
+        expect(horizontalRadius(mesh, center)).toBeCloseTo(radius, 5);
+      }
+      visuals.update(0.1, 3200);
+      expect(horizontalRadius(scene.getObjectByName("bonus-zone-contour") as THREE.Mesh, center)).toBeCloseTo(radius, 5);
+    } finally { visuals.dispose(); }
+  });
+
+  it.each([["soda", 3], ["sheep", 4]] as const)("%s's pooled explosion ring grows to the authoritative blast radius with its original lifetime", (kind, radius) => {
+    const scene = new THREE.Scene(); const visuals = new SuperBonusVisuals(scene);
+    try {
+      const snapshot = effect({ kind, radius, phase: "warning", triggerAt: 2500 });
+      visuals.sync([snapshot], [], 2400); visuals.sync([], [], 2500);
+      const burst = root(scene).children.find((object) => object.name === "bonus-explosion" && object.visible)!;
+      const ring = burst.children[0] as THREE.Mesh;
+      const center = new THREE.Vector3(snapshot.x, snapshot.y, snapshot.z);
+      expect(horizontalRadius(ring, center)).toBeCloseTo(0.2, 5);
+      visuals.update(BONUS_BURST_LIFE_S / 2, 2660);
+      expect(burst.visible).toBe(true);
+      expect(horizontalRadius(ring, center)).toBeCloseTo(0.2 + (radius - 0.2) / 2, 5);
+      visuals.update(BONUS_BURST_LIFE_S / 2, 2820);
+      expect(horizontalRadius(ring, center)).toBeCloseTo(radius, 5);
+      expect(burst.visible).toBe(false);
+    } finally { visuals.dispose(); }
+  });
+
   it("reconstructs elevated zones on late join and removes them at their server deadline", () => {
     const scene = new THREE.Scene();
     const visuals = new SuperBonusVisuals(scene);

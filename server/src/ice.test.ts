@@ -15,14 +15,16 @@ function fakeClient(sessionId: string): Client {
   return { sessionId, send: (): void => {} } as unknown as Client;
 }
 
-async function playingRoom(): Promise<{ room: ArenaRoom; player: PlayerState }> {
+async function playingRoom(solo = false): Promise<{ room: ArenaRoom; player: PlayerState }> {
   const room = new ArenaRoom();
   room.testNow = 0;
   await room.onCreate();
   for (const [id, nick] of [["s1", "Alpha"], ["s2", "Beta"]] as const) {
     const client = fakeClient(id);
     await room.onJoin(client, { nick });
-    (room as unknown as { handlePlay(client: Client, payload: unknown): void }).handlePlay(client, { nick });
+    if (!solo || id === "s1") {
+      (room as unknown as { handlePlay(client: Client, payload: unknown): void }).handlePlay(client, { nick });
+    }
   }
   room.testNow = 1;
   room.tickRoom();
@@ -244,7 +246,7 @@ describe("authoritative swamp and ice movement", () => {
   });
 
   it("makes bots coast on ice but stop immediately in swamp", async () => {
-    const { room } = await playingRoom();
+    const { room } = await playingRoom(true);
     const ice = ICE_ZONES[0];
     const swamp = SWAMP_ZONES[0];
     const bot = addBot(room, ice.x, ice.z);

@@ -34,6 +34,7 @@ interface PlayerVisual {
 interface Burst {
   group: THREE.Group;
   age: number;
+  radius: number;
 }
 
 function joinedGeometry(pieces: readonly { source: THREE.BufferGeometry; position: readonly [number, number, number]; scale: readonly [number, number, number]; rotZ?: number }[]): THREE.BufferGeometry {
@@ -109,7 +110,7 @@ export class SuperBonusVisuals {
       group.add(core);
       group.visible = false;
       this.root.add(group);
-      this.bursts.push({ group, age: BONUS_BURST_LIFE_S });
+      this.bursts.push({ group, age: BONUS_BURST_LIFE_S, radius: 1 });
     }
   }
 
@@ -221,6 +222,7 @@ export class SuperBonusVisuals {
     const burst = this.bursts.find((candidate) => !candidate.group.visible);
     if (burst === undefined) return;
     burst.age = 0;
+    burst.radius = Math.max(0.25, Math.min(4, snapshot.radius));
     burst.group.visible = true;
     burst.group.position.set(snapshot.x, snapshot.y + BONUS_DECAL_OFFSET, snapshot.z);
     burst.group.scale.setScalar(0.2);
@@ -418,7 +420,8 @@ export class SuperBonusVisuals {
       if (!burst.group.visible) continue;
       burst.age += delta;
       burst.group.visible = burst.age < BONUS_BURST_LIFE_S;
-      burst.group.scale.setScalar(0.2 + burst.age / BONUS_BURST_LIFE_S * 1.5);
+      const progress = Math.min(1, burst.age / BONUS_BURST_LIFE_S);
+      burst.group.scale.setScalar(0.2 + progress * (burst.radius - 0.2));
     }
   }
 

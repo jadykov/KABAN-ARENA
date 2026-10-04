@@ -5,6 +5,9 @@ export const MAX_SHEEP = 2;
 export const FREEZE_MS = 1_000;
 export const TURKEY_MS = 2_000;
 export const CONTROL_IMMUNITY_MS = 2_000;
+// Bonus swamp halves its previous 40% speed penalty; fixed map swamp has
+// separate tuning and retains its stronger slowdown.
+export const TEMPORARY_SWAMP_SPEED_MULT = 0.8;
 
 export const SUPER_BONUSES = Object.freeze([
   { id: "01", kind: "sheep", name: "Взрывная овца", hint: "Преследует ближайшего. Опасна и тебе!", color: 0xffe9cd, directWeak: 0, directStrong: 0 },
