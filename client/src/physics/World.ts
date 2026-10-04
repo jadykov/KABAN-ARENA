@@ -175,6 +175,48 @@ export class PhysicsWorld {
     this.playerBody.applyImpulse({ x, y, z }, true);
   }
 
+  // Jelly's replicated launchVelocity replaces vertical velocity, independent
+  // of capsule mass and previous flight. Keep the existing horizontal motion.
+  public setPlayerVerticalVelocity(y: number): void {
+    this.throwIfDisposed();
+    const velocity = this.playerBody.linvel();
+    this.playerBody.setLinvel({ x: velocity.x, y, z: velocity.z }, true);
+  }
+
+  // Sweep corrections along the live capsule so vacuum reconciliation cannot
+  // move it through walls or shop sides. Preserve momentum; an optional Y
+  // target supports an already-authoritative bonus flight after late join.
+  public movePlayerSafely(x: number, z: number, bodyY?: number): Vector3Like {
+    this.throwIfDisposed();
+    const position = this.playerBody.translation();
+    const delta = { x: x - position.x, y: bodyY === undefined ? 0 : bodyY - position.y, z: z - position.z };
+    const distance = Math.hypot(delta.x, delta.y, delta.z);
+    if (!(distance > 0) || !Number.isFinite(distance)) return { ...position };
+    this.world.propagateModifiedBodyPositionsToColliders();
+    const hit = this.world.castShape(position, this.playerBody.rotation(), delta,
+      this.playerCollider.shape, 0, 1, false, undefined, undefined, this.playerCollider, this.playerBody);
+    const fraction = hit === null ? 1 : Math.max(0, hit.time_of_impact - 0.002 / distance);
+    const limit = ARENA_HALF_SIZE;
+    const next = {
+      x: Math.max(-limit, Math.min(limit, position.x + delta.x * fraction)),
+      y: position.y + delta.y * fraction,
+      z: Math.max(-limit, Math.min(limit, position.z + delta.z * fraction)),
+    };
+    this.playerBody.setTranslation(next, true);
+    return next;
+  }
+
+  public hasLineOfSight(x: number, y: number, z: number): boolean {
+    this.throwIfDisposed();
+    const position = this.playerBody.translation();
+    const origin = { x: position.x, y, z: position.z };
+    const delta = { x: x - origin.x, y: 0, z: z - origin.z };
+    if (!(Math.hypot(delta.x, delta.z) > 0.001)) return true;
+    const hit = this.world.castRay(new RAPIER.Ray(origin, delta), 1, true,
+      undefined, undefined, this.playerCollider, this.playerBody);
+    return hit === null;
+  }
+
   // Deterministic trampoline launch: keep horizontal velocity, force the
   // vertical component to the tuned impulse (QT3-A 8-12 band).
   public launchTrampoline(): void {

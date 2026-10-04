@@ -6,6 +6,7 @@
 
 import { Client, Room } from "colyseus.js";
 import { BALL_HIT_PLAYER_MESSAGE, ROOM_NAME } from "../config";
+import { isSuperBonusKind } from "../../../shared/super-bonuses.mjs";
 import {
   buildFirePayload,
   normalizeNick,
@@ -14,6 +15,7 @@ import {
   type FirePayload,
   type InputPayload,
   type NetBallSnapshot,
+  type NetBonusEffectSnapshot,
   type NetPickupSnapshot,
   type NetPlayerSnapshot,
   type NetPowerUpKind,
@@ -32,6 +34,7 @@ export interface RoomSnapshot {
   balls: NetBallSnapshot[];
   pickups: NetPickupSnapshot[];
   super: NetSuperSnapshot | null;
+  bonusEffects?: NetBonusEffectSnapshot[];
 }
 
 export interface WelcomeSpawn {
@@ -87,6 +90,13 @@ interface WirePlayer {
   ready?: unknown;
   spectator?: unknown;
   superBuff?: unknown;
+  superKind?: unknown;
+  superUntil?: unknown;
+  frozenUntil?: unknown;
+  turkeyUntil?: unknown;
+  controlImmuneUntil?: unknown;
+  launchSeq?: unknown;
+  launchVelocity?: unknown;
   reloadUntil?: unknown;
   shieldHp?: unknown;
   shieldUntil?: unknown;
@@ -109,6 +119,7 @@ interface WireBall {
   z?: unknown;
   power01?: unknown;
   super?: unknown;
+  bonusKind?: unknown;
   ricochet?: unknown;
   resting?: unknown;
   rolling?: unknown;
@@ -146,6 +157,8 @@ interface WireState {
   superZ?: unknown;
   superExpiresAt?: unknown;
   superNextAt?: unknown;
+  superKind?: unknown;
+  bonusEffects?: { forEach(callback: (value: Record<string, unknown>, key: string) => void): void };
 }
 
 // Structural decode of the replicated ArenaState (no schema import on the
@@ -172,6 +185,13 @@ export function decodeSnapshot(state: unknown, selfId: string | null = null): Ro
         ready: toBooleanWithDefault(player.ready, true),
         spectator: toBooleanWithDefault(player.spectator, false),
         superBuff: toBoolean(player.superBuff),
+        superKind: isSuperBonusKind(player.superKind) ? player.superKind : "",
+        superUntil: Math.max(0, toNumber(player.superUntil, 0)),
+        frozenUntil: Math.max(0, toNumber(player.frozenUntil, 0)),
+        turkeyUntil: Math.max(0, toNumber(player.turkeyUntil, 0)),
+        controlImmuneUntil: Math.max(0, toNumber(player.controlImmuneUntil, 0)),
+        launchSeq: Math.max(0, Math.floor(toNumber(player.launchSeq, 0))),
+        launchVelocity: Math.max(0, toNumber(player.launchVelocity, 0)),
         reloadUntil: toNumber(player.reloadUntil, 0),
         shieldHp: Math.max(0, toNumber(player.shieldHp, 0)),
         shieldUntil: Math.max(0, toNumber(player.shieldUntil, 0)),
@@ -197,6 +217,7 @@ export function decodeSnapshot(state: unknown, selfId: string | null = null): Ro
         z: toNumber(ball.z, 0),
         power01: toNumber(ball.power01, 0.5),
         super: toBoolean(ball.super),
+        bonusKind: isSuperBonusKind(ball.bonusKind) ? ball.bonusKind : "",
         color: ownerColorForSession(ownerId, selfId),
         ricochet: toBoolean(ball.ricochet),
         resting: toBoolean(ball.resting),
@@ -241,8 +262,30 @@ export function decodeSnapshot(state: unknown, selfId: string | null = null): Ro
         z: toNumber(wire.superZ, 0),
         expiresAt: toNumber(wire.superExpiresAt, 0),
         nextAt: toNumber(wire.superNextAt, 0),
+        kind: isSuperBonusKind(wire.superKind) ? wire.superKind : "",
       }
     : null;
+  const bonusEffects: NetBonusEffectSnapshot[] = [];
+  try {
+    wire.bonusEffects?.forEach((effect, key): void => {
+      if (typeof effect !== "object" || effect === null || !isSuperBonusKind(effect["kind"])) return;
+      const effectId = toString(effect["effectId"], key);
+      if (effectId === "") return;
+      bonusEffects.push({
+        effectId, throwId: toString(effect["throwId"], ""), ownerId: toString(effect["ownerId"], ""),
+        kind: effect["kind"], phase: toString(effect["phase"], ""),
+        x: toNumber(effect["x"], 0), y: toNumber(effect["y"], 0), z: toNumber(effect["z"], 0),
+        radius: Math.max(0, toNumber(effect["radius"], 0)),
+        createdAt: Math.max(0, toNumber(effect["createdAt"], 0)),
+        expiresAt: Math.max(0, toNumber(effect["expiresAt"], 0)),
+        armedAt: Math.max(0, toNumber(effect["armedAt"], 0)),
+        triggerAt: Math.max(0, toNumber(effect["triggerAt"], 0)),
+        vx: toNumber(effect["vx"], 0), vy: toNumber(effect["vy"], 0), vz: toNumber(effect["vz"], 0),
+      });
+    });
+  } catch {
+    // A malformed effect map cannot stop existing players and balls rendering.
+  }
   return {
     phase: roundPhaseFromString(wire.phase),
     tick: toNumber(wire.tick, 0),
@@ -254,6 +297,7 @@ export function decodeSnapshot(state: unknown, selfId: string | null = null): Ro
     balls,
     pickups,
     super: superSnapshot,
+    bonusEffects,
   };
 }
 

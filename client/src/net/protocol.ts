@@ -32,6 +32,9 @@ import {
   TRAJ_PREVIEW_DT_S,
   WEAK_DAMAGE,
 } from "../config";
+import { directBonusDamage, type SuperBonusKind } from "../../../shared/super-bonuses.mjs";
+
+export type { SuperBonusKind } from "../../../shared/super-bonuses.mjs";
 
 export type RoundPhase = "lobby" | "countdown" | "playing" | "ended";
 export type NetPowerUpKind = "shield" | "speed" | "charge" | "";
@@ -53,6 +56,13 @@ export interface NetPlayerSnapshot {
   ready: boolean;
   spectator: boolean;
   superBuff: boolean;
+  superKind?: SuperBonusKind | "";
+  superUntil?: number;
+  frozenUntil?: number;
+  turkeyUntil?: number;
+  controlImmuneUntil?: number;
+  launchSeq?: number;
+  launchVelocity?: number;
   reloadUntil: number;
   shieldHp: number;
   shieldUntil: number;
@@ -189,9 +199,11 @@ export function powerToSpeed(power01: number): number {
   return BALL_MIN_SPEED + (BALL_MAX_SPEED - BALL_MIN_SPEED) * ((clamped - 0.5) / 0.5);
 }
 
-// Power01 -> damage: threshold 0.8 rewards committed charges, SUPER x2.
-export function damageForPower(power01: number, superBuff: boolean): number {
+// Direct-hit preview only: ordinary base plus the item's immediate damage.
+// The legacy boolean multiplier is retained for old snapshot fixtures.
+export function damageForPower(power01: number, superBuff: boolean, bonusKind: SuperBonusKind | "" = ""): number {
   const base = power01 >= FULL_POWER_THRESHOLD ? FULL_DAMAGE : WEAK_DAMAGE;
+  if (bonusKind !== "") return base + directBonusDamage(bonusKind, power01);
   return superBuff ? base * SUPER_DAMAGE_MULT : base;
 }
 
@@ -254,6 +266,7 @@ export interface NetBallSnapshot {
   power01: number;
   super: boolean;
   color: number;
+  bonusKind?: SuperBonusKind | "";
   ricochet?: boolean;
   resting?: boolean;
   rolling?: boolean;
@@ -287,6 +300,28 @@ export interface NetSuperSnapshot {
   z: number;
   expiresAt: number;
   nextAt: number;
+  kind?: SuperBonusKind | "";
+}
+
+// Server-owned deployed objects and their deadlines. Clients render these
+// snapshots and mirror surface movement; health always comes from players.hp.
+export interface NetBonusEffectSnapshot {
+  effectId: string;
+  throwId: string;
+  ownerId: string;
+  kind: SuperBonusKind;
+  phase: string;
+  x: number;
+  y: number;
+  z: number;
+  radius: number;
+  createdAt: number;
+  expiresAt: number;
+  armedAt: number;
+  triggerAt: number;
+  vx: number;
+  vy: number;
+  vz: number;
 }
 
 // Three neutral map slots, keyed by their decimal layout index on the wire.

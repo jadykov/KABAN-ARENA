@@ -43,6 +43,7 @@ import { RemoteAvatars } from "./net/RemoteAvatars";
 import { InputSendScheduler } from "./net/InputSendScheduler";
 import { beginChargeLevel, mirrorChargeCameraPitch, pitchRateScale, shouldTrackAimFromCamera, stepChargeLevel, unmirrorChargeCameraPitch, yawRateScale, type ChargeLevel } from "./net/chargeAim";
 import { advanceEffectiveChargeMs } from "./net/chargeBoost";
+import { boomerangPreviewDistance } from "./net/bonusTrajectory";
 import { cameraYawBehindFacing, forwardnessRateScale, shouldIdleFollow, stepIdleFollowPitch, stepIdleFollowYaw, stickAngleFromForward, tolerantCameraPitchMin, type IdleFollowGate } from "./net/idleFollow";
 import {
   applyExpo,
@@ -561,6 +562,10 @@ async function boot(): Promise<void> {
       aimOverlay.setReload01(1);
       aimOverlay.hide();
       hud.setBuffValues(0, 0, 0, 0);
+      hud.setSuperBonus(null, 0);
+      hud.setCentreBonus(null, 0);
+      hud.setTurkeyMask(false);
+      sceneManager.clearBonuses();
       hud.addKillfeed("В комнате нет свободных мест");
       hud.setStatus("Комната заполнена. Попробуйте позже.");
       showJoinOverlay();
@@ -630,12 +635,15 @@ async function boot(): Promise<void> {
       sceneManager.setChargeZoom01(0);
       sceneManager.setChargeTranslucent(false);
       sceneManager.setBattleSnapshot([], null);
+      sceneManager.clearBonuses();
       aimOverlay.setCharge01(0);
       aimOverlay.setTrajectory(null);
       aimOverlay.setReload01(1);
       aimOverlay.hide();
       hud.setBuffValues(0, 0, 0, 0);
-      hud.setSuperBadge(false);
+      hud.setSuperBonus(null, 0);
+      hud.setCentreBonus(null, 0);
+      hud.setTurkeyMask(false);
       sceneManager.setSpectating(true);
       joystick.element.style.display = "none";
       fireButton.style.display = "none";
@@ -666,18 +674,17 @@ async function boot(): Promise<void> {
       hud.setScore(self.score);
       hud.setHearts(halvesForHp(self.hp));
       // Stage 5 audio: own SUPER-buff acquirement reads as a pickup chime.
-      const superNow = self.superBuff === true;
+      const superNow = self.superBuff === true || (self.superKind !== undefined && self.superKind !== "" && (self.superUntil ?? 0) > snapshot.serverNow);
       if (superNow && !prevSelfSuper) {
         sfx.play("superPickup");
       }
       prevSelfSuper = superNow;
       hasSuperBuff = superNow;
-      const canShowSuper = isPlaying && !sceneManager.isSpectating();
-      hud.setSuperBadge(canShowSuper && hasSuperBuff);
+      const canShowSuper = isPlaying && self.alive && !sceneManager.isSpectating();
       aimOverlay.setSuper(canShowSuper && hasSuperBuff);
     } else {
       hasSuperBuff = false;
-      hud.setSuperBadge(false);
+      hud.setSuperBonus(null, 0);
       aimOverlay.setSuper(false);
     }
     if (self !== undefined && isPlaying && !self.alive) {
@@ -700,14 +707,14 @@ async function boot(): Promise<void> {
     // the death burst at the last known position so frags read instantly.
     if (self !== undefined && isPlaying && self.alive && !sceneManager.isSpectating()) {
       if (lastSelfAlive === false) {
-        sceneManager.teleportSelf(self.x, self.z);
+        sceneManager.teleportSelf(self.x, self.z, self.y);
         // Stage 5 audio: authoritative respawn shimmer (own body re-placed).
         sfx.play("respawn");
       } else if (lastSelfAlive === null) {
         const local = sceneManager.getAvatarPosition();
         const gap = Math.hypot(self.x - local.x, self.z - local.z);
         if (gap > SELF_RECONCILE_SNAP_M) {
-          sceneManager.teleportSelf(self.x, self.z);
+          sceneManager.teleportSelf(self.x, self.z, self.y);
           sfx.play("respawn");
         }
       }
@@ -721,6 +728,14 @@ async function boot(): Promise<void> {
       }
       lastSelfAlive = false;
     }
+    if (snapshot.phase === "playing") {
+      sceneManager.syncBonuses(self ?? null, snapshot.bonusEffects ?? [], snapshot.players, snapshot.serverNow);
+    } else {
+      sceneManager.syncBonuses(null, [], [], snapshot.serverNow);
+      sceneManager.clearBonuses();
+    }
+    if (!self?.alive || sceneManager.isFrozen() || snapshot.phase !== "playing") cancelCharge();
+    updateBonusHud();
     if (snapshot.phase === "lobby") {
       hud.setTimer(ROUND_SECONDS);
     } else if (snapshot.phase === "countdown") {
@@ -849,7 +864,7 @@ async function boot(): Promise<void> {
   }
 
   function startCharge(): void {
-    if (!isPlaying || sceneManager.isSpectating()) {
+    if (!isPlaying || sceneManager.isSpectating() || latest?.phase !== "playing") {
       return;
     }
     if (isCharging) {
@@ -859,7 +874,8 @@ async function boot(): Promise<void> {
     if (nowMs < reloadUntilMs) {
       return;
     }
-    if (!isSelfAlive()) {
+    const self = latest?.players.find((player) => player.sessionId === net.ownSessionId);
+    if (!isSelfAlive() || sceneManager.isFrozen() || (self?.reloadUntil ?? 0) > sceneManager.getServerNow()) {
       return;
     }
     isCharging = true;
@@ -939,7 +955,8 @@ async function boot(): Promise<void> {
     if (latest !== null && latest.phase !== "playing") {
       return;
     }
-    if (!isSelfAlive()) {
+    const self = latest?.players.find((player) => player.sessionId === net.ownSessionId);
+    if (!isSelfAlive() || sceneManager.isFrozen() || (self?.reloadUntil ?? 0) > sceneManager.getServerNow()) {
       return;
     }
     // Fire-time aim (shared PC + mobile path): with FIRE, float and camera
@@ -1010,7 +1027,8 @@ async function boot(): Promise<void> {
     // Stage 5 audio: filtered-noise whoosh scaled by the charge power.
     sfx.play("throw", { intensity: power01 });
     hasSuperBuff = false;
-    hud.setSuperBadge(false);
+    sceneManager.consumeHeldBonus();
+    hud.setSuperBonus(null, 0);
     aimOverlay.setSuper(false);
     isReloading = true;
     reloadUntilMs = nowMs + RELOAD_MS;
@@ -1488,6 +1506,17 @@ async function boot(): Promise<void> {
   const trajectorySamples: TrajSample[] = Array.from({ length: TRAJ_DOT_COUNT }, () => ({ x: 0, y: 0, visible: false }));
   const zeroMove = { x: 0, y: 0 };
   const zeroLook = { dx: 0, dy: 0 };
+  function updateBonusHud(): void {
+    const active = latest?.phase === "playing";
+    const canShowHeld = active && isPlaying && !sceneManager.isSpectating() && isSelfAlive();
+    const state = sceneManager.getBonusHudState();
+    hud.setSuperBonus(canShowHeld ? state.kind : null, canShowHeld ? state.remaining : 0);
+    hud.setTurkeyMask(canShowHeld && state.turkey);
+    aimOverlay.setSuper(canShowHeld && state.kind !== "");
+    const centre = active ? latest?.super : null;
+    hud.setCentreBonus(centre?.kind ?? null, centre === null || centre === undefined ? 0
+      : Math.max(0, centre.expiresAt - sceneManager.getServerNow()) / 1000);
+  }
   function computeAimTrajectory(): readonly TrajSample[] {
     const chargeS = chargeEffectiveMs / 1000;
     const speed = powerToSpeed(chargeToPower01(chargeS));
@@ -1500,6 +1529,7 @@ async function boot(): Promise<void> {
     const muzzleZ = muzzle.z;
     const width = window.innerWidth;
     const height = window.innerHeight;
+    const boomerang = sceneManager.getBonusHudState().kind === "boomerang";
     engine.camera.updateMatrixWorld();
     // Start at the first-tick hold (muzzle + one server tick) so the first
     // dot matches the first patched ball frame — same origin/offset/height/
@@ -1508,10 +1538,12 @@ async function boot(): Promise<void> {
       const sample = trajectorySamples[i];
       if (sample === undefined) continue;
       const t = previewTimeAt(i);
+      const flightDistance = boomerang ? boomerangPreviewDistance(speed, i, TRAJ_DOT_COUNT) : speed * t;
+      if (flightDistance === null) { sample.visible = false; continue; }
       projScratch.set(
-        muzzleX + muzzle.dirX * speed * t,
-        muzzleY + muzzle.dirY * speed * t - 0.5 * BALL_GRAVITY * t * t,
-        muzzleZ + muzzle.dirZ * speed * t,
+        muzzleX + muzzle.dirX * flightDistance,
+        muzzleY + muzzle.dirY * flightDistance - (boomerang ? 0 : 0.5 * BALL_GRAVITY * t * t),
+        muzzleZ + muzzle.dirZ * flightDistance,
       );
       projScratch.project(engine.camera);
       const behind = projScratch.z > 1 || projScratch.z < -1;
@@ -1539,7 +1571,9 @@ async function boot(): Promise<void> {
     const rawLook = input.consumeLookDelta();
     const playing = isPlaying && !sceneManager.isSpectating();
     const selfAlive = lastSelfAlive !== false;
-    const move = playing && selfAlive ? rawMove : zeroMove;
+    const bonusState = sceneManager.getBonusHudState();
+    if (!selfAlive || bonusState.frozen || latest?.phase !== "playing") cancelCharge();
+    const move = playing && selfAlive && !bonusState.frozen ? rawMove : zeroMove;
     // While charging the camera mirrors aim (one-thumb 360 turn); RMB
     // free-look applies only when NOT charging.
     const look = playing && !isCharging ? rawLook : zeroLook;
@@ -1626,7 +1660,7 @@ async function boot(): Promise<void> {
       idleFollowGate.lookDy = rawLook.dy + camLook;
       idleFollowGate.moveX = move.x;
       idleFollowGate.moveY = move.y;
-      if (shouldIdleFollow(idleFollowGate)) {
+      if (!bonusState.turkey && shouldIdleFollow(idleFollowGate)) {
         const followed = sceneManager.getCameraAngles();
         const phi = stickAngleFromForward(move.x, move.y);
         const followRate = IDLE_FOLLOW_RATE * forwardnessRateScale(phi);
@@ -1736,6 +1770,7 @@ async function boot(): Promise<void> {
       }
     }
     sceneManager.update(deltaSeconds, move, look);
+    updateBonusHud();
     if (playing && selfAlive && isPlaying) {
       const buffs = sceneManager.getPowerUpHudState();
       hud.setBuffValues(buffs.shieldRemaining, buffs.shieldHp, buffs.speedRemaining, buffs.chargeRemaining);
@@ -1759,7 +1794,7 @@ async function boot(): Promise<void> {
     }
     // Remote replication: ease every snapshot through lerp/slerp.
     if (latest !== null) {
-      remotes.sync(latest.players, net.ownSessionId, deltaSeconds, latest.serverNow);
+      remotes.sync(latest.players, net.ownSessionId, deltaSeconds, sceneManager.getServerNow());
     }
     // Inputs-only upstream at 20 ticks/s: camera-relative stick (move.x/y)
     // rotated to WORLD-space via the shared worldMoveFromYaw helper (same

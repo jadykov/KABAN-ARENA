@@ -119,13 +119,13 @@ export const SWAMP_SPEED_MULT = 0.22;
 export const MAX_HEARTS = 4;
 export const ROUND_SECONDS = 180;
 // Hold the owner's former 2:40 look, cross a warm sunset in 15 seconds,
-// then hold the former 0:12.5 look for the last minute. Sample progress is
+// then hold the former 0:12.5 look from 1:30 remaining. Sample progress is
 // from the original full-round palette, not the authoritative clock.
 export const ROUND_LIGHTING_DAY_SAMPLE_PROGRESS = 20 / ROUND_SECONDS;
 export const ROUND_LIGHTING_SUNSET_SAMPLE_PROGRESS = 0.68;
 export const ROUND_LIGHTING_NIGHT_SAMPLE_PROGRESS = (ROUND_SECONDS - 12.5) / ROUND_SECONDS;
-export const ROUND_LIGHTING_TRANSITION_START_S = ROUND_SECONDS - 75;
-export const ROUND_LIGHTING_TRANSITION_END_S = ROUND_SECONDS - 60;
+export const ROUND_LIGHTING_TRANSITION_START_S = ROUND_SECONDS - 105;
+export const ROUND_LIGHTING_TRANSITION_END_S = ROUND_SECONDS - 90;
 export const ROUND_LIGHTING_SUNSET_AT_S = (ROUND_LIGHTING_TRANSITION_START_S
   + ROUND_LIGHTING_TRANSITION_END_S) / 2;
 export const ROUND_SKY_TRANSITION_START_PROGRESS = 0.43;

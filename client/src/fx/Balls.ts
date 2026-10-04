@@ -1,6 +1,9 @@
 import * as THREE from "three";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { MAX_LIVE_BALLS, SUPER_BLINK_S } from "../config";
 import type { NetBallSnapshot, NetSuperSnapshot } from "../net/protocol";
+import { getSuperBonus, isSuperBonusKind, type SuperBonusKind } from "../../../shared/super-bonuses.mjs";
+import { SuperBonusModels } from "./SuperBonusModels";
 import {
   ACCENT_BALL_CAP,
   ACCENT_SPARK,
@@ -29,11 +32,6 @@ export const SUPER_INNER_COLOR = NEUTRAL_WHITE;
 // highlight, not from geometry. Every normal core shares this base; the
 // thrower's identity appears ONLY as the subtle ring + polar dot.
 export const BALL_NEUTRAL_BASE = BALL_BASE;
-// Compact SUPER item: solid collar outer radius and six-facet crystal's
-// widest radius. These legacy names now describe parts, not nested spheres.
-// Its 0.88m span is only 1.26x the ordinary pickup's 0.70m span.
-export const SUPER_CORE_OUTER_RADIUS = 0.44;
-export const SUPER_CORE_INNER_RADIUS = 0.31;
 // Fired SUPER ball visual scale (group scale multiplier vs a normal core).
 export const SUPER_BALL_SCALE = 2;
 // Ball snapshot smoothing: exponential lerp rate (1/s) toward the latest
@@ -324,6 +322,10 @@ export class BallsPool {
   private readonly skins = new Map<number, BallSkin>();
   private readonly glowTexture = makeGlowTexture();
   private readonly groups: THREE.Group[] = [];
+  private readonly bonusModels = new SuperBonusModels();
+  private readonly slotBonusModels: Array<Map<SuperBonusKind, THREE.Group>> = [];
+  private readonly slotKinds: Array<SuperBonusKind | undefined> = [];
+  private animationTime = 0;
   private readonly superFlags: boolean[] = [];
   private readonly slotColors: number[] = [];
   // Roll state per slot (mirrors the latest snapshot: rolling flag + planar
@@ -358,6 +360,8 @@ export class BallsPool {
       group.add(body);
       this.scene.add(group);
       this.groups.push(group);
+      this.slotBonusModels.push(new Map());
+      this.slotKinds.push(undefined);
       this.superFlags.push(false);
       this.slotColors.push(BALL_CAP_COLOR);
       this.slotRolling.push(false);
@@ -473,6 +477,7 @@ export class BallsPool {
         group.scale.setScalar(1);
       }
       this.superFlags[i] = false;
+      this.slotKinds[i] = undefined;
       this.slotColors[i] = BALL_CAP_COLOR;
       this.slotRolling[i] = false;
       this.slotVelX[i] = 0;
@@ -521,6 +526,7 @@ export class BallsPool {
         continue;
       }
       const isSuper = ball.super === true;
+      const bonusKind = isSuperBonusKind(ball.bonusKind) ? ball.bonusKind : undefined;
       const isNew = this.slotIds[slot] !== ball.ballId;
       this.slotIds[slot] = ball.ballId;
       if (isNew) {
@@ -545,10 +551,11 @@ export class BallsPool {
       // SUPER cores read the x2 buff at a glance: the whole group scales by
       // SUPER_BALL_SCALE; normal cores stay at scale 1 (reset on reuse so a
       // recycled SUPER slot never keeps a giant normal core).
-      group.scale.setScalar(isSuper ? SUPER_BALL_SCALE : 1);
+      group.scale.setScalar(bonusKind === undefined && isSuper ? SUPER_BALL_SCALE : 1);
       const skin = this.skinFor(ball.color);
       const body = group.children[0] as THREE.Mesh | undefined;
       if (body !== undefined) {
+        body.visible = bonusKind === undefined;
         // Thrower identity (polished-stone redesign): every normal core shares
         // the stone base — the thrower reads from the SUBTLE painted accent
         // (thin polar dot + equator ring in the skin texture, same fighter
@@ -556,6 +563,16 @@ export class BallsPool {
         // dedicated chartreuse/white skin.
         body.material = isSuper ? this.superSkin.material : skin.material;
       }
+      const cachedModels = this.slotBonusModels[slot];
+      if (cachedModels !== undefined) {
+        for (const [kind, model] of cachedModels) model.visible = kind === bonusKind;
+        if (bonusKind !== undefined && !cachedModels.has(bonusKind)) {
+          const model = this.bonusModels.create(bonusKind);
+          group.add(model);
+          cachedModels.set(bonusKind, model);
+        }
+      }
+      this.slotKinds[slot] = bonusKind;
       this.tracked.set(ball.ballId, { x: ball.x, y: ball.y, z: ball.z, super: isSuper, color: ball.color });
     }
     // Defensive: tracked ids that never got a slot (pool-exhausted edge)
@@ -582,6 +599,7 @@ export class BallsPool {
       return;
     }
     const lerpAlpha = 1 - Math.exp(-BALL_LERP_RATE * deltaSeconds);
+    this.animationTime += deltaSeconds;
     for (let i = 0; i < this.groups.length; i += 1) {
       const slotId = this.slotIds[i];
       const group = this.groups[i];
@@ -611,6 +629,14 @@ export class BallsPool {
           if (speed > 1e-6) {
             spinAxis.set(vz / speed, 0, -vx / speed);
             group.rotateOnWorldAxis(spinAxis, (speed / BALL_RADIUS) * deltaSeconds);
+          }
+        }
+        const kind = this.slotKinds[i];
+        if (kind !== undefined) {
+          const model = this.slotBonusModels[i]?.get(kind);
+          if (model !== undefined) {
+            this.bonusModels.animate(model, this.animationTime);
+            if (kind === "boomerang") model.rotation.z += this.animationTime * 15;
           }
         }
         this.showTrailsForSlot(i, group.position, this.superFlags[i] === true, this.slotColors[i] ?? BALL_CAP_COLOR);
@@ -727,7 +753,7 @@ export class BallsPool {
   // trails stay chartreuse. The ownerColor parameter is kept for call-site
   // back-compat and is intentionally ignored for normal balls.
   private showTrailsForSlot(slot: number, position: THREE.Vector3, isSuper: boolean, _ownerColor: number): void {
-    const tint = isSuper ? TRAIL_SUPER_COLOR : TRAIL_GOLD_COLOR;
+    const tint = getSuperBonus(this.slotKinds[slot])?.color ?? (isSuper ? TRAIL_SUPER_COLOR : TRAIL_GOLD_COLOR);
     for (let k = 0; k < TRAILS_PER_BALL; k += 1) {
       const sprite = this.trails[slot * TRAILS_PER_BALL + k];
       if (sprite === undefined) {
@@ -757,6 +783,9 @@ export class BallsPool {
       this.scene.remove(group);
     }
     this.groups.length = 0;
+    this.slotBonusModels.length = 0;
+    this.slotKinds.length = 0;
+    this.bonusModels.dispose();
     this.superFlags.length = 0;
     this.slotColors.length = 0;
     this.slotRolling.length = 0;
@@ -788,84 +817,31 @@ export class BallsPool {
   }
 }
 
-// A compact cut diamond: a broad six-facet girdle between two narrow tips.
-// Facet normals and emission retain the cut even when the sun goes down.
-function makeSuperCrystalGeometry(): THREE.BufferGeometry {
-  const positions: number[] = [];
-  const colors: number[] = [];
-  const uvs: number[] = [];
-  const rings = [
-    { radius: 0.018, y: -0.30 },
-    { radius: SUPER_CORE_INNER_RADIUS, y: -0.02 },
-    { radius: SUPER_CORE_INNER_RADIUS * 0.87, y: 0.10 },
-    { radius: 0.024, y: 0.52 },
+// Merge the small package and ribbon parts once, keeping the centre pickup
+// at two solid draw calls. Its wrapping never reveals the hidden reward.
+function makeGiftGeometries(): [THREE.BufferGeometry, THREE.BufferGeometry] {
+  const cube = new THREE.BoxGeometry(1, 1, 1);
+  const box = (width: number, height: number, depth: number, x: number, y: number, z: number): THREE.BufferGeometry => {
+    return cube.clone().scale(width, height, depth).translate(x, y, z);
+  };
+  const wrapping = [box(0.68, 0.56, 0.68, 0, -0.04, 0), box(0.74, 0.10, 0.74, 0, 0.28, 0)];
+  const ribbons = [
+    box(0.76, 0.025, 0.115, 0, 0.343, 0), box(0.115, 0.025, 0.76, 0, 0.343, 0),
+    box(0.115, 0.65, 0.025, 0, 0.005, -0.375), box(0.115, 0.65, 0.025, 0, 0.005, 0.375),
+    box(0.025, 0.65, 0.115, -0.375, 0.005, 0), box(0.025, 0.65, 0.115, 0.375, 0.005, 0),
+    box(0.12, 0.10, 0.12, 0, 0.40, 0),
   ];
-  const sides = 6;
-  const shades = [1, 0.80, 0.94, 0.76, 0.88, 0.98];
-  const vertex = (radius: number, y: number, side: number): readonly number[] => {
-    const angle = side * Math.PI * 2 / sides;
-    return [Math.cos(angle) * radius, y, Math.sin(angle) * radius];
-  };
-  const triangle = (a: readonly number[], b: readonly number[], c: readonly number[], shade: number, side: number): void => {
-    positions.push(...a, ...b, ...c);
-    for (const point of [a, b, c]) {
-      colors.push(shade, shade, shade);
-      // Each face samples its own emission column; height reveals the white
-      // heart while the points keep their saturated chartreuse color.
-      uvs.push((side + 0.5) / sides, ((point[1] ?? 0) + 0.30) / 0.82);
-    }
-  };
-  for (let side = 0; side < sides; side += 1) {
-    const shade = shades[side] ?? 1;
-    for (let ring = 0; ring < rings.length - 1; ring += 1) {
-      const lower = rings[ring];
-      const upper = rings[ring + 1];
-      if (lower === undefined || upper === undefined) continue;
-      const a = vertex(lower.radius, lower.y, side);
-      const b = vertex(lower.radius, lower.y, side + 1);
-      const c = vertex(upper.radius, upper.y, side + 1);
-      const d = vertex(upper.radius, upper.y, side);
-      triangle(a, d, b, shade, side);
-      triangle(b, d, c, shade, side);
-    }
-    const bottom = rings[0];
-    const top = rings[rings.length - 1];
-    if (bottom !== undefined && top !== undefined) {
-      triangle([0, bottom.y, 0], vertex(bottom.radius, bottom.y, side), vertex(bottom.radius, bottom.y, side + 1), shade, side);
-      triangle([0, top.y, 0], vertex(top.radius, top.y, side + 1), vertex(top.radius, top.y, side), shade, side);
-    }
+  const loop = new THREE.TorusGeometry(0.14, 0.038, 5, 12);
+  for (const side of [-1, 1]) {
+    ribbons.push(loop.clone().scale(1, 0.62, 1).rotateX(-0.6).rotateZ(side * 0.32).translate(side * 0.14, 0.425, 0));
   }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-  geometry.computeVertexNormals();
-  return geometry;
-}
-
-function makeSuperEmissionTexture(): THREE.DataTexture {
-  const width = 6;
-  const height = 32;
-  const data = new Uint8Array(width * height * 4);
-  const shades = [1, 0.68, 0.94, 0.60, 0.78, 0.98];
-  for (let y = 0; y < height; y += 1) {
-    const localY = y / (height - 1) * 0.82 - 0.30;
-    const heart = Math.exp(-Math.pow((localY - 0.045) / 0.22, 2));
-    for (let x = 0; x < width; x += 1) {
-      const index = (y * width + x) * 4;
-      const shade = shades[x] ?? 1;
-      data[index] = Math.round((145 + 103 * heart) * shade);
-      data[index + 1] = Math.round((207 + 48 * heart) * shade);
-      data[index + 2] = Math.round((35 + 191 * heart) * shade);
-      data[index + 3] = 255;
-    }
-  }
-  const texture = new THREE.DataTexture(data, width, height);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  texture.magFilter = THREE.LinearFilter;
-  texture.minFilter = THREE.LinearFilter;
-  texture.needsUpdate = true;
-  return texture;
+  const body = mergeGeometries(wrapping);
+  const ribbon = mergeGeometries(ribbons);
+  cube.dispose();
+  loop.dispose();
+  for (const part of [...wrapping, ...ribbons]) part.dispose();
+  if (body === null || ribbon === null) throw new Error("Gift geometry could not be merged");
+  return [body, ribbon];
 }
 
 // Dedicated SUPER texture: real radial alpha in both browser and headless
@@ -892,16 +868,14 @@ function makeSuperGlowTexture(): THREE.DataTexture {
   return texture;
 }
 
-// Universal SUPER pickup silhouette: a luminous energy crystal seated in a
-// short satin-metal collar. Two small additive halos and a fixed ground
-// decal suggest light spilling out without adding lights or postprocessing.
-// The existing x2 power grant stays server-owned; the item is also suitable
-// for future super effects without depicting a specific projectile.
+// One wrapped gift for every central reward, including legacy snapshots.
+// The server reveals its contents only after collection. Shared radial halos
+// and a fixed ground decal keep it readable without lights or postprocessing.
 export class SuperCore {
   private readonly scene: THREE.Scene;
   private readonly group = new THREE.Group();
   private readonly groundSpill: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
-  private readonly crystalMaterial: THREE.MeshStandardMaterial;
+  private readonly giftMaterial: THREE.MeshStandardMaterial;
   private readonly haloMaterial: THREE.SpriteMaterial;
   private readonly heartMaterial: THREE.SpriteMaterial;
   private readonly disposables: Array<{ dispose(): void }> = [];
@@ -911,44 +885,24 @@ export class SuperCore {
   public constructor(scene: THREE.Scene) {
     this.scene = scene;
     this.group.name = "super-core";
-    const crystalGeometry = makeSuperCrystalGeometry();
-    const emissionTexture = makeSuperEmissionTexture();
-    this.crystalMaterial = new THREE.MeshStandardMaterial({
-      color: 0xbadf73,
-      emissive: 0xffffff,
-      emissiveMap: emissionTexture,
-      emissiveIntensity: 0.95,
-      roughness: 0.18,
-      metalness: 0.08,
-      vertexColors: true,
-      flatShading: true,
+    const [giftGeometry, ribbonGeometry] = makeGiftGeometries();
+    this.giftMaterial = new THREE.MeshStandardMaterial({
+      color: 0xf6c86e, emissive: 0xffb75c, emissiveIntensity: 0.24,
+      roughness: 0.62, metalness: 0.04, flatShading: true,
     });
-    const crystal = new THREE.Mesh(crystalGeometry, this.crystalMaterial);
-    crystal.name = "super-core-crystal";
-    this.group.add(crystal);
-    const collarGeometry = new THREE.LatheGeometry([
-      new THREE.Vector2(0.19, -0.33),
-      new THREE.Vector2(0.38, -0.33),
-      new THREE.Vector2(SUPER_CORE_OUTER_RADIUS, -0.28),
-      new THREE.Vector2(SUPER_CORE_OUTER_RADIUS, -0.20),
-      new THREE.Vector2(0.39, -0.16),
-      new THREE.Vector2(0.19, -0.16),
-      new THREE.Vector2(0.19, -0.33),
-    ], 12);
-    const collarMaterial = new THREE.MeshStandardMaterial({
-      color: 0x426369,
-      emissive: 0x426369,
-      emissiveIntensity: 0.12,
-      roughness: 0.44,
-      metalness: 0.45,
-      flatShading: true,
+    const gift = new THREE.Mesh(giftGeometry, this.giftMaterial);
+    gift.name = "super-core-gift-box";
+    this.group.add(gift);
+    const ribbonMaterial = new THREE.MeshStandardMaterial({
+      color: 0xdb527e, emissive: 0xff749b, emissiveIntensity: 0.32,
+      roughness: 0.42, metalness: 0.04, flatShading: true,
     });
-    const collar = new THREE.Mesh(collarGeometry, collarMaterial);
-    collar.name = "super-core-collar";
-    this.group.add(collar);
+    const ribbon = new THREE.Mesh(ribbonGeometry, ribbonMaterial);
+    ribbon.name = "super-core-gift-ribbon";
+    this.group.add(ribbon);
     const glowTexture = makeSuperGlowTexture();
     this.haloMaterial = new THREE.SpriteMaterial({
-      map: glowTexture, color: SUPER_BALL_COLOR, opacity: 0.62,
+      map: glowTexture, color: 0xffdc94, opacity: 0.62,
       blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
     });
     const halo = new THREE.Sprite(this.haloMaterial);
@@ -957,7 +911,7 @@ export class SuperCore {
     halo.scale.set(2.25, 2.25, 1);
     this.group.add(halo);
     this.heartMaterial = new THREE.SpriteMaterial({
-      map: glowTexture, color: 0xf3ffe1, opacity: 0.42,
+      map: glowTexture, color: 0xfff5d8, opacity: 0.42,
       blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
     });
     const heart = new THREE.Sprite(this.heartMaterial);
@@ -967,7 +921,7 @@ export class SuperCore {
     this.group.add(heart);
     const groundGeometry = new THREE.PlaneGeometry(5.4, 5.4);
     const groundMaterial = new THREE.MeshBasicMaterial({
-      map: glowTexture, color: SUPER_BALL_COLOR, opacity: 0.42,
+      map: glowTexture, color: 0xffdc94, opacity: 0.42,
       transparent: true, blending: THREE.AdditiveBlending,
       depthWrite: false, toneMapped: false,
     });
@@ -975,11 +929,11 @@ export class SuperCore {
     this.groundSpill.name = "super-core-ground-spill";
     this.groundSpill.rotation.x = -Math.PI / 2;
     // Floor is y=0; ice and swamp overlays are y=.02/.025. Keep the glow
-    // just above all three, at world ground height rather than crystal Y.
+    // just above all three, at world ground height rather than gift Y.
     this.groundSpill.position.y = 0.065;
     this.groundSpill.visible = false;
     this.disposables.push(
-      crystalGeometry, this.crystalMaterial, emissionTexture, collarGeometry, collarMaterial,
+      giftGeometry, this.giftMaterial, ribbonGeometry, ribbonMaterial,
       glowTexture, this.haloMaterial, this.heartMaterial, groundGeometry, groundMaterial,
     );
     this.group.visible = false;
@@ -988,15 +942,15 @@ export class SuperCore {
     this.scene.add(this.groundSpill);
   }
 
-  public render(superSnapshot: NetSuperSnapshot | null, nowMs: number): void {
-    if (superSnapshot === null || !superSnapshot.active) {
+  public render(superSnapshot: NetSuperSnapshot | null, nowMs: number, _kind?: SuperBonusKind | ""): void {
+    if (superSnapshot === null || !superSnapshot.active || superSnapshot.expiresAt <= nowMs) {
       this.group.visible = false;
       this.groundSpill.visible = false;
       this.active = false;
       this.spinTime = 0;
       this.group.rotation.set(0, 0, 0);
       this.group.position.y = 1.2;
-      this.crystalMaterial.emissiveIntensity = 0.95;
+      this.giftMaterial.emissiveIntensity = 0.24;
       this.haloMaterial.opacity = 0.62;
       this.heartMaterial.opacity = 0.42;
       this.groundSpill.material.opacity = 0.42;
@@ -1022,7 +976,7 @@ export class SuperCore {
     this.group.rotation.y += deltaSeconds * 0.55;
     this.group.position.y = 1.2 + Math.sin(this.spinTime * 1.6) * 0.06;
     const pulse = Math.sin(this.spinTime * 1.4);
-    this.crystalMaterial.emissiveIntensity = 0.95 + pulse * 0.08;
+    this.giftMaterial.emissiveIntensity = 0.24 + pulse * 0.035;
     this.haloMaterial.opacity = 0.62 + pulse * 0.05;
     this.heartMaterial.opacity = 0.42 + pulse * 0.035;
     this.groundSpill.material.opacity = 0.42 + pulse * 0.035;

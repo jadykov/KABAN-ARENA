@@ -152,6 +152,7 @@ export class RemoteAvatars {
       entry.label.visible = snapshot.alive;
       // Idle hold bob on the remote hand-ball (no charge data replicates, so
       // remotes never swell/flick — local-only anims stay in SceneManager).
+      entry.visuals.ball.setBonusKind(snapshot.alive && (snapshot.superUntil ?? 0) > serverNow ? snapshot.superKind ?? "" : "");
       entry.visuals.update(deltaSeconds);
       entry.effects.setActive(
         snapshot.alive && snapshot.shieldHp > 0 && snapshot.shieldUntil > serverNow,

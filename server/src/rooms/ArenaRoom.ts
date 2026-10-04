@@ -1,4 +1,6 @@
 import { Room, type Client } from "colyseus";
+import { activeTemporarySurface, getSuperBonus, isSuperBonusKind } from "../../../shared/super-bonuses.mjs";
+import { SuperBonusSystem, bonusLineOfSight } from "../super-bonuses.js";
 import { PICKUP_VISUAL_Y } from "../../../shared/arena-layout.mjs";
 import {
   ARENA_LAYOUT,
@@ -531,6 +533,10 @@ export class ArenaRoom extends Room<ArenaState> {
   // airborne following trampolineArcY, absent = grounded (y derived from XZ).
   // Humans only — bots never launch (weak ground game by design).
   private readonly airSince = new Map<string, number>();
+  private readonly bonusAir = new Map<string, { velocity: number }>();
+  private bonuses!: SuperBonusSystem;
+  // Kept outside Schema so neither snapshots nor patches reveal the gift.
+  private pendingSuperKind = "";
   private botCounter = 0;
   private ballCounter = 0;
   // Scratch ball-surface contact (Stage 4d.4): reused as the describeBallSurface
@@ -550,6 +556,27 @@ export class ArenaRoom extends Room<ArenaState> {
   public async onCreate(): Promise<void> {
     this.maxClients = MAX_PLAYERS;
     this.setState(new ArenaState());
+    this.bonuses = new SuperBonusSystem({
+      state: this.state,
+      hasCentralSheep: () => this.state.superActive && this.pendingSuperKind === "sheep",
+      move: (fx, fz, x, z, radius, feet) => {
+        const moved = resolveGroundMove(fx, fz, x, z, radius, feet);
+        return { x: clampPosition(moved.x), z: clampPosition(moved.z) };
+      },
+      die: (victim, owner, now) => this.killBonusVictim(victim, owner, now),
+      launch: (victim, velocity) => {
+        this.airSince.delete(victim.sessionId);
+        this.bonusAir.set(victim.sessionId, { velocity });
+      },
+      cancelCharge: (victim) => {
+        const input = this.inputs.get(victim.sessionId);
+        if (input !== undefined) input.charging = false;
+      },
+      broadcastHit: (ballId, victim, x, y, z) => this.broadcast(BALL_HIT_PLAYER_MESSAGE, {
+        ballId, victimId: victim.sessionId, x, y, z, super: true,
+      }),
+      surface: (x, y, z) => this.bonusSurface(x, y, z),
+    }, () => this.pickupRandom());
     this.state.serverNow = this.currentTime();
     ARENA_LAYOUT.pickups.forEach((slot, index) => {
       const pickup = new PickupState();
@@ -684,6 +711,8 @@ export class ArenaRoom extends Room<ArenaState> {
   }
 
   public async onLeave(client: Client): Promise<void> {
+    this.bonuses.removeOwner(client.sessionId);
+    this.bonusAir.delete(client.sessionId);
     if (this.state.players.has(client.sessionId)) {
       this.state.players.delete(client.sessionId);
     }
@@ -751,6 +780,7 @@ export class ArenaRoom extends Room<ArenaState> {
     this.tickPickups(now);
     this.fireBots(now);
     this.stepBalls(now, dt);
+    this.bonuses.tick(now, dt);
     this.tickCenterItems(now);
     this.tickRespawns(now);
   }
@@ -784,10 +814,10 @@ export class ArenaRoom extends Room<ArenaState> {
     // Fresh round: all balls go, including ricocheted/settling/resting ones —
     // rest state lives on BallState itself, so clear() leaks nothing.
     this.state.balls.clear();
+    this.bonuses.clear();
+    this.bonusAir.clear();
     this.ballCounter = 0;
-    this.state.superActive = false;
-    this.state.superNextAt = now + SUPER_SPAWN_S * 1000;
-    this.state.superExpiresAt = 0;
+    this.clearCenterItem(now + SUPER_SPAWN_S * 1000);
     this.resetPickups();
     // Event feed (owner 4d.4): join/kill/pickup one-liners ONLY — round
     // start/end stay silent so the 2-line feed never fills with non-events.
@@ -798,6 +828,12 @@ export class ArenaRoom extends Room<ArenaState> {
     this.state.winner = winnerSessionId;
     this.state.remainingMs = 0;
     this.endedAt = this.currentTime();
+    this.state.balls.clear();
+    this.bonuses.clear();
+    this.clearCenterItem();
+    this.bonusAir.clear();
+    this.airSince.clear();
+    this.inputs.clear();
   }
 
   private resetForRematch(): void {
@@ -826,14 +862,19 @@ export class ArenaRoom extends Room<ArenaState> {
     // Rematch reset: same full clear as round start — no resting ball or
     // settle timer leaks across rounds.
     this.state.balls.clear();
-    this.state.superActive = false;
-    this.state.superNextAt = 0;
-    this.state.superExpiresAt = 0;
+    this.bonuses.clear();
+    this.bonusAir.clear();
+    this.clearCenterItem();
     this.resetPickups();
     this.toLobby();
   }
 
   private toLobby(): void {
+    this.state.balls.clear();
+    this.bonuses.clear();
+    this.clearCenterItem();
+    this.bonusAir.clear();
+    this.airSince.clear();
     this.state.phase = "lobby";
     this.state.countdownMs = 0;
     this.state.remainingMs = 0;
@@ -856,13 +897,12 @@ export class ArenaRoom extends Room<ArenaState> {
       y: length > 1 ? y / length : y,
       rotY: clampAngle(body["rotY"]),
       seq: typeof seqRaw === "number" && Number.isFinite(seqRaw) ? Math.floor(seqRaw) : 0,
-      charging: body["charging"] === true,
+      charging: body["charging"] === true && this.currentTime() >= player.frozenUntil && this.currentTime() >= player.reloadUntil,
     });
   }
 
-  // R2 hand-ball throw: release-to-fire with power01/yaw/pitch. Validates the
-  // fighter, reload gate, and phase; consumes SUPER buff even on a miss
-  // (NEXT shot only). Quick-tap payloads (<80ms of charge) are dropped
+  // Release-to-fire validates the fighter, freeze, reload and phase. A held
+  // centre item replaces the next accepted throw, including a missed throw. Quick-tap payloads (<80ms of charge) are dropped
   // client-side and never reach here, but a zero power is still clamped.
   // 4d.1: the payload may carry the thrower's body-center y (client avatar
   // position.y) so the spawn tracks platform/jump elevation; absent or
@@ -889,7 +929,8 @@ export class ArenaRoom extends Room<ArenaState> {
     if (shooter.chargeUntil > 0 && now >= shooter.chargeUntil) {
       shooter.chargeUntil = 0;
     }
-    if (now < shooter.reloadUntil) {
+    this.bonuses.expirePlayer(shooter, now);
+    if (now < shooter.reloadUntil || now < shooter.frozenUntil) {
       return;
     }
     const body = (typeof payload === "object" && payload !== null ? payload : {}) as Record<string, unknown>;
@@ -903,9 +944,7 @@ export class ArenaRoom extends Room<ArenaState> {
       : 0.25;
     const pitch = Math.max(FIRE_PITCH_MIN, Math.min(FIRE_PITCH_MAX, pitchRaw));
     const wantSuper = body["super"] === true;
-    const useSuper = wantSuper && shooter.superBuff;
-    // Buff is consumed on fire even on a miss (NEXT shot only).
-    shooter.superBuff = false;
+    const useSuper = isSuperBonusKind(shooter.superKind) || (wantSuper && shooter.superBuff);
     this.spawnBall(shooter, power01, yaw, pitch, useSuper, now, sanitizeThrowerY(body["throwerY"]));
   }
 
@@ -929,7 +968,7 @@ export class ArenaRoom extends Room<ArenaState> {
     now: number,
     throwerY: number | null = null,
   ): BallState | null {
-    if (!shooter.alive || !shooter.ready || shooter.spectator) {
+    if (!shooter.alive || !shooter.ready || shooter.spectator || now < shooter.frozenUntil || (shooter.superKind !== "" && now < shooter.reloadUntil)) {
       return null;
     }
     // Stage 4d.4 resting cores: the thrower's next shot despawns his resting
@@ -942,7 +981,7 @@ export class ArenaRoom extends Room<ArenaState> {
     // Single muzzle helper: spawn == bodyCenter XZ + dir*0.7, y = bodyY +
     // torso offset (identical to client preview math; see hits.muzzleForShot
     // + protocol.muzzleForShot).
-    const bodyY = resolveThrowerY(throwerY, shooter.x, shooter.z);
+    const bodyY = this.bonusAir.has(shooter.sessionId) ? shooter.y : resolveThrowerY(throwerY, shooter.x, shooter.z);
     const muzzle = muzzleForShot(shooter.x, bodyY, shooter.z, finalYaw, pitch);
     const dirX = muzzle.dirX;
     const dirZ = muzzle.dirZ;
@@ -976,7 +1015,12 @@ export class ArenaRoom extends Room<ArenaState> {
     ball.vy = dirY * speed;
     ball.vz = dirZ * speed;
     ball.power01 = Math.max(0.5, Math.min(1, power01));
-    ball.super = superShot;
+    ball.bonusKind = isSuperBonusKind(shooter.superKind) ? shooter.superKind : "";
+    ball.super = superShot || ball.bonusKind !== "";
+    ball.originX = muzzle.x;
+    ball.originY = muzzle.y;
+    ball.originZ = muzzle.z;
+    if (ball.bonusKind) this.bonuses.register(ball);
     ball.ageMs = 0;
     ball.distM = 0;
     ball.ricochet = false;
@@ -997,8 +1041,12 @@ export class ArenaRoom extends Room<ArenaState> {
       });
       if (oldestId !== null && oldestId !== ball.ballId) {
         this.state.balls.delete(oldestId);
+        this.bonuses.forgetBall(oldestId);
       }
     }
+    shooter.superKind = "";
+    shooter.superUntil = 0;
+    shooter.superBuff = false;
     shooter.reloadUntil = now + RELOAD_MS;
     // This is the first accepted shot after pickup. Canceling a charge never
     // calls spawnBall, while denied shots return before reaching this path.
@@ -1069,7 +1117,22 @@ export class ArenaRoom extends Room<ArenaState> {
         }
         return;
       }
-      ball.vy -= BALL_GRAVITY * dt;
+      if (ball.bonusKind === "boomerang") {
+        if (ball.ageMs >= 2500) { dead.push(ballId); return; }
+        if (ball.distM >= 6) ball.returning = true;
+        if (ball.returning) {
+          const dx = ball.originX - ball.x;
+          const dy = ball.originY - ball.y;
+          const dz = ball.originZ - ball.z;
+          const distance = Math.hypot(dx, dy, dz);
+          if (distance < 0.25) { dead.push(ballId); return; }
+          const speed = powerToSpeed(ball.power01);
+          const turn = Math.min(1, dt * 10);
+          ball.vx += (dx / distance * speed - ball.vx) * turn;
+          ball.vy += (dy / distance * speed - ball.vy) * turn;
+          ball.vz += (dz / distance * speed - ball.vz) * turn;
+        }
+      } else ball.vy -= BALL_GRAVITY * dt;
       const stepX = ball.vx * dt;
       const stepY = ball.vy * dt;
       const stepZ = ball.vz * dt;
@@ -1099,11 +1162,20 @@ export class ArenaRoom extends Room<ArenaState> {
         ball.z += moveZ;
         ball.distM += Math.sqrt(moveX * moveX + moveY * moveY + moveZ * moveZ);
         if (this.collideBoundaryWalls(ball)) {
+          if (ball.bonusKind) this.bonuses.install(ball, now);
           dead.push(ballId);
           return;
         }
         const contact = describeBallSurface(ball.x, ball.y, ball.z, ball.vx, ball.vz, this.scratchContact);
         if (contact.kind === "vertical") {
+          if (ball.bonusKind) {
+            const clearance = ball.bonusKind === "sheep" ? 0.3 : 0.04;
+            const x = contact.axis === "x" ? contact.face - Math.sign(ball.vx) * clearance : ball.x;
+            const z = contact.axis === "z" ? contact.face - Math.sign(ball.vz) * clearance : ball.z;
+            this.bonuses.install(ball, now, x, ball.y, z);
+            dead.push(ballId);
+            return;
+          }
           if (ball.super) {
             dead.push(ballId);
             return;
@@ -1117,6 +1189,11 @@ export class ArenaRoom extends Room<ArenaState> {
           }
           ball.ricochet = true;
         } else if (contact.kind === "up") {
+          if (ball.bonusKind) {
+            this.bonuses.install(ball, now, ball.x, Math.max(0, contact.restY - BALL_RADIUS), ball.z);
+            dead.push(ballId);
+            return;
+          }
           if (ball.super) {
             dead.push(ballId);
             return;
@@ -1130,8 +1207,16 @@ export class ArenaRoom extends Room<ArenaState> {
           }
           return;
         }
-        const victim = this.findBallVictim(ball);
+        if (this.bonuses.disarmAt(ball)) { dead.push(ballId); return; }
+        const victim = ball.bonusHit ? null : this.findBallVictim(ball);
         if (victim !== null) {
+          if (ball.bonusKind) {
+            this.bonuses.directHit(ball, victim, now);
+            if (ball.bonusKind === "boomerang") { ball.bonusHit = true; continue; }
+            this.bonuses.install(ball, now);
+            dead.push(ballId);
+            return;
+          }
           if (ball.super || !ball.ricochet) {
             this.damageVictim(ball, victim, ballId, now);
             dead.push(ballId);
@@ -1148,6 +1233,7 @@ export class ArenaRoom extends Room<ArenaState> {
     });
     for (const ballId of dead) {
       this.state.balls.delete(ballId);
+      this.bonuses.forgetBall(ballId);
     }
   }
 
@@ -1419,6 +1505,7 @@ export class ArenaRoom extends Room<ArenaState> {
       if (victim !== null || !player.alive || !player.ready || player.spectator) {
         return;
       }
+      if (ball.bonusKind && this.bonuses.alreadyHit(ball, player)) return;
       if (!canDamage(player, this.currentTime())) {
         return;
       }
@@ -1465,23 +1552,14 @@ export class ArenaRoom extends Room<ArenaState> {
     victim.z = clampPosition(moved.z);
   }
 
-  // Center-item lifecycle (generic shape for future arena pickups).
-  // Today only "super" (x2 NEXT shot) spawns at the center; extension points
-  // for future kinds (NOT implemented — see TODOs below):
-  //   - "pineapple": radius AoE on throw — plug a new tickPineappleItem(now)
-  //     call here + state fields (active/x/z/expiresAt/nextAt) + consume the
-  //     buff in handleFire/spawnBall like superBuff.
-  //   - "heal": +1 heart on pickup — plug a new tickHealItem(now) call here
-  //     + state fields; apply hp directly on pickup (no fire consume).
-  // Keep one tick*Item(now) per kind so pickups stay independent (separate
-  // timers, no shared cooldown).
+  // One central item from the ten-kind bag; neutral pickups stay independent.
   private tickCenterItems(now: number): void {
     this.tickSuperItem(now);
-    // TODO(pineapple): this.tickPineappleItem(now);
-    // TODO(heal): this.tickHealItem(now);
   }
 
   private clearBonuses(player: PlayerState): void {
+    this.bonuses.clearPlayer(player);
+    this.bonusAir.delete(player.sessionId);
     player.shieldHp = 0;
     player.shieldUntil = 0;
     player.speedUntil = 0;
@@ -1492,6 +1570,7 @@ export class ArenaRoom extends Room<ArenaState> {
 
   private expireBonuses(now: number): void {
     this.state.players.forEach((player: PlayerState): void => {
+      this.bonuses.expirePlayer(player, now);
       if (player.shieldHp > 0 && now >= player.shieldUntil) {
         player.shieldHp = 0;
         player.shieldUntil = 0;
@@ -1547,33 +1626,41 @@ export class ArenaRoom extends Room<ArenaState> {
     });
   }
 
-  // Super-core lifecycle: spawn center every 45s, 15s life, body pickup
-  // radius 1.7m grants x2 NEXT shot. Buff consumed on fire even on miss.
+  private clearCenterItem(nextAt = 0): void {
+    this.pendingSuperKind = "";
+    this.state.superActive = false;
+    this.state.superKind = "";
+    this.state.superExpiresAt = 0;
+    this.state.superNextAt = nextAt;
+  }
+
+  // Centre timing is 10/10/15 seconds. Each appearance consumes
+  // one bag entry, even when nobody collects it. Sheep reserve a live slot.
   private tickSuperItem(now: number): void {
     if (this.state.superActive) {
       if (now >= this.state.superExpiresAt) {
-        this.state.superActive = false;
-        this.state.superNextAt = now + SUPER_SPAWN_S * 1000;
+        this.clearCenterItem(now + SUPER_SPAWN_S * 1000);
       } else {
-        this.state.players.forEach((player: PlayerState): void => {
-          if (!player.alive || !player.ready || player.spectator || player.superBuff) {
-            return;
-          }
+        for (const player of this.state.players.values()) {
+          if (!player.alive || !player.ready || player.spectator || player.superBuff || player.superKind || player.y > SURFACE_MAX_BODY_Y) continue;
           const dx = player.x - this.state.superX;
           const dz = player.z - this.state.superZ;
           if (dx * dx + dz * dz <= SUPER_PICKUP_RADIUS * SUPER_PICKUP_RADIUS) {
-            player.superBuff = true;
-            this.state.superActive = false;
-            this.state.superNextAt = now + SUPER_SPAWN_S * 1000;
-            // Event feed: who picked WHICH item — the display name comes from
-            // CENTER_ITEM_NAMES so future items plug in with one map line.
-            this.broadcast("killfeed", { message: `${player.nick} подобрал ${CENTER_ITEM_NAMES.super} (следующий бросок ×2)` });
+            const kind = this.pendingSuperKind;
+            this.bonuses.give(player, kind, now);
+            this.clearCenterItem(now + SUPER_SPAWN_S * 1000);
+            this.broadcast("killfeed", { message: kind ? `${player.nick} подобрал ${getSuperBonus(kind)?.name ?? "СУПЕР-ядро"}` : `${player.nick} подобрал ${CENTER_ITEM_NAMES.super} (следующий бросок ×2)` });
+            break;
           }
-        });
+        }
       }
       return;
     }
     if (this.state.superNextAt !== 0 && now >= this.state.superNextAt) {
+      const kind = this.bonuses.nextKind();
+      if (kind === null) return;
+      this.pendingSuperKind = kind;
+      this.state.superKind = "";
       this.state.superActive = true;
       this.state.superX = 0;
       this.state.superZ = 0;
@@ -1625,6 +1712,43 @@ export class ArenaRoom extends Room<ArenaState> {
     return strict;
   }
 
+  private killBonusVictim(victim: PlayerState, owner: PlayerState | undefined, now: number): void {
+    this.clearBonuses(victim);
+    this.inputs.delete(victim.sessionId);
+    this.airSince.delete(victim.sessionId);
+    this.planarMotion.delete(victim.sessionId);
+    this.respawnAt.set(victim.sessionId, now + RESPAWN_DELAY_MS);
+    if (owner !== undefined) this.broadcast("killfeed", { message: owner.sessionId === victim.sessionId ? `${victim.nick} попал в свою ловушку` : `${owner.nick} победил ${victim.nick}` });
+  }
+
+  private bonusSurface(x: number, bodyY: number, z: number): "ice" | "swamp" | "temporary-swamp" | "normal" {
+    const temporary = activeTemporarySurface(this.state.bonusEffects.values(), x, bodyY, z, this.currentTime(), BODY_CENTER_Y,
+      (effect) => bonusLineOfSight(effect.x, effect.y + 0.35, effect.z, x, bodyY, z));
+    if (temporary !== undefined) return temporary.kind === "swamp" ? "temporary-swamp" : "ice";
+    if (bodyY <= SURFACE_MAX_BODY_Y && isOnSwamp(x, z)) return "swamp";
+    if (bodyY <= SURFACE_MAX_BODY_Y && isOnIce(x, z)) return "ice";
+    return "normal";
+  }
+
+  private stepBonusAir(player: PlayerState, input: MoveInput | undefined, motion: PlanarMotion, dt: number): boolean {
+    const air = this.bonusAir.get(player.sessionId);
+    if (air === undefined) return false;
+    const fromX = player.x; const fromZ = player.z;
+    const moved = resolvePlayerMove(fromX, fromZ, fromX + motion.vx * dt, fromZ + motion.vz * dt, PLAYER_BODY_RADIUS, feetYOf(player.y));
+    player.x = clampPosition(moved.x); player.z = clampPosition(moved.z);
+    motion.vx = (player.x - fromX) / dt; motion.vz = (player.z - fromZ) / dt;
+    if (input !== undefined) player.rotY = input.rotY;
+    air.velocity = (air.velocity - 9.81 * dt) * Math.exp(-2.5 * dt);
+    const nextY = player.y + air.velocity * dt;
+    const support = bodyCenterYAtExpanded(player.x, player.z, PLAYER_BODY_RADIUS);
+    if (air.velocity <= 0 && nextY <= support) {
+      player.y = support;
+      this.bonusAir.delete(player.sessionId);
+      player.launchVelocity = 0;
+    } else player.y = nextY;
+    return true;
+  }
+
   private motionFor(player: PlayerState): PlanarMotion {
     let motion = this.planarMotion.get(player.sessionId);
     if (motion === undefined) {
@@ -1645,14 +1769,17 @@ export class ArenaRoom extends Room<ArenaState> {
     x: number,
     z: number,
     dt: number,
+    bodyY: number = BODY_CENTER_Y,
   ): void {
-    if (touchingFloor && isOnSwamp(x, z)) {
+    const surface = this.bonusSurface(x, bodyY, z);
+    if (surface === "temporary-swamp" || (touchingFloor && surface === "swamp")) {
       // Mud cancels inherited planar momentum each tick, including for bots.
-      motion.vx = desiredX * SWAMP_SPEED_MULT;
-      motion.vz = desiredZ * SWAMP_SPEED_MULT;
+      const multiplier = surface === "temporary-swamp" ? 0.6 : SWAMP_SPEED_MULT;
+      motion.vx = desiredX * multiplier;
+      motion.vz = desiredZ * multiplier;
       return;
     }
-    if (!touchingFloor || !isOnIce(x, z)) {
+    if (surface !== "ice") {
       // Preserve existing direct control off ice, for humans and bots alike.
       motion.vx = desiredX;
       motion.vz = desiredZ;
@@ -1691,7 +1818,8 @@ export class ArenaRoom extends Room<ArenaState> {
       if (player.isBot || !player.alive || !player.ready || player.spectator) {
         return;
       }
-      const input = this.inputs.get(player.sessionId);
+      const lastInput = this.inputs.get(player.sessionId);
+      const input = now < player.frozenUntil ? undefined : lastInput;
       // R2: aiming/charging runs slower (CHARGE_MOVE_MULT mirror); reloading
       // runs at normal speed.
       const bonusMultiplier = now < player.speedUntil ? SPEED_MULTIPLIER : 1;
@@ -1709,7 +1837,9 @@ export class ArenaRoom extends Room<ArenaState> {
         player.x,
         player.z,
         dt,
+        player.y,
       );
+      if (this.stepBonusAir(player, input, motion, dt)) return;
       if (airStart !== undefined) {
         this.stepAirborneHuman(player, input, motion, dt, now, airStart);
         return;
@@ -1814,15 +1944,17 @@ export class ArenaRoom extends Room<ArenaState> {
       const speed = BOT_SPEED * (now < player.speedUntil ? SPEED_MULTIPLIER : 1);
       this.steerPlanarVelocity(
         motion,
-        step.moveX * speed,
-        step.moveZ * speed,
+        now < player.frozenUntil ? 0 : step.moveX * speed,
+        now < player.frozenUntil ? 0 : step.moveZ * speed,
         speed,
-        step.moveX * step.moveX + step.moveZ * step.moveZ >= ICE_INPUT_THRESHOLD * ICE_INPUT_THRESHOLD,
+        now >= player.frozenUntil && step.moveX * step.moveX + step.moveZ * step.moveZ >= ICE_INPUT_THRESHOLD * ICE_INPUT_THRESHOLD,
         player.y <= SURFACE_MAX_BODY_Y,
         player.x,
         player.z,
         dt,
+        player.y,
       );
+      if (this.stepBonusAir(player, undefined, motion, dt)) return;
       // Same grounded path as humans (wedge block + gated collision +
       // hysteretic support): bots stop/slide at geometry instead of walking
       // through it. Bots stay grounded (no pad launches — weak ground game
@@ -1864,7 +1996,7 @@ export class ArenaRoom extends Room<ArenaState> {
       if (!bot.isBot || !bot.alive) {
         return;
       }
-      if (now < bot.reloadUntil) {
+      if (now < bot.reloadUntil || now < bot.frozenUntil) {
         return;
       }
       const brain = this.brains.get(bot.sessionId);
@@ -1876,7 +2008,6 @@ export class ArenaRoom extends Room<ArenaState> {
         return;
       }
       const useSuper = bot.superBuff;
-      bot.superBuff = false;
       this.spawnBall(bot, plan.power01, plan.yaw, plan.pitch, useSuper, now);
     });
   }

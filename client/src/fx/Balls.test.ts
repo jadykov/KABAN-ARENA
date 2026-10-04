@@ -1,9 +1,9 @@
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import { BALL_MUZZLE_OFFSET, BALL_TORSO_OFFSET, LOCAL_AVATAR_COLOR, MAX_LIVE_BALLS, SELF_SPAWN_Y } from "../config";
-import { PowerUpPickups } from "../arena/PowerUps";
 import { directionFromYawPitch, muzzleForShot, type NetBallSnapshot } from "../net/protocol";
 import { BALL_BASE, IDENTITY_LOCAL, IDENTITY_REMOTES, NEUTRAL_MOON } from "../palette";
+import { SUPER_BONUS_KINDS } from "../../../shared/super-bonuses.mjs";
 import {
   BALL_CAP_COLOR,
   BALL_CAP_FRACTION,
@@ -109,6 +109,59 @@ function lightnessOf(hex: number): number {
   return (Math.max(r, g, b) + Math.min(r, g, b)) / 2;
 }
 
+describe("ten typed bonus items", () => {
+  it("keeps the same generic gift and colors even when a legacy snapshot includes a known kind", () => {
+    const scene = new THREE.Scene();
+    const core = new SuperCore(scene);
+    const snapshot = { active: true, x: 2, z: 3, expiresAt: 15000, nextAt: 0 };
+    try {
+      core.render({ ...snapshot, kind: "" }, 1000);
+      const group = scene.getObjectByName("super-core") as THREE.Group;
+      const children = [...group.children];
+      const gift = scene.getObjectByName("super-core-gift-box") as THREE.Mesh;
+      const ribbon = scene.getObjectByName("super-core-gift-ribbon") as THREE.Mesh;
+      expect(gift.visible).toBe(true);
+      expect(ribbon.visible).toBe(true);
+      const colors = children.map((child) => ((child as THREE.Mesh).material as THREE.MeshStandardMaterial).color.getHex());
+      for (const kind of SUPER_BONUS_KINDS) {
+        core.render({ ...snapshot, kind }, 1000, kind);
+        expect(group.visible).toBe(true);
+        expect(group.children).toEqual(children);
+        expect(children.map((child) => ((child as THREE.Mesh).material as THREE.MeshStandardMaterial).color.getHex())).toEqual(colors);
+        expect(scene.getObjectByName(`bonus-model-${kind}`)).toBeUndefined();
+      }
+      core.render(snapshot, 1000);
+      expect(group.children).toEqual(children);
+    } finally { core.dispose(); }
+    expect(scene.children).toHaveLength(0);
+  });
+
+  it("reuses ball slots for distinct projectiles and hides previous models on normal reuse", () => {
+    const scene = new THREE.Scene();
+    const pool = new BallsPool(scene);
+    try {
+      const slot = ballGroups(scene)[0];
+      const normal = slot?.children[0];
+      for (const kind of SUPER_BONUS_KINDS) {
+        pool.render([{ ...makeBall("bonus", true), bonusKind: kind }]);
+        pool.update(0.02);
+        expect(slot?.scale.x).toBe(1);
+        expect(normal?.visible).toBe(false);
+        expect(slot?.getObjectByName(`bonus-model-${kind}`)?.visible).toBe(true);
+      }
+      const resourceCount = slot?.children.length;
+      pool.render([{ ...makeBall("bonus", true), bonusKind: "sheep" }]);
+      expect(slot?.children).toHaveLength(resourceCount ?? 0);
+      pool.render([]);
+      pool.render([makeBall("normal", false)]);
+      expect(normal?.visible).toBe(true);
+      expect(slot?.scale.x).toBe(1);
+      for (const kind of SUPER_BONUS_KINDS) expect(slot?.getObjectByName(`bonus-model-${kind}`)?.visible).toBe(false);
+    } finally { pool.dispose(); }
+    expect(scene.children).toHaveLength(0);
+  });
+});
+
 // Polished-stone balls: smooth 16x12 spheres, one mesh per core, stone base
 // + subtle thrower accent (polar dot + thin ring), neutral trails.
 describe("BallsPool polished-stone redesign", () => {
@@ -192,7 +245,7 @@ describe("BallsPool polished-stone redesign", () => {
   });
 });
 
-describe("SuperCore compact neon universal pickup", () => {
+describe("SuperCore compact mystery gift", () => {
   const snapshot = { active: true, x: 0, z: 0, expiresAt: 10_000, nextAt: 0 };
 
   function groupOf(scene: THREE.Scene): THREE.Group {
@@ -222,83 +275,44 @@ describe("SuperCore compact neon universal pickup", () => {
     return spill as THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   }
 
-  it("has a solid cut diamond and collar, with a compact physical size distinct from its glow", () => {
+  it("keeps the package compact, visible from gameplay viewpoints and within the existing light budget", () => {
     const scene = new THREE.Scene();
     const core = new SuperCore(scene);
-    const pickups = new PowerUpPickups();
     try {
       core.render(snapshot, 1_000);
       const group = groupOf(scene);
       const meshes = meshesOf(group);
-      expect(meshes.map((mesh) => mesh.name).sort()).toEqual(["super-core-collar", "super-core-crystal"]);
+      expect(group.getObjectByName("super-core-gift-box")).toBeInstanceOf(THREE.Mesh);
+      expect(group.getObjectByName("super-core-gift-ribbon")).toBeInstanceOf(THREE.Mesh);
+      expect(meshes.length).toBeLessThanOrEqual(3);
       for (const mesh of meshes) {
-        expect(mesh.geometry).not.toBeInstanceOf(THREE.SphereGeometry);
-        expect(mesh.geometry).not.toBeInstanceOf(THREE.OctahedronGeometry);
-        expect(mesh.geometry).not.toBeInstanceOf(THREE.IcosahedronGeometry);
         const material = mesh.material as THREE.MeshStandardMaterial;
         expect(material.wireframe).toBe(false);
         expect(material.transparent).toBe(false);
-        expect(material.color.getHex()).not.toBe(0xffffff);
         expect(material.emissiveIntensity).toBeGreaterThan(0);
-        expect(material.map).toBeNull();
         expect(mesh.castShadow).toBe(false);
       }
-      const crystal = meshes.find((mesh) => mesh.name === "super-core-crystal");
-      if (crystal === undefined) throw new Error("crystal missing");
-      const crystalMaterial = crystal.material as THREE.MeshStandardMaterial;
-      expect(crystalMaterial.emissiveIntensity).toBeGreaterThan(0.8);
-      expect(crystalMaterial.emissiveMap).toBeInstanceOf(THREE.DataTexture);
-      const positions = crystal.geometry.getAttribute("position");
-      const heights = new Set<number>();
-      for (let i = 0; i < positions.count; i += 1) heights.add(Number(positions.getY(i).toFixed(4)));
-      // A wide girdle and two tiny tips read as a cut diamond; glowing
-      // overlays must never inflate its solid footprint.
-      expect(heights.size).toBe(4);
-      expect(positions.count / 3).toBe(48);
-      let tipRadius = 0;
-      for (let i = 0; i < positions.count; i += 1) {
-        if (positions.getY(i) > 0.5) {
-          tipRadius = Math.max(tipRadius, Math.hypot(positions.getX(i), positions.getZ(i)));
-        }
-      }
-      expect(tipRadius).toBeLessThan(0.03);
       let lights = 0;
       scene.traverse((object) => { if (object instanceof THREE.Light) lights += 1; });
       expect(lights).toBe(0);
-
-      const ordinary = pickups.object.children[0];
-      if (ordinary === undefined) throw new Error("ordinary pickup missing");
-      const ordinarySpan = spanOf(ordinary);
       for (const yaw of [0, Math.PI / 4, Math.PI / 2]) {
         group.rotation.y = yaw;
         const size = physicalBounds(group).getSize(new THREE.Vector3());
-        const physicalSpan = Math.max(size.x, size.y, size.z);
-        const ratio = physicalSpan / ordinarySpan;
-        expect(ratio).toBeGreaterThanOrEqual(1.2);
-        expect(ratio).toBeLessThanOrEqual(1.4);
-        expect(physicalSpan).toBeLessThan(1);
-        expect(spanOf(group)).toBeGreaterThan(physicalSpan);
-        // Front, side, and overhead all retain a readable solid width.
-        expect(size.x).toBeGreaterThan(ordinarySpan);
-        expect(size.z).toBeGreaterThan(ordinarySpan);
-        expect(size.y).toBeGreaterThan(ordinarySpan * 0.9);
+        expect(Math.max(size.x, size.y, size.z)).toBeLessThan(1.2);
+        expect(Math.min(size.x, size.y, size.z)).toBeGreaterThan(0.5);
+        expect(spanOf(group)).toBeGreaterThan(Math.max(size.x, size.y, size.z));
         for (const offset of [new THREE.Vector3(0, 0, 3), new THREE.Vector3(3, 0, 0), new THREE.Vector3(0, 3, 0)]) {
           const origin = group.position.clone().add(offset);
           const direction = offset.clone().negate().normalize();
-          const hits = new THREE.Raycaster(origin, direction).intersectObjects(meshes);
-          expect(hits.length).toBeGreaterThan(0);
-          // A front-facing crystal surface survives each viewpoint; inverted
-          // custom-face winding would silently disappear with FrontSide.
-          expect(hits[0]?.object).toBe(crystal);
+          expect(new THREE.Raycaster(origin, direction).intersectObjects(meshes).length).toBeGreaterThan(0);
         }
       }
     } finally {
       core.dispose();
-      pickups.dispose();
     }
   });
 
-  it("starts with radial halos and real ground spill, with white heart emission and saturated tips/facets", () => {
+  it("shares radial halos and ground spill without adding per-kind textures", () => {
     const scene = new THREE.Scene();
     const core = new SuperCore(scene);
     try {
@@ -332,14 +346,6 @@ describe("SuperCore compact neon universal pickup", () => {
       expect(alphaAt(54, 32)).toBeLessThan(alphaAt(42, 32));
       expect(alphaAt(63, 0)).toBe(0);
       expect(alphaAt(63, 32)).toBeLessThan(2);
-      const crystal = group.getObjectByName("super-core-crystal") as THREE.Mesh;
-      const emission = (crystal.material as THREE.MeshStandardMaterial).emissiveMap as THREE.DataTexture;
-      const emissionImage = emission.image as { data: Uint8Array; width: number; height: number };
-      const brightHeart = (13 * emissionImage.width) * 4;
-      const darkHeart = brightHeart + 3 * 4;
-      expect(emissionImage.data[brightHeart + 2]).toBeGreaterThan(200);
-      expect(emissionImage.data[brightHeart + 2]).toBeGreaterThan((emissionImage.data[2] ?? 0) * 3);
-      expect(emissionImage.data[brightHeart]).toBeGreaterThan(emissionImage.data[darkHeart] ?? 0);
     } finally {
       core.dispose();
     }
@@ -356,7 +362,7 @@ describe("SuperCore compact neon universal pickup", () => {
       const spill = spillOf(scene);
       const groundPosition = spill.position.clone();
       const initialPhysicalSize = physicalBounds(group).getSize(new THREE.Vector3());
-      const material = meshes.find((mesh) => mesh.name === "super-core-crystal")?.material as THREE.MeshStandardMaterial;
+      const material = meshes.find((mesh) => mesh.name === "super-core-gift-box")?.material as THREE.MeshStandardMaterial;
       const initialGlow = material.emissiveIntensity;
       core.update(0.5);
       expect(group.rotation.y).toBeGreaterThan(0);
@@ -365,8 +371,8 @@ describe("SuperCore compact neon universal pickup", () => {
       for (let i = 0; i < 120; i += 1) {
         core.update(1 / 30);
         expect(Math.abs(group.position.y - 1.2)).toBeLessThanOrEqual(0.06);
-        expect(material.emissiveIntensity).toBeGreaterThanOrEqual(0.87);
-        expect(material.emissiveIntensity).toBeLessThanOrEqual(1.03);
+        expect(material.emissiveIntensity).toBeGreaterThan(0);
+        expect(material.emissiveIntensity).toBeLessThan(1);
         expect(physicalBounds(group).getSize(new THREE.Vector3()).y).toBeCloseTo(initialPhysicalSize.y, 5);
         expect(spill.position.equals(groundPosition)).toBe(true);
         expect(spill.rotation.y).toBe(0);
@@ -426,7 +432,9 @@ describe("SuperCore compact neon universal pickup", () => {
       expect(spill.visible).toBe(false);
       expect(group.rotation.y).toBe(0);
       core.render(snapshot, 9_999);
-      core.render({ ...snapshot, active: false }, 10_000);
+      core.render(snapshot, 10_000);
+      expect(spill.visible).toBe(false);
+      core.render(snapshot, 10_400);
       expect(group.visible).toBe(false);
     } finally {
       core.dispose();
@@ -450,7 +458,7 @@ describe("SuperCore compact neon universal pickup", () => {
           resources.add(material.emissiveMap);
         }
       });
-      expect([...resources].filter((resource) => resource instanceof THREE.Texture)).toHaveLength(2);
+      expect([...resources].filter((resource) => resource instanceof THREE.Texture)).toHaveLength(1);
       const disposed = new Map<object, number>();
       for (const resource of resources) {
         resource.addEventListener("dispose", () => { disposed.set(resource, (disposed.get(resource) ?? 0) + 1); });

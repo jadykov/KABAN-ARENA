@@ -8,6 +8,8 @@
 // (scalar math only) and no per-frame texture work.
 
 import * as THREE from "three";
+import { isSuperBonusKind, type SuperBonusKind } from "../../../shared/super-bonuses.mjs";
+import { SuperBonusModels } from "./SuperBonusModels";
 import {
   AIRBORNE_EXIT_FRACTION,
   AIRBORNE_EXIT_HOLD_S,
@@ -35,6 +37,7 @@ export { PANTS_PALETTE };
 
 export interface HandBallHandle {
   readonly group: THREE.Group;
+  setBonusKind(kind?: SuperBonusKind | ""): void;
   setCharge01(value: number): void;
   // Stage 4d.2 charge translucency (local avatar only, driven by
   // SceneManager): fades the held core to AVATAR_CHARGE_OPACITY from charge
@@ -160,6 +163,8 @@ function nextUnit(state: HopState): number {
 // material. Face decal geometry + one material per variant are cached
 // module-wide (≤7 textures total, shared by every avatar on that variant).
 let sharedBallGeo: THREE.SphereGeometry | null = null;
+let sharedHeldBonusModels: SuperBonusModels | null = null;
+let heldBonusModelUsers = 0;
 let sharedDecalGeo: THREE.CylinderGeometry | null = null;
 const faceMaterials: THREE.MeshBasicMaterial[] = [];
 
@@ -623,15 +628,86 @@ export function attachHandBall(parent: THREE.Object3D, color: number): HandBallH
   let reloadT = -1;
   let reappearT = -1;
   const reloadDurationS = RELOAD_MS / 1000;
+  let bonusLibrary: SuperBonusModels | null = null;
+  let bonusHolder: THREE.Group | null = null;
+  let bonusKind: SuperBonusKind | undefined;
+  let clearAfterFlick = false;
+  let translucent = false;
+  let disposed = false;
+  const bonusModels = new Map<SuperBonusKind, THREE.Group>();
+  // Geometry is shared between avatars; these few material clones keep their
+  // charge glow and camera translucency independent of all other players.
+  const bonusMaterials = new Map<THREE.MeshStandardMaterial, THREE.MeshStandardMaterial>();
+
+  const applyTranslucency = (): void => {
+    for (const [source, clone] of bonusMaterials) {
+      clone.opacity = source.opacity * (translucent ? AVATAR_CHARGE_OPACITY : 1);
+      clone.depthWrite = !translucent && source.depthWrite;
+    }
+  };
+  const applyBonusKind = (next: SuperBonusKind | undefined): void => {
+    bonusKind = next;
+    group.userData["bonusKind"] = next ?? "";
+    ball.visible = next === undefined;
+    if (bonusHolder !== null) bonusHolder.visible = next !== undefined;
+    for (const [kind, model] of bonusModels) model.visible = kind === next;
+    if (next === undefined || bonusModels.has(next)) return;
+    if (bonusLibrary === null) {
+      sharedHeldBonusModels ??= new SuperBonusModels();
+      heldBonusModelUsers += 1;
+      bonusLibrary = sharedHeldBonusModels;
+    }
+    if (bonusHolder === null) {
+      bonusHolder = new THREE.Group();
+      bonusHolder.name = "held-bonus-model";
+      bonusHolder.rotation.y = Math.PI;
+      bonusHolder.scale.setScalar(0.65);
+      group.add(bonusHolder);
+    }
+    const model = bonusLibrary.create(next);
+    model.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
+      const source = object.material as THREE.MeshStandardMaterial;
+      let clone = bonusMaterials.get(source);
+      if (clone === undefined) {
+        clone = source.clone();
+        // Like the ordinary hand ball, compile transparency once. It can
+        // fade during aiming without compiling another shader mid-match.
+        clone.transparent = true;
+        bonusMaterials.set(source, clone);
+      }
+      object.material = clone;
+    });
+    bonusHolder.add(model);
+    bonusHolder.visible = true;
+    bonusModels.set(next, model);
+    applyTranslucency();
+  };
+  const setBallScale = (scale: number): void => {
+    ball.scale.setScalar(scale);
+    if (bonusHolder !== null) bonusHolder.scale.setScalar(scale * 0.65);
+  };
 
   const handle: HandBallHandle = {
     group,
+    setBonusKind(kind = ""): void {
+      if (disposed) return;
+      const next = isSuperBonusKind(kind) ? kind : undefined;
+      if (next === undefined && bonusKind !== undefined && flickT >= 0) {
+        clearAfterFlick = true;
+        return;
+      }
+      clearAfterFlick = false;
+      if (next !== bonusKind) applyBonusKind(next);
+    },
     setCharge01(value: number): void {
       charge01 = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
     },
     setTranslucent(active: boolean): void {
+      translucent = active === true;
       material.transparent = true;
-      material.opacity = active === true ? AVATAR_CHARGE_OPACITY : 1;
+      material.opacity = translucent ? AVATAR_CHARGE_OPACITY : 1;
+      applyTranslucency();
     },
     getBallOpacity(): number {
       return material.opacity;
@@ -651,6 +727,10 @@ export function attachHandBall(parent: THREE.Object3D, color: number): HandBallH
       }
       glowTime += deltaSeconds;
       bobTime += deltaSeconds;
+      if (bonusKind !== undefined && bonusLibrary !== null) {
+        const model = bonusModels.get(bonusKind);
+        if (model !== undefined) bonusLibrary.animate(model, bobTime);
+      }
       // Charge glow on the held core (emissive only, no lights): muted-red
       // flicker at full charge, steady dimmer red below — same language as
       // the old barrel glow so charge readability is unchanged.
@@ -660,6 +740,9 @@ export function attachHandBall(parent: THREE.Object3D, color: number): HandBallH
       } else {
         material.emissive.setHex(ACCENT_GLOW_BALL);
         material.emissiveIntensity = charge01 * 1.6;
+      }
+      for (const [source, clone] of bonusMaterials) {
+        clone.emissiveIntensity = source.emissiveIntensity + material.emissiveIntensity * 0.65;
       }
       // Throw flick (visible forward snap) runs concurrently with the reload
       // clock: both start at release, the flick ends after ~0.15s, and the
@@ -671,11 +754,15 @@ export function attachHandBall(parent: THREE.Object3D, color: number): HandBallH
         const k = Math.min(1, flickT / flickDuration);
         if (k >= 1) {
           flickT = -1;
+          if (clearAfterFlick) {
+            clearAfterFlick = false;
+            applyBonusKind(undefined);
+          }
         } else {
           group.position.z = HANDBALL_OFFSET_Z + Math.sin(k * Math.PI) * 0.35;
           group.position.y = HANDBALL_OFFSET_Y + Math.sin(k * Math.PI) * 0.1;
           const punch = 1 + Math.sin(k * Math.PI) * 0.25;
-          ball.scale.setScalar(punch * (1 + charge01 * 0.6));
+          setBallScale(punch * (1 + charge01 * 0.6));
           return;
         }
       } else if (reloadT >= 0) {
@@ -707,22 +794,38 @@ export function attachHandBall(parent: THREE.Object3D, color: number): HandBallH
           reappearT = -1;
         }
       }
-      ball.scale.setScalar(Math.max(0.001, scale));
+      setBallScale(Math.max(0.001, scale));
     },
     reset(): void {
       charge01 = 0;
       flickT = -1;
       reloadT = -1;
       reappearT = -1;
+      clearAfterFlick = false;
+      applyBonusKind(undefined);
       group.visible = true;
       group.position.set(HANDBALL_OFFSET_X, HANDBALL_OFFSET_Y, HANDBALL_OFFSET_Z);
-      ball.scale.setScalar(1);
+      setBallScale(1);
     },
     dispose(): void {
+      if (disposed) return;
+      disposed = true;
       if (group.parent !== null) {
         group.parent.remove(group);
       }
       group.remove(ball);
+      if (bonusHolder !== null) group.remove(bonusHolder);
+      bonusMaterials.forEach((clone) => clone.dispose());
+      bonusMaterials.clear();
+      bonusModels.clear();
+      if (bonusLibrary !== null) {
+        heldBonusModelUsers -= 1;
+        if (heldBonusModelUsers === 0) {
+          sharedHeldBonusModels?.dispose();
+          sharedHeldBonusModels = null;
+        }
+        bonusLibrary = null;
+      }
       // Per-handle material is disposed with the handle (charge emissive is
       // per-fighter); the shared ball geometry stays alive (module lifetime)
       // for the other avatars.

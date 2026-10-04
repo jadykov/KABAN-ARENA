@@ -16,7 +16,8 @@ const { MapSchema, Schema, type } = schemaCjs;
 // Patches replicate at PATCH_RATE_MS (20/s); clients interpolate.
 // R1 pre-join spectator: newcomers join as spectators (ready=false,
 // spectator=true, alive=false) and only enter the arena on "play".
-// R2 cannon: superBuff marks x2 NEXT shot, reloadUntil gates charging.
+// superKind is the one held item. superBuff mirrors its presence for older
+// HUDs; x2 damage is retained only for a legacy buff with no kind.
 export class PlayerState extends Schema {
   @type("string") sessionId = "";
   @type("string") nick = "";
@@ -32,6 +33,13 @@ export class PlayerState extends Schema {
   @type("boolean") ready = false;
   @type("boolean") spectator = true;
   @type("boolean") superBuff = false;
+  @type("string") superKind = "";
+  @type("number") superUntil = 0;
+  @type("number") frozenUntil = 0;
+  @type("number") turkeyUntil = 0;
+  @type("number") controlImmuneUntil = 0;
+  @type("number") launchSeq = 0;
+  @type("number") launchVelocity = 0;
   @type("number") reloadUntil = 0;
   // Authoritative bonuses from the three neutral layout pickup points.
   @type("number") shieldHp = 0;
@@ -70,6 +78,7 @@ export class BallState extends Schema {
   @type("number") vz = 0;
   @type("number") power01 = 0.5;
   @type("boolean") super = false;
+  @type("string") bonusKind = "";
   @type("number") ageMs = 0;
   @type("number") distM = 0;
   @type("boolean") ricochet = false;
@@ -77,6 +86,30 @@ export class BallState extends Schema {
   @type("boolean") rolling = false;
   public settleMs = 0;
   public restY = 0;
+  public originX = 0;
+  public originY = 0;
+  public originZ = 0;
+  public returning = false;
+  public bonusHit = false;
+}
+
+export class BonusEffectState extends Schema {
+  @type("string") effectId = "";
+  @type("string") throwId = "";
+  @type("string") ownerId = "";
+  @type("string") kind = "";
+  @type("string") phase = "";
+  @type("number") x = 0;
+  @type("number") y = 0;
+  @type("number") z = 0;
+  @type("number") radius = 0;
+  @type("number") createdAt = 0;
+  @type("number") expiresAt = 0;
+  @type("number") armedAt = 0;
+  @type("number") triggerAt = 0;
+  @type("number") vx = 0;
+  @type("number") vy = 0;
+  @type("number") vz = 0;
 }
 
 export type RoundPhase = "lobby" | "countdown" | "playing" | "ended";
@@ -87,19 +120,16 @@ export class ArenaState extends Schema {
   @type("string") phase: string = "lobby";
   @type({ map: PlayerState }) players = new MapSchema<PlayerState>();
   @type({ map: BallState }) balls = new MapSchema<BallState>();
+  @type({ map: BonusEffectState }) bonusEffects = new MapSchema<BonusEffectState>();
   @type({ map: PickupState }) pickups = new MapSchema<PickupState>();
   @type("number") countdownMs = 0;
   @type("number") remainingMs = 0;
   @type("string") winner = "";
   // Super-core lifecycle: active pickup at (superX, superZ), expires at
-  // superExpiresAt; next spawn at superNextAt.
-  // Future center items (NOT implemented): "pineapple" (radius AoE on throw)
-  // and "heal" (+1 heart on pickup) plug in as sibling field groups here
-  // (active/x/z/expiresAt/nextAt per kind) driven by tickCenterItems() in
-  // ArenaRoom — keep super fields untouched when adding them.
-  // TODO(pineapple): pineappleActive/pineappleX/pineappleZ/...
-  // TODO(heal): healActive/healX/healZ/...
+  // superExpiresAt; next spawn at superNextAt. The central kind stays
+  // server-only until pickup; superKind is an empty compatibility field.
   @type("boolean") superActive = false;
+  @type("string") superKind = "";
   @type("number") superX = 0;
   @type("number") superZ = 0;
   @type("number") superExpiresAt = 0;

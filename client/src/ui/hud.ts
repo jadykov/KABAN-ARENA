@@ -1,5 +1,6 @@
 import { KILLFEED_MAX_LINES, KILLFEED_OPACITY, MAX_HALVES, MAX_HEARTS } from "../config";
 import { halvesPerHeart } from "../net/protocol";
+import { getSuperBonus, SUPER_BONUS_SLOT_MS, type SuperBonusDefinition } from "../../../shared/super-bonuses.mjs";
 
 // Pure helper (unit-tested): hearts left after taking hits, never below 0.
 export function heartsAfterHits(currentHearts: number, hits: number): number {
@@ -30,7 +31,7 @@ export function localizeKillfeed(message: string): string {
   }
   const superPickup = /^(.+) grabbed SUPER core \(x2 next shot\)$/.exec(message);
   if (superPickup !== null) {
-    return `Суперзаряд у ${superPickup[1]}: ×2 к броску`;
+    return `Супербонус у ${superPickup[1]}`;
   }
   return /[А-Яа-яЁё]/u.test(message) ? message : "Событие на арене";
 }
@@ -73,7 +74,12 @@ export interface HudHandle {
   setBuffValues(shieldSeconds: number, shieldHp: number, speedSeconds: number, chargeSeconds: number): void;
   getHearts(): number;
   getHalves(): number;
-  setSuperBadge(visible: boolean): void;
+  // One row: the held bonus takes priority over the available centre pickup.
+  // Null, unknown kinds and nonpositive/nonfinite time hide their state.
+  setSuperBonus(kind: string | null, remainingS: number): void;
+  setCentreBonus(kind: string | null, remainingS: number): void;
+  // Caller supplies the authoritative 2-second deadline and clears on reset.
+  setTurkeyMask(active: boolean): void;
   setStatus(text: string): void;
   addKillfeed(message: string): void;
   // Placeholder hit logic for the Stage 2 test scene: 1 hit = 1 heart lost.
@@ -183,10 +189,39 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
     buffRows[kind] = { row, timer, label, active: false, tenths: 0 };
   }
 
-  const superBadge = document.createElement("div");
-  superBadge.id = "hud-super";
-  superBadge.textContent = "СУПЕР ×2";
-  superBadge.style.display = "none";
+  const superRow = document.createElement("div");
+  superRow.id = "hud-super";
+  superRow.style.display = "none";
+  superRow.style.pointerEvents = "none";
+  superRow.setAttribute("aria-hidden", "true");
+  const superName = document.createElement("span");
+  superName.id = "hud-super-name";
+  superName.setAttribute("aria-live", "polite");
+  const superHint = document.createElement("span");
+  superHint.id = "hud-super-hint";
+  const superTimer = document.createElement("span");
+  superTimer.id = "hud-super-timer";
+  superRow.appendChild(superName);
+  superRow.appendChild(superHint);
+  superRow.appendChild(superTimer);
+
+  // Sibling stacking keeps the feather mask below #hud, #aim and all touch
+  // controls. Neither the mask nor its decorative feathers can receive input.
+  const turkeyMask = document.createElement("div");
+  turkeyMask.id = "hud-turkey-mask";
+  turkeyMask.style.display = "none";
+  turkeyMask.style.pointerEvents = "none";
+  turkeyMask.setAttribute("aria-hidden", "true");
+  for (const edge of ["top", "bottom"] as const) {
+    const fringe = document.createElement("div");
+    fringe.className = `turkey-fringe turkey-fringe--${edge}`;
+    for (let i = 0; i < 7; i += 1) {
+      const feather = document.createElement("span");
+      feather.className = "turkey-feather";
+      fringe.appendChild(feather);
+    }
+    turkeyMask.appendChild(fringe);
+  }
 
   const killfeed = document.createElement("div");
   killfeed.id = "hud-killfeed";
@@ -197,8 +232,9 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
   root.appendChild(hearts);
   root.appendChild(buffsPanel);
   root.appendChild(scoreBlock);
-  root.appendChild(superBadge);
+  root.appendChild(superRow);
   root.appendChild(killfeed);
+  parent.appendChild(turkeyMask);
   parent.appendChild(root);
 
   let currentHalves = maxHearts * 2;
@@ -206,6 +242,45 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
   let heartLabel = "";
   let paintedShieldLabel = "";
   let disposed = false;
+  const heldBonus: { definition: SuperBonusDefinition | undefined; seconds: number } = { definition: undefined, seconds: 0 };
+  const centreBonus = { seconds: 0 };
+  let paintedBonus: SuperBonusDefinition | undefined;
+  let paintedBonusSource = "";
+  let paintedBonusSeconds = 0;
+  let turkeyActive = false;
+
+  const paintSuperBonus = (): void => {
+    const source = heldBonus.definition !== undefined ? "held" : centreBonus.seconds > 0 ? "centre" : "";
+    const bonus = source === "held" ? heldBonus : centreBonus;
+    const definition = source === "held" ? heldBonus.definition : undefined;
+    const active = source !== "";
+    if (definition !== paintedBonus || source !== paintedBonusSource) {
+      superRow.style.display = active ? "" : "none";
+      superRow.setAttribute("aria-hidden", active ? "false" : "true");
+      superRow.setAttribute("data-source", source);
+      superRow.setAttribute("data-kind", definition?.kind ?? "");
+      superName.textContent = source === "centre" ? "Подарок в центре" : definition?.name ?? "";
+      superHint.textContent = definition?.hint ?? "";
+      superRow.style.borderColor = definition === undefined ? "" : `#${definition.color.toString(16).padStart(6, "0")}`;
+      paintedBonus = definition;
+      paintedBonusSource = source;
+    }
+    const seconds = active ? bonus.seconds : 0;
+    if (seconds !== paintedBonusSeconds) {
+      superTimer.textContent = seconds > 0 ? `${seconds} с` : "";
+      superTimer.setAttribute("aria-label", seconds > 0 ? `Осталось ${seconds} с` : "");
+      paintedBonusSeconds = seconds;
+    }
+  };
+
+  const setBonus = (bonus: typeof heldBonus, kind: string | null, remainingS: number, maxSeconds: number): void => {
+    const definition = Number.isFinite(remainingS) && remainingS > 0 ? getSuperBonus(kind) : undefined;
+    const seconds = definition === undefined ? 0 : Math.min(maxSeconds, Math.ceil(remainingS));
+    if (bonus.definition === definition && bonus.seconds === seconds) return;
+    bonus.definition = definition;
+    bonus.seconds = seconds;
+    paintSuperBonus();
+  };
 
   const updateHeartLabel = (): void => {
     const shieldLabel = currentShieldHp > 0 ? `; щит: ${Math.ceil(currentShieldHp)} из 25 прочности` : "";
@@ -333,9 +408,21 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
     getHalves(): number {
       return currentHalves;
     },
-    setSuperBadge(visible: boolean): void {
-      const display = visible ? "" : "none";
-      if (superBadge.style.display !== display) superBadge.style.display = display;
+    setSuperBonus(kind: string | null, remainingS: number): void {
+      setBonus(heldBonus, kind, remainingS, SUPER_BONUS_SLOT_MS / 1000);
+    },
+    setCentreBonus(_kind: string | null, remainingS: number): void {
+      // Public central snapshots intentionally carry no kind. Presence and
+      // expiry alone drive the generic gift row, even for legacy snapshots.
+      const seconds = Number.isFinite(remainingS) && remainingS > 0 ? Math.ceil(remainingS) : 0;
+      if (centreBonus.seconds === seconds) return;
+      centreBonus.seconds = seconds;
+      paintSuperBonus();
+    },
+    setTurkeyMask(active: boolean): void {
+      if (turkeyActive === active) return;
+      turkeyActive = active;
+      turkeyMask.style.display = active ? "" : "none";
     },
     setStatus(text: string): void {
       if (status.textContent !== text) status.textContent = text;
@@ -375,6 +462,9 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
       disposed = true;
       if (root.parentElement === parent) {
         parent.removeChild(root);
+      }
+      if (turkeyMask.parentElement === parent) {
+        parent.removeChild(turkeyMask);
       }
     },
   };

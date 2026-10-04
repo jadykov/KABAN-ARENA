@@ -5,6 +5,39 @@ import { PhysicsWorld } from "./World";
 const SPAWN = { x: 0, y: 1.1, z: 0 };
 
 describe("PhysicsWorld rapier wrapper", () => {
+  it("replaces rising, falling and trampoline velocity for jelly while preserving horizontal motion", async () => {
+    const physics = await PhysicsWorld.create(SPAWN);
+    try {
+      for (const previousY of [-3, 10]) {
+        physics.setPlayerVelocity(2, previousY, 4);
+        physics.setPlayerVerticalVelocity(10);
+        expect(physics.getPlayerVelocity()).toEqual({ x: 2, y: 10, z: 4 });
+      }
+      physics.launchTrampoline();
+      expect(physics.getPlayerVelocity()).toEqual({ x: 2, y: TRAMPOLINE_IMPULSE, z: 4 });
+      physics.setPlayerVerticalVelocity(10);
+      expect(physics.getPlayerVelocity()).toEqual({ x: 2, y: 10, z: 4 });
+    } finally { physics.dispose(); }
+  });
+
+  it("sweeps vacuum reconciliation before walls and retains vertical/horizontal momentum", async () => {
+    const physics = await PhysicsWorld.create(SPAWN);
+    try {
+      physics.addStaticBox(0.2, 3, 4, 2, 3, 0);
+      for (let i = 0; i < 60; i += 1) physics.step(1 / 60);
+      physics.setPlayerVelocity(0.3, 2, -0.4);
+      const velocity = physics.getPlayerVelocity();
+      const beforeY = physics.getPlayerPosition().y;
+      const next = physics.movePlayerSafely(4, 0);
+      expect(next.x).toBeLessThanOrEqual(1.31);
+      expect(next.x).toBeGreaterThan(0.5);
+      expect(next.y).toBe(beforeY);
+      expect(physics.getPlayerVelocity()).toEqual(velocity);
+      expect(physics.hasLineOfSight(4, 1, 0)).toBe(false);
+      expect(physics.hasLineOfSight(0, 1, -4)).toBe(true);
+    } finally { physics.dispose(); }
+  });
+
   it("spawns the capsule at the requested position", async () => {
     const physics = await PhysicsWorld.create({ x: 1, y: 2, z: 3 });
     try {

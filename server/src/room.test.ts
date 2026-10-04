@@ -762,10 +762,10 @@ describe("thrower elevation helpers (4d.1 torso-height spawn)", () => {
 });
 
 describe("R2 super-core: spawn, pickup, consume-on-fire (even on miss)", () => {
-  it("spawns at center every 45s and is picked up within 1.4m", async () => {
+  it("uses a 10s center delay and is picked up within 1.4m", async () => {
     const room = await playingRoom();
     removeBots(room);
-    expect(SUPER_SPAWN_S).toBe(45);
+    expect(SUPER_SPAWN_S).toBe(10);
     room.state.superActive = false;
     room.state.superNextAt = room.testNow ?? 0;
     const player = getPlayer(room, "s1");

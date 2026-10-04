@@ -285,9 +285,16 @@ input:focus-visible {
 
 #hud-super {
   position: fixed;
-  top: calc(49px + env(safe-area-inset-top, 0px));
+  bottom: calc(180px + env(safe-area-inset-bottom, 0px));
   left: 50%;
-  padding: 4px 11px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 10px;
+  width: max-content;
+  max-width: min(640px, calc(100vw - 24px));
+  box-sizing: border-box;
+  padding: 7px 10px;
   border: 1px solid rgba(255, 224, 171, 0.65);
   border-radius: 999px;
   background: rgba(50, 56, 53, 0.88);
@@ -295,15 +302,80 @@ input:focus-visible {
   color: var(--palette-super-text);
   font-size: 10px;
   font-weight: 900;
-  letter-spacing: 0.1em;
+  line-height: 1.3;
+  text-align: left;
+  overflow-wrap: anywhere;
   transform: translateX(-50%);
+  pointer-events: none;
 }
 
-#hud-super::before {
-  content: "✦";
-  margin-right: 5px;
-  color: var(--palette-warm);
+#hud-super-name {
+  min-width: 0;
 }
+
+#hud-super-hint {
+  min-width: 0;
+  color: var(--ui-text);
+  font-weight: 650;
+}
+
+#hud-super-timer {
+  color: var(--palette-warm);
+  white-space: nowrap;
+}
+
+/* The middle third remains completely open, including the reticle. The
+   clipped fringes cover gameplay only; HUD and touch controls sit above 9. */
+#hud-turkey-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 9;
+  pointer-events: none;
+}
+
+#hud-turkey-mask * {
+  pointer-events: none;
+}
+
+.turkey-fringe {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 33.333333%;
+  overflow: hidden;
+  background: linear-gradient(180deg, #3b2428, #67402f);
+}
+
+.turkey-fringe--top {
+  top: 0;
+}
+
+.turkey-fringe--bottom {
+  bottom: 0;
+  transform: scaleY(-1);
+}
+
+.turkey-feather {
+  position: absolute;
+  left: calc(-7% + var(--feather-index) * 15%);
+  bottom: -15%;
+  width: 25%;
+  height: 135%;
+  border: 1px solid rgba(255, 224, 171, 0.46);
+  border-radius: 65% 40% 60% 35%;
+  background: repeating-linear-gradient(65deg, transparent 0 10px, rgba(54, 30, 33, 0.23) 11px 13px),
+    linear-gradient(90deg, #794735, #c98b59 48%, #ffe0ab 50%, #a5603c 53%, #794735);
+  box-shadow: 0 2px 7px rgba(23, 12, 20, 0.5);
+  transform: rotate(var(--feather-tilt));
+}
+
+.turkey-feather:nth-child(1) { --feather-index: 0; --feather-tilt: -22deg; }
+.turkey-feather:nth-child(2) { --feather-index: 1; --feather-tilt: -16deg; }
+.turkey-feather:nth-child(3) { --feather-index: 2; --feather-tilt: -8deg; }
+.turkey-feather:nth-child(4) { --feather-index: 3; --feather-tilt: 0deg; }
+.turkey-feather:nth-child(5) { --feather-index: 4; --feather-tilt: 8deg; }
+.turkey-feather:nth-child(6) { --feather-index: 5; --feather-tilt: 16deg; }
+.turkey-feather:nth-child(7) { --feather-index: 6; --feather-tilt: 22deg; }
 
 #hud-killfeed {
   position: fixed;
@@ -779,6 +851,28 @@ input:focus-visible {
 }
 
 @media (max-width: 700px) {
+  #hud-super {
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: calc(100vw - 24px);
+    max-width: 420px;
+    border-radius: 12px;
+  }
+
+  #hud-super-name {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  #hud-super-hint {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  #hud-super-timer {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
   #hud-score-block {
     top: calc(74px + env(safe-area-inset-top, 0px));
     right: calc(8px + env(safe-area-inset-right, 0px));
@@ -837,6 +931,10 @@ input:focus-visible {
 }
 
 @media (max-height: 540px) {
+  #hud-super {
+    bottom: calc(148px + env(safe-area-inset-bottom, 0px));
+  }
+
   #join-overlay {
     max-height: calc(100vh - 24px);
     max-height: calc(100dvh - 24px);

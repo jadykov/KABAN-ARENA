@@ -1,12 +1,17 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { KILLFEED_MAX_LINES, KILLFEED_OPACITY } from "../config";
+import { SUPER_BONUSES } from "../../../shared/super-bonuses.mjs";
 import { createHud, localizeKillfeed, localizePowerUp } from "./hud";
+
+const gameStyles = readFileSync(new URL("../style.css", import.meta.url), "utf8");
 
 // Minimal DOM stub (same pattern as ui/aim.test.ts: vitest runs in node with
 // no jsdom, and createHud only needs createElement/style/textContent +
 // appendChild/prepend/removeChild). Extended with textContent, prepend and
 // lastElementChild, which the killfeed path uses.
 class FakeElement {
+  public constructor(public readonly tagName = "div") {}
   public id = "";
   public className = "";
   public readonly writes: string[] = [];
@@ -72,7 +77,7 @@ class FakeElement {
 
 function installFakeDocument(): void {
   const fakeDocument = {
-    createElement: (): FakeElement => new FakeElement(),
+    createElement: (tagName: string): FakeElement => new FakeElement(tagName),
   };
   (globalThis as unknown as Record<string, unknown>)["document"] = fakeDocument;
 }
@@ -310,7 +315,7 @@ describe("createHud top-left info list", () => {
       handle.setCounters(4, 2);
       handle.setTimer(65);
       handle.setStatus("Игра");
-      handle.setSuperBadge(true);
+      handle.setSuperBonus("turkey", 20);
       handle.setBuffValues(9.96, 12.5, 4.25, 5.94);
       const originalHearts = [...byId(handle, "hud-hearts").children];
       clearWrites(handle);
@@ -320,7 +325,7 @@ describe("createHud top-left info list", () => {
         handle.setCounters(4, 2);
         handle.setTimer(65.8);
         handle.setStatus("Игра");
-        handle.setSuperBadge(true);
+        handle.setSuperBonus("turkey", 19.98);
         handle.setBuffValues(9.92, 12.5, 4.22, 5.91);
       }
       expect(byId(handle, "hud-hearts").children).toEqual(originalHearts);
@@ -402,12 +407,170 @@ describe("createHud top-left info list", () => {
   });
 });
 
+describe("super bonus HUD", () => {
+  it("names all ten held items with their hint and a 20-second countdown", () => {
+    const parent = new FakeElement();
+    const handle = createHud(asHtml(parent));
+    try {
+      expect(byId(handle, "hud-super").style.display).toBe("none");
+      for (const bonus of SUPER_BONUSES) {
+        handle.setSuperBonus(bonus.kind, 20);
+        expect(byId(handle, "hud-super-name").textContent).toBe(bonus.name);
+        expect(byId(handle, "hud-super-hint").textContent).toBe(bonus.hint);
+        expect(byId(handle, "hud-super-timer").textContent).toBe("20 с");
+        expect(byId(handle, "hud-super").attributes["data-kind"]).toBe(bonus.kind);
+        expect(byId(handle, "hud-super").attributes["aria-hidden"]).toBe("false");
+      }
+      handle.setSuperBonus("soda", 24);
+      expect(byId(handle, "hud-super-timer").textContent).toBe("20 с");
+      handle.setSuperBonus("soda", 4.01);
+      expect(byId(handle, "hud-super-timer").textContent).toBe("5 с");
+      expect(byId(handle, "hud-super-timer").attributes["aria-label"]).toBe("Осталось 5 с");
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("shows only a generic centre gift for hidden or known legacy kinds", () => {
+    const handle = createHud(asHtml(new FakeElement()));
+    try {
+      for (const kind of ["", null, ...SUPER_BONUSES.map((bonus) => bonus.kind)]) {
+        handle.setCentreBonus(kind, 15);
+        expect(byId(handle, "hud-super").style.display).toBe("");
+        expect(byId(handle, "hud-super-name").textContent).toBe("Подарок в центре");
+        expect(byId(handle, "hud-super-hint").textContent).toBe("");
+        expect(byId(handle, "hud-super").attributes["data-kind"]).toBe("");
+        expect(byId(handle, "hud-super").style.borderColor ?? "").toBe("");
+        expect(byId(handle, "hud-super-timer").textContent).toBe("15 с");
+      }
+      clearWrites(handle);
+      handle.setCentreBonus("sheep", 15);
+      expect(writesOf(handle)).toEqual([]);
+    } finally { handle.dispose(); }
+  });
+
+  it("shows the centre pickup before collection and prioritizes the held item in the same row", () => {
+    const parent = new FakeElement();
+    const handle = createHud(asHtml(parent));
+    try {
+      handle.setCentreBonus("sheep", 14.3);
+      expect(byId(handle, "hud-super-name").textContent).toBe("Подарок в центре");
+      expect(byId(handle, "hud-super-timer").textContent).toBe("15 с");
+      expect(byId(handle, "hud-super").attributes["data-source"]).toBe("centre");
+      handle.setSuperBonus("freeze", 19.2);
+      expect(byId(handle, "hud-super-name").textContent).toBe("Ледяной кирпич");
+      expect(byId(handle, "hud-super").attributes["data-source"]).toBe("held");
+      clearWrites(handle);
+      handle.setCentreBonus("sheep", 8.2);
+      expect(writesOf(handle)).toEqual([]);
+      handle.setSuperBonus(null, 0);
+      expect(byId(handle, "hud-super-name").textContent).toBe("Подарок в центре");
+      expect(byId(handle, "hud-super-timer").textContent).toBe("9 с");
+      expect(byId(handle, "hud-super-hint").textContent).toBe("");
+      expect(byId(handle, "hud-super").style.borderColor).toBe("");
+      handle.setCentreBonus(null, 0);
+      expect(byId(handle, "hud-super").style.display).toBe("none");
+      expect(byId(handle, "hud-super-name").textContent).toBe("");
+      expect(byId(handle, "hud-super-hint").textContent).toBe("");
+      expect(byId(handle, "hud-super-timer").textContent).toBe("");
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("hides exactly at expiry and clears invalid or reset bonus states", () => {
+    const parent = new FakeElement();
+    const handle = createHud(asHtml(parent));
+    try {
+      handle.setSuperBonus("vacuum", 0.001);
+      expect(byId(handle, "hud-super").style.display).toBe("");
+      expect(byId(handle, "hud-super-timer").textContent).toBe("1 с");
+      handle.setSuperBonus("vacuum", 0);
+      expect(byId(handle, "hud-super").style.display).toBe("none");
+      expect(byId(handle, "hud-super").attributes["aria-hidden"]).toBe("true");
+      for (const [kind, remainingS] of [
+        ["ice", -0.001], ["ice", Number.NaN], ["ice", Infinity], ["unknown", 20], [null, 20],
+      ] as const) {
+        handle.setSuperBonus("ice", 20);
+        handle.setSuperBonus(kind, remainingS);
+        expect(byId(handle, "hud-super").style.display).toBe("none");
+        expect(byId(handle, "hud-super-timer").textContent).toBe("");
+      }
+      for (const remainingS of [0, -1, Number.NaN, Infinity]) {
+        handle.setCentreBonus("", 0.001);
+        expect(byId(handle, "hud-super").style.display).toBe("");
+        handle.setCentreBonus("", remainingS);
+        expect(byId(handle, "hud-super").style.display).toBe("none");
+      }
+      clearWrites(handle);
+      handle.setSuperBonus(null, 0);
+      handle.setCentreBonus(null, 0);
+      expect(writesOf(handle)).toEqual([]);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("leaves controls accessible and uses no new buttons or focusable inventory", () => {
+    const parent = new FakeElement();
+    const handle = createHud(asHtml(parent));
+    try {
+      const mask = parent.querySelector("#hud-turkey-mask");
+      if (mask === null) throw new Error("turkey mask missing");
+      expect(mask.parentElement).toBe(parent);
+      expect(mask.attributes["aria-hidden"]).toBe("true");
+      expect(mask.style.pointerEvents).toBe("none");
+      expect(byId(handle, "hud-super").style.pointerEvents).toBe("none");
+      expect(mask.style.display).toBe("none");
+      handle.setTurkeyMask(true);
+      expect(mask.style.display).toBe("");
+      expect(mask.children.map((fringe) => fringe.className)).toEqual([
+        "turkey-fringe turkey-fringe--top", "turkey-fringe turkey-fringe--bottom",
+      ]);
+      expect(allElements(parent).some((element) =>
+        ["button", "input", "select", "a"].includes(element.tagName) || element.attributes.tabindex !== undefined,
+      )).toBe(false);
+      handle.setSuperBonus("turkey", 19.9);
+      clearWrites(handle);
+      mask.writes.length = 0;
+      for (let i = 0; i < 120; i += 1) {
+        handle.setSuperBonus("turkey", 19.5);
+        handle.setTurkeyMask(true);
+      }
+      expect(writesOf(handle)).toEqual([]);
+      expect(mask.writes).toEqual([]);
+      handle.setTurkeyMask(false);
+      expect(mask.style.display).toBe("none");
+    } finally {
+      handle.dispose();
+    }
+    expect(parent.children).toHaveLength(0);
+  });
+
+  it("keeps the middle third clear and stacks feathers below the reticle, HUD and touch controls", () => {
+    const rule = (selector: string): string => {
+      const start = gameStyles.indexOf(`${selector} {`);
+      if (start < 0) throw new Error(`CSS rule ${selector} missing`);
+      return gameStyles.slice(start, gameStyles.indexOf("}", start));
+    };
+    const maskLayer = Number(/z-index:\s*(\d+)/.exec(rule("#hud-turkey-mask"))?.[1]);
+    expect(rule(".turkey-fringe")).toContain("height: 33.333333%");
+    expect(rule(".turkey-fringe")).toContain("overflow: hidden");
+    expect(rule(".turkey-fringe--top")).toContain("top: 0");
+    expect(rule(".turkey-fringe--bottom")).toContain("bottom: 0");
+    for (const selector of ["#hud", "#aim", "#joystick", "#fire-button", "#mute-button,\n#fullscreen-button"]) {
+      const controlLayer = Number(/z-index:\s*(\d+)/.exec(rule(selector))?.[1]);
+      expect(controlLayer).toBeGreaterThan(maskLayer);
+    }
+  });
+});
+
 describe("Russian player-facing event messages", () => {
   it("translates known server events without changing player names", () => {
     expect(localizeKillfeed("Alice joined the fight")).toBe("Alice вступает в бой");
     expect(localizeKillfeed("Alice fragged Борис")).toBe("Alice выбивает Борис");
     expect(localizeKillfeed("Alice grabbed SUPER core (x2 next shot)"))
-      .toBe("Суперзаряд у Alice: ×2 к броску");
+      .toBe("Супербонус у Alice");
   });
 
   it("accepts already localized server events and hides unknown English text", () => {

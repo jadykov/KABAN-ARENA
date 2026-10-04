@@ -7,7 +7,10 @@
 // ui suites use for their fake document); VITE_SERVER_URL is controlled via
 // vi.stubEnv, which feeds import.meta.env under vitest.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SERVER_URL_DEFAULT_PORT, getServerUrl } from "./config";
+import {
+  ROUND_SECONDS, ROUND_LIGHTING_TRANSITION_START_S, ROUND_LIGHTING_TRANSITION_END_S,
+  ROUND_LIGHTING_SUNSET_AT_S, ROUND_EVENING_LIGHTS_START_S, SERVER_URL_DEFAULT_PORT, getServerUrl,
+} from "./config";
 
 interface FakeLocation {
   protocol: string;
@@ -94,5 +97,16 @@ describe("getServerUrl env override and headless fallback", () => {
     clearPageWindow();
     expect(typeof window).toBe("undefined");
     expect(getServerUrl()).toBe(`ws://localhost:${SERVER_URL_DEFAULT_PORT}`);
+  });
+});
+
+
+describe("round day and night schedule", () => {
+  it("starts the 15-second transition at 1:45 and reaches full night at 1:30 remaining", () => {
+    expect(ROUND_SECONDS - ROUND_LIGHTING_TRANSITION_START_S).toBe(105);
+    expect(ROUND_SECONDS - ROUND_LIGHTING_TRANSITION_END_S).toBe(90);
+    expect(ROUND_LIGHTING_TRANSITION_END_S - ROUND_LIGHTING_TRANSITION_START_S).toBe(15);
+    expect(ROUND_LIGHTING_SUNSET_AT_S).toBe(82.5);
+    expect(ROUND_SECONDS - ROUND_EVENING_LIGHTS_START_S).toBe(60);
   });
 });

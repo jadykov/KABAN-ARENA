@@ -425,6 +425,24 @@ describe("RemoteAvatars remote death burst (alive→false edge)", () => {
 });
 
 describe("RemoteAvatars replicated bonuses", () => {
+  it("shows the replicated held item and restores the ordinary ball at expiry or death", () => {
+    const scene = new THREE.Scene();
+    const avatars = new RemoteAvatars(scene);
+    const remote = makeSnapshot({ sessionId: "held", superKind: "sheep", superUntil: 21_000 });
+    try {
+      avatars.sync([remote], null, FRAME, 1000);
+      const held = rigOf(scene).getObjectByName("held-bonus-model")!;
+      expect(held.visible).toBe(true);
+      expect(held.getObjectByName("bonus-model-sheep")?.visible).toBe(true);
+      avatars.sync([remote], null, FRAME, 21_000);
+      expect(held.visible).toBe(false);
+      avatars.sync([{ ...remote, superKind: "turkey" }], null, FRAME, 1000);
+      expect(held.getObjectByName("bonus-model-turkey")?.visible).toBe(true);
+      avatars.sync([{ ...remote, alive: false }], null, FRAME, 1000);
+      expect(held.visible).toBe(false);
+    } finally { avatars.dispose(); }
+  });
+
   it("shows fast charge in a late idle snapshot and keeps it in motion until consumption, expiry or death", () => {
     const scene = new THREE.Scene();
     const avatars = new RemoteAvatars(scene);

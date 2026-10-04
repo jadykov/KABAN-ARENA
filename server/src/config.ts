@@ -203,10 +203,9 @@ export const RECOIL_FULL_M = 0.8;
 export const RAMP_SLOPE_DEG = LAYOUT_RAMP_SLOPE_DEG;
 export type ServerPlatformDef = LayoutPlatform;
 export const SERVER_PLATFORMS: ReadonlyArray<ServerPlatformDef> = ARENA_LAYOUT.platforms;
-// Super-core: center spawn every 45s, 15s life, blink last 3s, 1.7m pickup
-// (matches the bigger 0.8/0.4 visual), buffs NEXT shot only (consumed on
-// fire even on miss).
-export const SUPER_SPAWN_S = 45;
+// Centre item: first spawn and delay after removal are 10s; life is 15s.
+// The shared ten-kind registry replaces the next accepted throw.
+export const SUPER_SPAWN_S = 10;
 export const SUPER_LIFE_S = 15;
 export const SUPER_BLINK_S = 3;
 export const SUPER_PICKUP_RADIUS = 1.7;

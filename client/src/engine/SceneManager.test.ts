@@ -39,7 +39,8 @@ import {
   WALL_HEIGHT,
 } from "../config";
 import { mirrorChargeCameraPitch } from "../net/chargeAim";
-import type { NetPlayerSnapshot } from "../net/protocol";
+import { decodeSnapshot } from "../net/NetworkManager";
+import type { NetBonusEffectSnapshot, NetPlayerSnapshot } from "../net/protocol";
 import {
   ACCENT_DEATH_PALE,
   ACCENT_DEATH_RED,
@@ -384,9 +385,9 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
     manager.setDayProgress(60 / 180);
     expect(background).not.toHaveBeenCalled();
     expect(sun.position.equals(dawnSun)).toBe(false);
-    manager.setDayProgress(112.5 / 180);
+    manager.setDayProgress(82.5 / 180);
     expect(background).toHaveBeenCalledOnce();
-    manager.setDayProgress(112.5 / 180);
+    manager.setDayProgress(82.5 / 180);
     expect(background).toHaveBeenCalledOnce();
     manager.setDayProgress(120 / 180);
     const earlyMoon = moon.position.clone();
@@ -477,21 +478,21 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
     expect(lights).toHaveLength(2);
   });
 
-  it("holds the former day through 1:15 and the brighter moonlit night from 1:00", async () => {
+  it("holds the former day through 1:45 and the brighter moonlit night from 1:30", async () => {
     const { manager, scene } = await createManagerWithScene();
     const background = scene.background;
     const fog = scene.fog;
     const lights = scene.children.filter((child) => child instanceof THREE.Light);
     const stars = scene.getObjectByName("stars") as THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
     const dayChannels = readLightingChannels(scene);
-    for (const elapsed of [0, 20, 57.6, 90, 104.999, 105]) {
+    for (const elapsed of [0, 20, 57.6, 70, 74.999, 75]) {
       manager.setDayProgress(elapsed / 180);
       expectLightingClose(readLightingChannels(scene), originalLightingAt(20));
       expect(readLightingChannels(scene)).toEqual(dayChannels);
       expect(stars.material.opacity).toBe(0);
     }
 
-    manager.setDayProgress(112.5 / 180);
+    manager.setDayProgress(82.5 / 180);
     const ambient = lights.find((child): child is THREE.AmbientLight => child instanceof THREE.AmbientLight)!;
     const key = lights.find((child): child is THREE.DirectionalLight => child instanceof THREE.DirectionalLight)!;
     expect((background as THREE.Color).getHex()).toBe(SKY_SUNSET_BG);
@@ -501,9 +502,9 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
     expect(ambient.intensity).toBe(0.49);
     expect(key.intensity).toBe(1.28);
 
-    manager.setDayProgress(120 / 180);
+    manager.setDayProgress(90 / 180);
     const nightChannels = readLightingChannels(scene);
-    for (const elapsed of [120, 125, 150, 165, 167.5, 170, 180]) {
+    for (const elapsed of [90, 95, 120, 150, 165, 167.5, 170, 180]) {
       manager.setDayProgress(elapsed / 180);
       expectLightingClose(readLightingChannels(scene), originalLightingAt(167.5));
       expect(readLightingChannels(scene)).toEqual(nightChannels);
@@ -520,14 +521,14 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
   it("increases only night illumination by 15% relative to the accepted 6% night lift", async () => {
     const { manager, scene } = await createManagerWithScene();
     const acceptedNight = originalLightingAt(167.5, 1.06);
-    for (const elapsed of [120, 150, 180]) {
+    for (const elapsed of [90, 120, 150, 180]) {
       manager.setDayProgress(elapsed / 180);
       const current = readLightingChannels(scene);
       expectLightingClose(current.slice(0, 12), acceptedNight.slice(0, 12));
       expect(current[12]! / acceptedNight[12]!).toBeCloseTo(1.15, 12);
       expect(current[13]! / acceptedNight[13]!).toBeCloseTo(1.15, 12);
     }
-    for (const elapsed of [0, 60, 105]) {
+    for (const elapsed of [0, 60, 75]) {
       manager.setDayProgress(elapsed / 180);
       expectLightingClose(readLightingChannels(scene), originalLightingAt(20));
     }
@@ -535,11 +536,11 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
 
   it("dims through the 15-second transition without a noon flash and has soft continuous edges", async () => {
     const { manager, scene } = await createManagerWithScene();
-    manager.setDayProgress(105 / 180);
+    manager.setDayProgress(75 / 180);
     let previous = readLightingChannels(scene);
     let previousBrightness = previous[12]! + previous[13]!;
     let previousSkyBrightness = 0.2126 * previous[0]! + 0.7152 * previous[1]! + 0.0722 * previous[2]!;
-    for (let elapsed = 105.25; elapsed <= 120; elapsed += 0.25) {
+    for (let elapsed = 75.25; elapsed <= 90; elapsed += 0.25) {
       manager.setDayProgress(elapsed / 180);
       const current = readLightingChannels(scene);
       const brightness = current[12]! + current[13]!;
@@ -556,7 +557,7 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
       return readLightingChannels(scene);
     };
     const distance = (a: number[], b: number[]): number => Math.max(...a.map((value, i) => Math.abs(value - b[i]!)));
-    for (const edge of [105, 112.5, 120]) {
+    for (const edge of [75, 82.5, 90]) {
       expect(distance(sample(edge - 0.001), sample(edge + 0.001))).toBeLessThan(0.000001);
       // The slope approaches zero at the start, warm-sunset join and end.
       for (const direction of [-1, 1]) {
@@ -642,16 +643,16 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
       ];
     };
     const day = sample(0);
-    for (const elapsed of [20, 90, 105]) expect(sample(elapsed)).toEqual(day);
-    const sunset = sample(112.5);
+    for (const elapsed of [20, 60, 75]) expect(sample(elapsed)).toEqual(day);
+    const sunset = sample(82.5);
     expectLightingClose(sunset, [
       ...new THREE.Color(SKY_SUNSET_FOG).toArray(),
       ...new THREE.Color(SKY_SUNSET_BG).toArray(),
     ]);
-    const night = sample(120);
+    const night = sample(90);
     for (const elapsed of [123, 150, 180]) expect(sample(elapsed)).toEqual(night);
     const distance = (a: number[], b: number[]): number => Math.max(...a.map((value, i) => Math.abs(value - b[i]!)));
-    for (const edge of [105, 112.5, 120]) {
+    for (const edge of [75, 82.5, 90]) {
       expect(distance(sample(edge - 0.001), sample(edge + 0.001))).toBeLessThan(1e-6);
       for (const direction of [-1, 1]) {
         const near = distance(sample(edge), sample(edge + direction * 0.01));
@@ -659,8 +660,8 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
         expect(near).toBeLessThanOrEqual(farther * 0.02 + 1e-12);
       }
     }
-    let previous = sample(105);
-    for (let elapsed = 105.25; elapsed <= 120; elapsed += 0.25) {
+    let previous = sample(75);
+    for (let elapsed = 75.25; elapsed <= 90; elapsed += 0.25) {
       const current = sample(elapsed);
       expect(distance(current, previous)).toBeLessThan(0.055);
       previous = current;
@@ -685,30 +686,31 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
     expect(key.position.x).toBeLessThan(0);
 
     const dayLighting = readLightingChannels(scene);
-    manager.setDayProgress(60 / 180);
+    manager.setDayProgress(45 / 180);
     expect(readLightingChannels(scene)).toEqual(dayLighting);
     expect(sun.position.distanceTo(startSun)).toBeGreaterThan(75);
     expect(sun.position.y).toBeGreaterThan(23);
     expect(sun.position.y).toBeLessThan(25);
     expect(Math.hypot(sun.position.x, sun.position.z)).toBeGreaterThan(48);
     expect(sun.material.opacity).toBeGreaterThan(0.9);
-    manager.setDayProgress(105 / 180);
-    expect(sun.position.x).toBeGreaterThan(50);
-    expect(sun.position.y).toBeGreaterThan(7);
-    expect(sun.position.y).toBeLessThan(9);
+    manager.setDayProgress(75 / 180);
+    expect(sun.position.x).toBeGreaterThan(45);
+    expect(sun.position.y).toBeGreaterThan(9);
+    expect(sun.position.y).toBeLessThan(12);
     expect(moon.visible).toBe(false);
-    manager.setDayProgress(112.5 / 180);
+    manager.setDayProgress(82.5 / 180);
     expect(sun.material.color.getHex()).toBe(SKY_SUNSET_DISC);
     expect(sun.visible).toBe(true);
     expect(moon.visible).toBe(true);
     expect(key.position.x).toBeGreaterThan(0);
 
     // The moon reaches precisely the sun's earlier world positions after
-    // the same time offset: both use one actual circle, not parallel paths.
+    // advancing along the same circle over their respective visible phases.
     for (const elapsed of [0, 30, 60]) {
       manager.setDayProgress(elapsed / 180);
       const sunPosition = sun.position.clone();
-      manager.setDayProgress((elapsed + 112.8) / 180);
+      const matchingMoonTime = 78 + (0.04 + elapsed / 90) * 102 / 0.96;
+      manager.setDayProgress(matchingMoonTime / 180);
       expect(moon.position.distanceTo(sunPosition)).toBeLessThan(1e-12);
     }
     const center = new THREE.Vector3(0, 2, 0);
@@ -724,21 +726,21 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
       }
     }
 
-    manager.setDayProgress(120 / 180);
+    manager.setDayProgress(90 / 180);
     expect(sun.visible).toBe(false);
     const nightLighting = readLightingChannels(scene);
     const nightMoon = moon.position.clone();
-    manager.setDayProgress(150 / 180);
+    manager.setDayProgress(135 / 180);
     expect(readLightingChannels(scene)).toEqual(nightLighting);
     expect(moon.position.distanceTo(nightMoon)).toBeGreaterThan(40);
-    expect(moon.position.y).toBeGreaterThan(21);
-    expect(moon.position.y).toBeLessThan(23);
+    expect(moon.position.y).toBeGreaterThan(23);
+    expect(moon.position.y).toBeLessThan(25);
     const midNightMoon = moon.position.clone();
     manager.setDayProgress(1);
     expect(readLightingChannels(scene)).toEqual(nightLighting);
     expect(moon.position.distanceTo(midNightMoon)).toBeGreaterThan(40);
-    expect(moon.position.y).toBeGreaterThan(22);
-    expect(moon.position.y).toBeLessThan(24);
+    expect(moon.position.y).toBeGreaterThan(4);
+    expect(moon.position.y).toBeLessThan(5);
     expect(moon.material.opacity).toBeCloseTo(0.92);
     expect(moon.visible).toBe(true);
 
@@ -749,7 +751,7 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
     expect(sun.position.equals(startSun)).toBe(true);
   });
 
-  it("shows the visible sun and final-minute moon through the actual allowed gameplay camera", async () => {
+  it("shows the visible sun and moon through the actual allowed gameplay camera through round end", async () => {
     const { manager, scene, camera } = await createManagerWithScene();
     camera.aspect = 9 / 16;
     camera.updateProjectionMatrix();
@@ -782,8 +784,13 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
         if (disc === moon) visibleMoonSamples += 1;
       }
     }
-    expect(visibleSunSamples).toBeGreaterThan(110);
-    expect(visibleMoonSamples).toBeGreaterThan(60);
+    expect(visibleSunSamples).toBeGreaterThan(80);
+    expect(visibleMoonSamples).toBeGreaterThan(90);
+    for (const elapsed of [179, 179.999, 180]) {
+      expect(inView(observe(moon, elapsed, 0, 0))).toBe(true);
+      expect(moon.visible).toBe(true);
+      expect(moon.position.y).toBeGreaterThan(4);
+    }
 
     // Ground views on both sides of the arena still reveal the movement.
     // Near-edge parallax may lift an apex above the allowed view, so these
@@ -791,8 +798,8 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
     for (const [x, z] of [[-12, 12], [12, 12], [0, -10]]) {
       manager.teleportSelf(x!, z!);
       let observations = 0;
-      for (const [disc, elapsed] of [[sun, 20], [sun, 35], [sun, 50], [sun, 105],
-        [moon, 120], [moon, 150], [moon, 180]] as const) {
+      for (const [disc, elapsed] of [[sun, 15], [sun, 30], [sun, 45], [sun, 75],
+        [moon, 90], [moon, 135], [moon, 180]] as const) {
         if (inView(observe(disc, elapsed, x!, z!))) observations += 1;
       }
       expect(observations).toBeGreaterThanOrEqual(5);
@@ -803,12 +810,12 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
     const { manager, scene } = await createManagerWithScene();
     for (const name of ["sun", "moon"]) {
       const disc = scene.getObjectByName(name) as THREE.Mesh;
-      for (const edge of [105, 112.5, 120, 150]) {
+      for (const edge of [75, 82.5, 90, 150]) {
         manager.setDayProgress((edge - 0.001) / 180);
         const before = disc.position.clone();
         manager.setDayProgress((edge + 0.001) / 180);
-        expect(disc.position.distanceTo(before)).toBeLessThan(0.003);
-        if (name === "sun" || edge > 108) {
+        expect(disc.position.distanceTo(before)).toBeLessThan(0.004);
+        if (name === "sun" || edge > 78) {
           expect(disc.position.distanceTo(before)).toBeGreaterThan(0.0028);
         }
       }
@@ -930,10 +937,10 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
     const dayOpacity = clouds.material.opacity;
     manager.setDayProgress(60 / 180);
     expect(clouds.material.opacity).toBeGreaterThan(dayOpacity);
-    manager.setDayProgress(112.5 / 180);
+    manager.setDayProgress(82.5 / 180);
     expect(clouds.material.color.getHex()).toBe(SKY_CLOUD_SUNSET);
     expect(clouds.material.opacity).toBeGreaterThan(0);
-    manager.setDayProgress(120 / 180);
+    manager.setDayProgress(90 / 180);
     expect(clouds.material.opacity).toBe(0);
     expect(clouds.visible).toBe(false);
     manager.setDayProgress(0);
@@ -983,7 +990,7 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
     try {
       const { manager } = await createManagerWithScene();
       expect(porch).toHaveBeenLastCalledWith(0);
-      manager.setDayProgress(112.5 / 180);
+      manager.setDayProgress(82.5 / 180);
       expect(porch).toHaveBeenLastCalledWith(0);
       manager.setDayProgress(119.999 / 180);
       expect(porch).toHaveBeenLastCalledWith(0);
@@ -1014,7 +1021,7 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
   it("restores lighting, sky and real-time firefly fades when time arrives before or after build", () => {
     const porch = vi.spyOn(AdsManager.prototype, "setPorchLighting");
     try {
-      for (const elapsed of [0, 20, 105, 110, 112.5, 119, 120, 123, 167.5, 180]) {
+      for (const elapsed of [0, 20, 75, 80, 82.5, 89, 90, 119, 120, 123, 179, 180]) {
         const lateScene = new THREE.Scene();
         const late = new SceneManager(lateScene, new THREE.PerspectiveCamera());
         const readyScene = new THREE.Scene();
@@ -1045,8 +1052,8 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
         const swarm = lateScene.getObjectByName("fireflies") as THREE.InstancedMesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
         expect(swarm.visible).toBe(elapsed > 120);
         expect(swarm.material.opacity).toBeCloseTo(FIREFLY_OPACITY * fade, 12);
-        if (elapsed <= 105) expectLightingClose(readLightingChannels(lateScene), originalLightingAt(20));
-        if (elapsed >= 120) expectLightingClose(readLightingChannels(lateScene), originalLightingAt(167.5));
+        if (elapsed <= 75) expectLightingClose(readLightingChannels(lateScene), originalLightingAt(20));
+        if (elapsed >= 90) expectLightingClose(readLightingChannels(lateScene), originalLightingAt(167.5));
 
         // A new round restores the same day sample and hides every night effect.
         late.setDayProgress(0);
@@ -1305,6 +1312,174 @@ describe("SceneManager local fast-charge bonus visual", () => {
     expect(orb.visible).toBe(true);
     manager.dispose();
     expect(scene.getObjectByName("bonus-charge-orb")).toBeUndefined();
+  });
+});
+
+describe("SceneManager super bonus prediction", () => {
+  function player(overrides: Partial<NetPlayerSnapshot> = {}): NetPlayerSnapshot {
+    return decodeSnapshot({ players: new Map([["self", { alive: true, ready: true, ...overrides }]]) }).players[0]!;
+  }
+  function zone(overrides: Partial<NetBonusEffectSnapshot> = {}): NetBonusEffectSnapshot {
+    return { effectId: "zone", throwId: "throw", ownerId: "self", kind: "swamp", phase: "active",
+      x: 0, y: 0, z: 0, radius: 4, createdAt: 1000, expiresAt: 6000, armedAt: 0, triggerAt: 0,
+      vx: 0, vy: 0, vz: 0, ...overrides };
+  }
+
+  it("routes the held kind into the hand silhouette and clears it at the slot deadline", () => {
+    let now = 1000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const scene = new THREE.Scene();
+      const manager = new SceneManager(scene, new THREE.PerspectiveCamera(75, 1, 0.1, 200));
+      manager.build();
+      managers.push(manager);
+      manager.syncBonuses(player({ superKind: "freeze", superUntil: 21_000 }), [], [], 1000);
+      manager.update(FRAME, NO_MOVE, NO_LOOK);
+      const held = scene.getObjectByName("held-bonus-model")!;
+      expect(held.visible).toBe(true);
+      expect(held.getObjectByName("bonus-model-freeze")?.visible).toBe(true);
+      now = 21_000;
+      manager.update(FRAME, NO_MOVE, NO_LOOK);
+      expect(held.visible).toBe(false);
+      expect(manager.getBonusHudState().kind).toBe("");
+    } finally { clock.mockRestore(); }
+  });
+
+  it("freeze cancels held charge without spending the bonus and ends at the exact server deadline", async () => {
+    let now = 1000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const manager = await createManager();
+      manager.teleportSelf(0, 0);
+      manager.setCharging(true);
+      manager.setCharge01(0.8);
+      manager.setChargeZoom01(0.8);
+      manager.setChargeTranslucent(true);
+      manager.syncBonuses(player({ superKind: "jelly", superUntil: 21_000, frozenUntil: 2000 }), [], [], 1000);
+      expect(manager.isFrozen()).toBe(true);
+      expect(manager.getAvatarOpacity()).toBe(1);
+      expect(manager.getBonusHudState().kind).toBe("jelly");
+      manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
+      expect(manager.getAvatarPosition().x).toBeCloseTo(0, 6);
+      expect(manager.getCameraDistance()).toBeCloseTo(CAMERA_FOLLOW_DISTANCE, 6);
+      now = 2000;
+      expect(manager.isFrozen()).toBe(false);
+      for (let i = 0; i < 20; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
+      expect(manager.getAvatarPosition().x).toBeGreaterThan(0.2);
+      expect(manager.getBonusHudState().kind).toBe("jelly");
+      manager.clearBonuses();
+      expect(manager.getBonusHudState()).toMatchObject({ kind: "", frozen: false, turkey: false });
+    } finally { clock.mockRestore(); }
+  });
+
+  it("applies one mass-independent jelly launch and freeze preserves its airborne motion and gravity", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+    try {
+      const manager = await createManager();
+      manager.teleportSelf(0, 0, 4);
+      manager.syncBonuses(player({ launchSeq: 0 }), [], [], 1000);
+      manager.syncBonuses(player({ launchSeq: 1, launchVelocity: 10, frozenUntil: 2000 }), [], [], 1000);
+      expect(manager.getPlayerVelocity()?.y).toBeCloseTo(10);
+      manager.syncBonuses(player({ launchSeq: 1, launchVelocity: 10, frozenUntil: 2000 }), [], [], 1000);
+      expect(manager.getPlayerVelocity()?.y).toBeCloseTo(10);
+      manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
+      expect(manager.getPlayerVelocity()?.x).toBeCloseTo(0);
+      expect(manager.getPlayerVelocity()?.y).toBeGreaterThan(0);
+      expect(manager.getPlayerVelocity()?.y).toBeLessThan(10);
+      expect(manager.getAvatarPosition().y).toBeGreaterThan(4);
+    } finally { clock.mockRestore(); }
+  });
+
+  it.each([10, 13.5, -3])("jelly replaces previous vy %s and newer hits do not stack, while duplicate snapshots leave current flight intact", async (previousY) => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+    try {
+      const manager = await createManager();
+      manager.debugSetPlayerState({ x: 0, y: 4, z: 0 }, { x: 2, y: previousY, z: 4 });
+      manager.syncBonuses(player({ launchSeq: 0 }), [], [], 1000);
+      manager.syncBonuses(player({ launchSeq: 1, launchVelocity: 10 }), [], [], 1050);
+      expect(manager.getPlayerVelocity()).toEqual({ x: 2, y: 10, z: 4 });
+      manager.syncBonuses(player({ launchSeq: 2, launchVelocity: 10 }), [], [], 1100);
+      expect(manager.getPlayerVelocity()).toEqual({ x: 2, y: 10, z: 4 });
+      manager.debugSetPlayerState({ x: 0, y: 4, z: 0 }, { x: 2, y: 7, z: 4 });
+      manager.syncBonuses(player({ launchSeq: 2, launchVelocity: 10 }), [], [], 1150);
+      manager.syncBonuses(player({ launchSeq: 1, launchVelocity: 10 }), [], [], 1200);
+      expect(manager.getPlayerVelocity()).toEqual({ x: 2, y: 7, z: 4 });
+      manager.syncBonuses(player({ launchSeq: 3, launchVelocity: 10 }), [], [], 1250);
+      expect(manager.getPlayerVelocity()).toEqual({ x: 2, y: 10, z: 4 });
+    } finally { clock.mockRestore(); }
+  });
+
+  it("late bonus-flight snapshots carry authoritative height without replaying an old impulse", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+    try {
+      const manager = await createManager();
+      manager.syncBonuses(player({ launchSeq: 7, launchVelocity: 10, y: 4 }), [], [], 1000);
+      expect(manager.getAvatarPosition().y).toBeCloseTo(4);
+      expect(manager.getPlayerVelocity()?.y).toBe(0);
+      manager.syncBonuses(player({ launchSeq: 7, launchVelocity: 10, y: 5 }), [], [], 1050);
+      manager.reconcileSelf(0, 5, 0, 0.1);
+      expect(manager.getAvatarPosition().y).toBeGreaterThan(4.1);
+      expect(manager.getPlayerVelocity()?.y).toBe(0);
+    } finally { clock.mockRestore(); }
+  });
+
+  it("freeze removes movement input while preserving the existing ice glide", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+    try {
+      const manager = await createManager();
+      manager.teleportSelf(0, 0);
+      const effect = zone({ kind: "ice" });
+      manager.syncBonuses(player(), [effect], [], 1000);
+      for (let i = 0; i < 20; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
+      const before = manager.getPlayerVelocity()!.x;
+      const x = manager.getAvatarPosition().x;
+      manager.syncBonuses(player({ frozenUntil: 2000 }), [effect], [], 1000);
+      manager.update(FRAME, { x: -1, y: 0 }, NO_LOOK);
+      expect(manager.getPlayerVelocity()!.x).toBeGreaterThan(before * 0.8);
+      expect(manager.getAvatarPosition().x).toBeGreaterThan(x);
+    } finally { clock.mockRestore(); }
+  });
+
+  it("vacuum snapshots reconcile gentle pulls inside the usual movement deadband", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+    try {
+      const manager = await createManager();
+      manager.teleportSelf(0, 0);
+      manager.update(FRAME, NO_MOVE, NO_LOOK);
+      manager.syncBonuses(player(), [zone({ kind: "vacuum", radius: 2, expiresAt: 3000 })], [], 1000);
+      expect(manager.reconcileSelf(0.1, 1.1, 0, FRAME)).toBe("lerp");
+      expect(manager.getAvatarPosition().x).toBeGreaterThan(0);
+      const after = manager.getAvatarPosition().x;
+      manager.clearBonuses();
+      expect(manager.reconcileSelf(0.1, 1.1, 0, FRAME)).toBe("ok");
+      expect(manager.getAvatarPosition().x).toBe(after);
+    } finally { clock.mockRestore(); }
+  });
+
+  it("the newest temporary surface controls movement and expiry restores the original floor", async () => {
+    let now = 1000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const manager = await createManager();
+      manager.teleportSelf(0, 0);
+      const effects = [zone({ effectId: "old", kind: "ice", createdAt: 900 }), zone()];
+      manager.syncBonuses(player(), effects, [], 1000);
+      for (let i = 0; i < 10; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
+      expect(manager.getPlayerVelocity()?.x).toBeGreaterThan(2);
+      expect(manager.getPlayerVelocity()?.x).toBeLessThan(2.8);
+      now = 6000;
+      for (let i = 0; i < 15; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
+      expect(manager.getPlayerVelocity()?.x).toBeGreaterThan(2.7);
+      // A roof patch at the same XZ cannot modify the floor under it.
+      manager.teleportSelf(0, 0);
+      manager.syncBonuses(player(), [zone({ y: 4, expiresAt: 11_000, createdAt: 6000 })], [], 6000);
+      for (let i = 0; i < 15; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
+      const underRoof = manager.getPlayerVelocity()!.x;
+      manager.teleportSelf(0, 0);
+      manager.syncBonuses(player(), [], [], 6000);
+      for (let i = 0; i < 15; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
+      expect(manager.getPlayerVelocity()!.x).toBeCloseTo(underRoof, 6);
+    } finally { clock.mockRestore(); }
   });
 });
 

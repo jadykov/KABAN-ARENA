@@ -108,7 +108,10 @@ import {
 import { ParticlePool } from "../fx/Particles";
 import { PowerEffectVisuals, type PowerEffectKind } from "../fx/PowerEffectVisuals";
 import { PhysicsWorld, type Vector3Like } from "../physics/World";
-import type { NetBallSnapshot, NetPickupSnapshot, NetPlayerSnapshot, NetSuperSnapshot } from "../net/protocol";
+import { BonusControlState } from "../net/BonusControlState";
+import { SuperBonusVisuals } from "../fx/SuperBonusVisuals";
+import { activeTemporarySurface } from "../../../shared/super-bonuses.mjs";
+import type { NetBallSnapshot, NetBonusEffectSnapshot, NetPickupSnapshot, NetPlayerSnapshot, NetSuperSnapshot } from "../net/protocol";
 import {
   bodyFacingForShotYaw,
   isShotBodyTurnDone,
@@ -310,6 +313,7 @@ const SKY_ORBIT_TILT = -1.15;
 const SKY_ORBIT_HALF_PERIOD_S = ROUND_LIGHTING_TRANSITION_END_S;
 const SUN_ORBIT_START = 0.04;
 const MOON_RISE_S = ROUND_LIGHTING_TRANSITION_START_S + 3;
+const MOON_ORBIT_DURATION_S = ROUND_SECONDS - MOON_RISE_S;
 const NIGHT_LIGHT_GAIN = 1.06 * 1.15;
 const SKY_DISC_TARGET = new THREE.Vector3(0, 2, 0);
 const SKY_ORBIT_EAST_X = Math.cos(SKY_ORBIT_AZIMUTH);
@@ -375,7 +379,7 @@ const ROUND_SUNSET_LIGHTING = sampleDayLighting(ROUND_LIGHTING_SUNSET_SAMPLE_PRO
 const ROUND_NIGHT_LIGHTING = sampleDayLighting(ROUND_LIGHTING_NIGHT_SAMPLE_PROGRESS);
 // The pale cyan/green horizon stays close to the accepted distance fog;
 // only the sky deepens toward the cold blue zenith. Sunset keeps its warm
-// palette, and the final minute restores the exact accepted flat night sky.
+// palette, and the night phase restores the exact accepted flat night sky.
 ROUND_DAY_LIGHTING.skyHorizon.lerp(new THREE.Color(0xacdcd2), 0.4);
 ROUND_DAY_LIGHTING.skyZenith.set(0x548dce);
 ROUND_NIGHT_LIGHTING.skyHorizon.copy(ROUND_NIGHT_LIGHTING.background);
@@ -507,6 +511,13 @@ export class SceneManager {
   private readonly arena = new ArenaBuilder();
   private readonly ads = new AdsManager();
   private readonly powerState = new PowerUpState();
+  private readonly bonusControl = new BonusControlState();
+  private bonusVisuals: SuperBonusVisuals | null = null;
+  private latestBonusEffects: readonly NetBonusEffectSnapshot[] = [];
+  private serverTime = 0;
+  private serverTimeReceivedAt = 0;
+  private bonusFlightUntil = 0;
+  private readonly bonusHudState = { kind: "" as ReturnType<BonusControlState["heldKind"]>, remaining: 0, frozen: false, turkey: false };
   private readonly powerHudState = {
     shieldHp: 0,
     shieldRemaining: 0,
@@ -788,7 +799,9 @@ export class SceneManager {
         skyArcZ(sunArc) * 0.22 * sunOpacity + 5 * (1 - sunOpacity),
       );
     }
-    const moonArc = Math.max(0, (elapsed - MOON_RISE_S) / SKY_ORBIT_HALF_PERIOD_S);
+    // Cover the same upper circle through the whole remaining round, ending
+    // just above the horizon even when night begins earlier.
+    const moonArc = (1 - SUN_ORBIT_START) * Math.max(0, (elapsed - MOON_RISE_S) / MOON_ORBIT_DURATION_S);
     const moonOpacity = 0.92 * smooth01((this.skyProgress - MOON_ARC_START) / MOON_FADE_DURATION);
     if (this.moonDisc !== null) {
       this.moonDisc.position.set(skyArcX(moonArc), skyArcY(moonArc), skyArcZ(moonArc));
@@ -898,6 +911,7 @@ export class SceneManager {
     this.powerEffects = new PowerEffectVisuals(rig);
     this.ballsPool = new BallsPool(this.scene);
     this.superCore = new SuperCore(this.scene);
+    this.bonusVisuals = new SuperBonusVisuals(this.scene);
     this.fireflies = new Fireflies(this.scene);
     this.fireflies.setAmbientHz(this.ambientHz);
     this.fireflies.setVisibility(eveningLightsAt(this.roundProgress));
@@ -1000,7 +1014,7 @@ export class SceneManager {
   // playing. While charging the local move target runs at CHARGE_MOVE_MULT
   // (server mirror) — see updatePhysics.
   public setCharging(active: boolean): void {
-    this.charging = active === true;
+    this.charging = active === true && !this.isFrozen();
   }
 
   // Stage 4d.2 charge-zoom feed (called every frame from main.ts while
@@ -1047,6 +1061,71 @@ export class SceneManager {
   public setBattleSnapshot(balls: readonly NetBallSnapshot[], superSnapshot: NetSuperSnapshot | null): void {
     this.latestBalls = balls;
     this.latestSuper = superSnapshot ?? null;
+  }
+
+  public getServerNow(): number {
+    return this.serverTime + Math.max(0, Date.now() - this.serverTimeReceivedAt);
+  }
+
+  public syncBonuses(
+    player: NetPlayerSnapshot | null,
+    effects: readonly NetBonusEffectSnapshot[],
+    players: readonly NetPlayerSnapshot[],
+    serverNow: number,
+  ): void {
+    this.serverTime = Number.isFinite(serverNow) ? serverNow : 0;
+    this.serverTimeReceivedAt = Date.now();
+    this.latestBonusEffects = effects;
+    const launchVelocity = this.bonusControl.sync(player, this.serverTime);
+    if (player === null || !player.alive || !player.ready || player.spectator) this.bonusFlightUntil = 0;
+    if (this.bonusControl.needsLaunchBaseline && player !== null && player.y > SELF_SPAWN_Y + 0.2 && !this.spectating) {
+      // A late observer starts at the current authoritative height, without
+      // replaying an old launch impulse. Later snapshots carry the flight.
+      this.teleportSelf(player.x, player.z, player.y);
+      this.bonusFlightUntil = this.serverTime + 3000;
+    }
+    if (launchVelocity > 0 && this.physics !== null && !this.spectating) {
+      this.physics.setPlayerVerticalVelocity(launchVelocity);
+      this.airborneGate.update(launchVelocity, 0);
+      this.bonusFlightUntil = this.serverTime + 3000;
+    }
+    if (this.isFrozen()) {
+      this.charging = false;
+      this.charge01 = 0;
+      this.chargeZoom01 = 0;
+      this.setChargeTranslucent(false);
+    }
+    this.bonusVisuals?.sync(effects, players, this.serverTime);
+  }
+
+  public isFrozen(): boolean { return this.bonusControl.isFrozen(this.getServerNow()); }
+  public consumeHeldBonus(): void { this.bonusControl.consumeHeld(); }
+  public getBonusHudState(): Readonly<typeof this.bonusHudState> {
+    const now = this.getServerNow();
+    this.bonusHudState.kind = this.bonusControl.heldKind(now);
+    this.bonusHudState.remaining = this.bonusControl.heldRemaining(now);
+    this.bonusHudState.frozen = this.bonusControl.isFrozen(now);
+    this.bonusHudState.turkey = this.bonusControl.hasTurkeyMask(now);
+    return this.bonusHudState;
+  }
+
+  public clearBonuses(): void {
+    this.bonusControl.reset();
+    this.latestBonusEffects = [];
+    this.bonusFlightUntil = 0;
+    this.bonusVisuals?.reset();
+    this.physics?.setSlippery(false);
+  }
+
+  private isVacuumAffected(): boolean {
+    const avatar = this.avatar;
+    if (avatar === null) return false;
+    const now = this.getServerNow();
+    return this.latestBonusEffects.some((effect) => effect.kind === "vacuum"
+      && effect.createdAt <= now && effect.expiresAt > now
+      && Math.abs(avatar.position.y - SELF_SPAWN_Y - effect.y) <= 0.650001
+      && Math.hypot(avatar.position.x - effect.x, avatar.position.z - effect.z) <= effect.radius
+      && (this.physics?.hasLineOfSight(effect.x, effect.y + 0.4, effect.z) ?? true));
   }
 
   // Throw feedback on release: the held ball flicks forward, hides for the
@@ -1275,6 +1354,7 @@ export class SceneManager {
     if (worldMove.lengthSq() > 1) {
       worldMove.normalize();
     }
+    if (this.isFrozen()) worldMove.set(0, 0, 0);
 
     const physics = this.physics;
     if (physics !== null) {
@@ -1369,7 +1449,9 @@ export class SceneManager {
     this.arena.update(deltaSeconds);
     this.pickups.update(deltaSeconds);
     this.powerEffects?.update(deltaSeconds);
+    this.bonusVisuals?.update(deltaSeconds, this.getServerNow());
     if (this.avatarVisuals !== null) {
+      this.avatarVisuals.ball.setBonusKind(this.bonusControl.heldKind(this.getServerNow()));
       this.avatarVisuals.ball.setCharge01(this.charge01);
       this.avatarVisuals.update(deltaSeconds);
     }
@@ -1392,9 +1474,9 @@ export class SceneManager {
     if (this.superCore !== null) {
       const snapshot = this.latestSuper;
       if (snapshot === null || snapshot === undefined) {
-        this.superCore.render(null, Date.now());
+        this.superCore.render(null, this.getServerNow());
       } else {
-        this.superCore.render(snapshot, Date.now());
+        this.superCore.render(snapshot, this.getServerNow(), snapshot.kind);
       }
       this.superCore.update(deltaSeconds);
     }
@@ -1414,20 +1496,25 @@ export class SceneManager {
     const preStep = physics.getPlayerPosition();
     const current = physics.getPlayerVelocity();
     const touchingFloor = preStep.y <= SURFACE_MAX_BODY_Y && Math.abs(current.y) < AIRBORNE_VY_THRESHOLD;
-    const onSwamp = touchingFloor && isOnSwamp(preStep.x, preStep.z);
-    const onIce = touchingFloor && isOnIce(preStep.x, preStep.z);
+    const temporary = Math.abs(current.y) < AIRBORNE_VY_THRESHOLD
+      ? activeTemporarySurface(this.latestBonusEffects, preStep.x, preStep.y, preStep.z, this.getServerNow(), SELF_SPAWN_Y,
+        (effect) => physics.hasLineOfSight(effect.x, effect.y + 0.4, effect.z)) : undefined;
+    const onSwamp = temporary !== undefined ? temporary.kind === "swamp" : touchingFloor && isOnSwamp(preStep.x, preStep.z);
+    const onIce = temporary !== undefined ? temporary.kind === "ice" : touchingFloor && isOnIce(preStep.x, preStep.z);
     physics.setSlippery(onIce);
     // Charging halves the move target (CHARGE_MOVE_MULT, server mirror): the
     // server simulates charging fighters at half speed, so unscaled client
     // prediction diverged ~2.25 m/s during charge+walk and reconcile tugged
     // the preview origin every frame (bug C jitter source).
     const chargeMult = this.charging ? CHARGE_MOVE_MULT : 1;
-    const surfaceMult = onSwamp ? SWAMP_SPEED_MULT : onIce ? ICE_SPEED_MULT : 1;
+    const surfaceMult = onSwamp ? temporary !== undefined ? 0.6 : SWAMP_SPEED_MULT : onIce ? ICE_SPEED_MULT : 1;
     const speed = MOVE_SPEED * chargeMult * this.powerState.getSpeedMultiplier() * surfaceMult;
     const iceInputActive = worldMove.lengthSq() >= ICE_INPUT_THRESHOLD * ICE_INPUT_THRESHOLD;
     const targetX = onIce && !iceInputActive ? 0 : worldMove.x * speed;
     const targetZ = onIce && !iceInputActive ? 0 : worldMove.z * speed;
-    if (onSwamp) {
+    if (this.isFrozen() && !onIce && !touchingFloor && temporary === undefined) {
+      // Freeze removes input steering without cancelling existing air motion.
+    } else if (onSwamp) {
       physics.setPlayerVelocity(targetX, current.y, targetZ);
     } else {
       let deltaX = targetX - current.x;
@@ -1740,6 +1827,13 @@ export class SceneManager {
     if (this.upSnapCooldownLeftS > 0) {
       this.upSnapCooldownLeftS = Math.max(0, this.upSnapCooldownLeftS - deltaSeconds);
     }
+    if (this.bonusFlightUntil > this.getServerNow() && Number.isFinite(serverY)
+      && Math.abs(serverY - this.avatar.position.y) > 0.2 && this.physics !== null) {
+      const factor = 1 - Math.exp(-SELF_RECONCILE_RATE * deltaSeconds);
+      const safe = this.physics.movePlayerSafely(this.avatar.position.x, this.avatar.position.z,
+        this.avatar.position.y + (serverY - this.avatar.position.y) * factor);
+      this.avatar.position.set(safe.x, safe.y, safe.z);
+    }
     t.cooldownLeftS = this.upSnapCooldownLeftS;
     // Per-top hold re-arm (bug round 9): while a top is held, every live frame
     // compares the CURRENT client XZ against that top's expanded footprint —
@@ -2047,12 +2141,21 @@ export class SceneManager {
     const dz = serverZ - this.avatar.position.z;
     const dist = Math.hypot(dx, dz);
     t.xzDist = dist;
-    if (!(dist > SELF_RECONCILE_MIN_M)) {
+    const vacuumAffected = this.isVacuumAffected();
+    if (!(dist > (vacuumAffected ? 0.02 : SELF_RECONCILE_MIN_M))) {
       t.xzBand = "deadband";
       t.result = "ok";
       return "ok";
     }
     if (dist > SELF_RECONCILE_SNAP_M) {
+      if (vacuumAffected) {
+        const factor = 1 - Math.exp(-SELF_RECONCILE_RATE * deltaSeconds);
+        const next = this.physics?.movePlayerSafely(this.avatar.position.x + dx * factor, this.avatar.position.z + dz * factor);
+        if (next !== undefined) this.avatar.position.set(next.x, next.y, next.z);
+        t.result = "lerp";
+        t.note = "vacuum-sweep";
+        return "lerp";
+      }
       this.teleportSelf(serverX, serverZ, serverY);
       this.upSnapCooldownLeftS = SELF_RECONCILE_UP_SNAP_COOLDOWN_S;
       t.cooldownLeftS = this.upSnapCooldownLeftS;
@@ -2063,13 +2166,19 @@ export class SceneManager {
       return "snap";
     }
     const factor = 1 - Math.exp(-SELF_RECONCILE_RATE * deltaSeconds);
-    const nextX = this.avatar.position.x + dx * factor;
-    const nextZ = this.avatar.position.z + dz * factor;
+    let nextX = this.avatar.position.x + dx * factor;
+    let nextZ = this.avatar.position.z + dz * factor;
+    if (vacuumAffected && this.physics !== null) {
+      const safe = this.physics.movePlayerSafely(nextX, nextZ);
+      nextX = safe.x;
+      nextZ = safe.z;
+    }
     const nextY = this.avatar.position.y;
     this.avatar.position.set(nextX, nextY, nextZ);
     if (this.physics !== null) {
       const bodyPos = this.physics.getPlayerPosition();
-      this.physics.setPlayerPosition(bodyPos.x + dx * factor, bodyPos.y, bodyPos.z + dz * factor);
+      this.physics.setPlayerPosition(vacuumAffected ? nextX : bodyPos.x + dx * factor, bodyPos.y,
+        vacuumAffected ? nextZ : bodyPos.z + dz * factor);
     }
     t.xzBand = "lerp";
     t.result = "lerp";
@@ -2162,6 +2271,7 @@ export class SceneManager {
     this.cameraDistance = CAMERA_FOLLOW_DISTANCE;
     this.latestBalls = [];
     this.latestSuper = null;
+    this.clearBonuses();
     this.hasAim = false;
     this.sparkTimer = 0;
     this.aimYaw = 0;
@@ -2223,6 +2333,11 @@ export class SceneManager {
     }
     this.powerEffects?.dispose();
     this.powerEffects = null;
+    this.bonusVisuals?.dispose();
+    this.bonusVisuals = null;
+    this.bonusControl.reset();
+    this.latestBonusEffects = [];
+    this.bonusFlightUntil = 0;
     if (this.ballsPool !== null) {
       this.ballsPool.dispose();
       this.ballsPool = null;

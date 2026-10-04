@@ -1,8 +1,10 @@
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";
+import { SUPER_BONUS_KINDS } from "../../../shared/super-bonuses.mjs";
 import {
   BALL_MUZZLE_OFFSET,
   BALL_TORSO_OFFSET,
+  AVATAR_CHARGE_OPACITY,
   HANDBALL_OFFSET_X,
   HANDBALL_OFFSET_Y,
   HANDBALL_OFFSET_Z,
@@ -41,6 +43,107 @@ function ballMeshOf(handle: { group: THREE.Group }): THREE.Mesh {
   }
   return mesh;
 }
+
+describe("held bonus silhouettes", () => {
+  function modelMesh(handle: { group: THREE.Group }, name: string): THREE.Mesh {
+    const model = handle.group.getObjectByName(name);
+    const mesh = model?.children.find((child) => child instanceof THREE.Mesh);
+    if (!(mesh instanceof THREE.Mesh)) throw new Error("Held bonus mesh missing");
+    return mesh;
+  }
+
+  it("holds all ten items in the existing hand pose and reuses cached models", () => {
+    const handle = attachHandBall(new THREE.Group(), PLAYER_COLOR);
+    try {
+      for (const kind of SUPER_BONUS_KINDS) {
+        handle.setBonusKind(kind);
+        handle.update(0.02);
+        expect(handle.group.getObjectByName(`bonus-model-${kind}`)?.visible).toBe(true);
+        expect(ballMeshOf(handle).visible).toBe(false);
+        expect(handle.group.position.x).toBe(HANDBALL_OFFSET_X);
+        expect(handle.group.position.z).toBe(HANDBALL_OFFSET_Z);
+      }
+      const holder = handle.group.getObjectByName("held-bonus-model");
+      expect(holder?.children).toHaveLength(10);
+      for (let i = 0; i < 60; i += 1) {
+        handle.setBonusKind("sheep");
+        handle.update(1 / 60);
+      }
+      expect(holder?.children).toHaveLength(10);
+      handle.setBonusKind("");
+      expect(holder?.visible).toBe(false);
+      expect(ballMeshOf(handle).visible).toBe(true);
+      handle.setBonusKind("turkey");
+      handle.reset();
+      expect(holder?.visible).toBe(false);
+      expect(ballMeshOf(handle).visible).toBe(true);
+    } finally { handle.dispose(); }
+  });
+
+  it("shares geometry while keeping charge/translucency and material disposal independent", () => {
+    const first = attachHandBall(new THREE.Group(), PLAYER_COLOR);
+    const second = attachHandBall(new THREE.Group(), PLAYER_COLOR);
+    first.setBonusKind("sheep");
+    second.setBonusKind("sheep");
+    const a = modelMesh(first, "bonus-model-sheep");
+    const b = modelMesh(second, "bonus-model-sheep");
+    const materialA = a.material as THREE.MeshStandardMaterial;
+    const materialB = b.material as THREE.MeshStandardMaterial;
+    expect(a.geometry).toBe(b.geometry);
+    expect(materialA).not.toBe(materialB);
+    first.setTranslucent(true);
+    expect(materialA.opacity).toBe(AVATAR_CHARGE_OPACITY);
+    expect(materialA.depthWrite).toBe(false);
+    expect(materialB.opacity).toBe(1);
+    first.setCharge01(1);
+    first.update(0.02);
+    expect(materialA.emissiveIntensity).toBeGreaterThan(materialB.emissiveIntensity);
+    first.setTranslucent(false);
+    expect(materialA.opacity).toBe(1);
+    expect(materialA.depthWrite).toBe(true);
+    let geometryDisposals = 0;
+    let materialDisposals = 0;
+    a.geometry.addEventListener("dispose", () => { geometryDisposals += 1; });
+    materialA.addEventListener("dispose", () => { materialDisposals += 1; });
+    first.dispose();
+    first.dispose();
+    expect(materialDisposals).toBe(1);
+    expect(geometryDisposals).toBe(0);
+    second.dispose();
+    expect(geometryDisposals).toBe(1);
+  });
+
+  it("keeps the bonus through the throw flick, then obeys reload and charge swell", () => {
+    const handle = attachHandBall(new THREE.Group(), PLAYER_COLOR);
+    try {
+      handle.setBonusKind("soda");
+      handle.update(0.02);
+      const holder = handle.group.getObjectByName("held-bonus-model");
+      const initialScale = holder?.scale.x ?? 0;
+      handle.setCharge01(1);
+      handle.update(0.02);
+      expect(holder?.scale.x).toBeGreaterThan(initialScale * 1.4);
+      handle.playThrow();
+      handle.setBonusKind("");
+      handle.update(0.05);
+      expect(handle.group.getObjectByName("bonus-model-soda")?.visible).toBe(true);
+      expect(ballMeshOf(handle).visible).toBe(false);
+      expect(handle.group.position.z).toBeGreaterThan(HANDBALL_OFFSET_Z);
+      handle.update(0.11);
+      expect(holder?.visible).toBe(false);
+      expect(handle.group.visible).toBe(false);
+      handle.update(RELOAD_MS / 1000);
+      expect(handle.group.visible).toBe(true);
+      expect(ballMeshOf(handle).visible).toBe(true);
+      handle.setBonusKind("ice");
+      handle.playThrow();
+      handle.setBonusKind("");
+      handle.reset();
+      expect(holder?.visible).toBe(false);
+      expect(handle.group.visible).toBe(true);
+    } finally { handle.dispose(); }
+  });
+});
 
 // 4d.1: the avatar holds a round ball in its RIGHT hand (no cannon barrel).
 // The body faces local +Z, so anatomical right is local −X: attach sits at
