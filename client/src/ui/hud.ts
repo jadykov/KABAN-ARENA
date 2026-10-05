@@ -1,6 +1,7 @@
 import { KILLFEED_MAX_LINES, KILLFEED_OPACITY, MAX_HALVES, MAX_HEARTS } from "../config";
 import { halvesPerHeart } from "../net/protocol";
 import { getSuperBonus, SUPER_BONUS_SLOT_MS, type SuperBonusDefinition } from "../../../shared/super-bonuses.mjs";
+import { SUPER_BONUS_PRESENTATIONS } from "./superBonusPresentation";
 
 // Pure helper (unit-tested): hearts left after taking hits, never below 0.
 export function heartsAfterHits(currentHearts: number, hits: number): number {
@@ -193,7 +194,13 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
   superRow.id = "hud-super";
   superRow.style.display = "none";
   superRow.style.pointerEvents = "none";
+  superRow.setAttribute("role", "group");
   superRow.setAttribute("aria-hidden", "true");
+  const superIcon = document.createElement("img");
+  superIcon.id = "hud-super-icon";
+  superIcon.setAttribute("src", "/icons/super-gift.svg");
+  superIcon.setAttribute("alt", "");
+  superIcon.setAttribute("aria-hidden", "true");
   const superName = document.createElement("span");
   superName.id = "hud-super-name";
   superName.setAttribute("aria-live", "polite");
@@ -201,6 +208,7 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
   superHint.id = "hud-super-hint";
   const superTimer = document.createElement("span");
   superTimer.id = "hud-super-timer";
+  superRow.appendChild(superIcon);
   superRow.appendChild(superName);
   superRow.appendChild(superHint);
   superRow.appendChild(superTimer);
@@ -255,12 +263,15 @@ export function createHud(parent: HTMLElement, maxHearts: number = MAX_HEARTS): 
     const definition = source === "held" ? heldBonus.definition : undefined;
     const active = source !== "";
     if (definition !== paintedBonus || source !== paintedBonusSource) {
+      const presentation = definition === undefined ? undefined : SUPER_BONUS_PRESENTATIONS[definition.kind];
       superRow.style.display = active ? "" : "none";
       superRow.setAttribute("aria-hidden", active ? "false" : "true");
+      superRow.setAttribute("aria-label", source === "centre" ? "Подарок в центре" : definition?.name ?? "");
       superRow.setAttribute("data-source", source);
       superRow.setAttribute("data-kind", definition?.kind ?? "");
-      superName.textContent = source === "centre" ? "Подарок в центре" : definition?.name ?? "";
-      superHint.textContent = definition?.hint ?? "";
+      superIcon.setAttribute("src", definition === undefined ? "/icons/super-gift.svg" : `/icons/super-${definition.kind}.svg`);
+      superName.textContent = source === "centre" ? "Подарок в центре" : presentation?.name ?? "";
+      superHint.textContent = presentation?.hint ?? "";
       superRow.style.borderColor = definition === undefined ? "" : `#${definition.color.toString(16).padStart(6, "0")}`;
       paintedBonus = definition;
       paintedBonusSource = source;

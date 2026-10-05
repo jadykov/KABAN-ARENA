@@ -302,9 +302,36 @@ describe("eleven authoritative super bonuses in ArenaRoom", () => {
 
   it("vacuum has no zone damage, bounded shared pull and allows stronger opposing movement", async () => {
     const { room, owner, target } = await match(); const vacuum = drop(room, owner, "vacuum"); owner.x = 14; owner.z = 14;
-    target.x = vacuum.x + 1.5; target.z = vacuum.z; const initial = target.x; tick(room, 40); expect(initial - target.x).toBeLessThanOrEqual(1.000001); expect(initial - target.x).toBeGreaterThan(0.8); expect(target.hp).toBe(100); expect(owner.score).toBe(0);
+    target.x = vacuum.x + 1.5; target.z = vacuum.z; const initial = target.x; tick(room, 100); expect(initial - target.x).toBeLessThanOrEqual(1.000001); expect(initial - target.x).toBeGreaterThan(0.8); expect(target.hp).toBe(100); expect(owner.score).toBe(0);
     owner.x = 0; owner.z = 8; drop(room, owner, "vacuum"); owner.x = 14; owner.z = 14; target.x = 1; target.z = 8;
     input(room, target.sessionId, 1, 0); const before = target.x; tick(room, 5); expect(target.x).toBeGreaterThan(before);
+  });
+
+  it("vacuum pulls late arrivals after 2s and immediately before 5s, then expires and releases its records", async () => {
+    const { room, owner, target } = await match();
+    const vacuum = drop(room, owner, "vacuum");
+    expect(vacuum.expiresAt - vacuum.createdAt).toBe(5000);
+
+    room.testNow = vacuum.createdAt + 2000; room.tickRoom(50);
+    expect(room.state.bonusEffects.has(vacuum.effectId)).toBe(true);
+    target.x = vacuum.x + 1.5; target.z = vacuum.z;
+    const arrivalX = target.x;
+    room.testNow = vacuum.createdAt + 2001; room.tickRoom(50);
+    expect(arrivalX - target.x).toBeCloseTo(0.5 * 0.05);
+
+    const beforeLastPull = target.x;
+    room.testNow = vacuum.createdAt + 4999; room.tickRoom(50);
+    expect(beforeLastPull - target.x).toBeCloseTo(0.5 * 0.05);
+    expect(room.state.bonusEffects.has(vacuum.effectId)).toBe(true);
+
+    const expiredX = target.x;
+    room.testNow = vacuum.createdAt + 5000; room.tickRoom(50);
+    expect(target.x).toBe(expiredX);
+    expect(room.state.bonusEffects.has(vacuum.effectId)).toBe(false);
+    const system = (room as unknown as { bonuses: { runtime: Map<string, unknown>; ledgers: Map<string, unknown> } }).bonuses;
+    expect(system.runtime.size).toBe(0); expect(system.ledgers.size).toBe(0);
+    tick(room);
+    expect(target.x).toBe(expiredX); expect(target.hp).toBe(100); expect(owner.score).toBe(0);
   });
 
   it("boomerang turns at six metres, returns, damages at most once, ends at walls and risks its owner", async () => {

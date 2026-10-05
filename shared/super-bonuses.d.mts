@@ -13,6 +13,7 @@ export const MAX_SHEEP: number;
 export const FREEZE_MS: number;
 export const TURKEY_MS: number;
 export const CONTROL_IMMUNITY_MS: number;
+export const VACUUM_ACTIVE_MS: number;
 export const TEMPORARY_SWAMP_SPEED_MULT: number;
 export const GRENADE_FRAGMENT_COUNT: number;
 export const GRENADE_FRAGMENT_DAMAGE: number;

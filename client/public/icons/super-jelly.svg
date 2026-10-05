@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Пружинный холодец">
+  <rect x="3" y="3" width="58" height="58" rx="12" fill="#203a3b" stroke="#d8ea70" stroke-width="3"/>
+  <ellipse cx="32" cy="47" rx="23" ry="8" fill="#d5e4ea" stroke="#708e92" stroke-width="2.5"/>
+  <ellipse cx="32" cy="45" rx="19" ry="5" fill="#fff7e7"/>
+  <path d="M16 44 19 26c1-12 25-12 26 0l3 18c-5 9-27 9-32 0Z" fill="#f0bf67" stroke="#aa7736" stroke-width="2.5" stroke-linejoin="round"/>
+  <ellipse cx="32" cy="26" rx="13" ry="6" fill="#f6d88b"/>
+  <path d="m23 31-1 11m10-10v13m9-14 1 11" fill="none" stroke="#d79846" stroke-width="3" stroke-linecap="round"/>
+  <path d="m23 34 4 1m10 2 4-1" stroke="#ffa443" stroke-width="4" stroke-linecap="round"/>
+  <path d="M32 24c-7 0-7-6-7-6 6-1 9 2 9 5 0-5 5-7 9-5-1 5-5 7-11 6Z" fill="#b3d873" stroke="#657844" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>

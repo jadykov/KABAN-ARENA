@@ -1,7 +1,7 @@
 import {
   CONTROL_IMMUNITY_MS, directBonusDamage, FREEZE_MS, MAX_SHEEP,
   GRENADE_BURST_MS, GRENADE_FRAGMENT_DAMAGE, GRENADE_FRAGMENT_RADIUS,
-  SUPER_BONUS_KINDS, SUPER_BONUS_SLOT_MS, TEMPORARY_SWAMP_SPEED_MULT, TURKEY_MS,
+  SUPER_BONUS_KINDS, SUPER_BONUS_SLOT_MS, TEMPORARY_SWAMP_SPEED_MULT, TURKEY_MS, VACUUM_ACTIVE_MS,
   type SuperBonusKind,
 } from "../../shared/super-bonuses.mjs";
 import {
@@ -336,7 +336,7 @@ export class SuperBonusSystem {
     if (effect.kind === "herring") { effect.radius = 3.6; effect.expiresAt = now + 4000; effect.armedAt = now + 600; effect.phase = "warning"; }
     if (effect.kind === "swamp") { effect.radius = 3; effect.expiresAt = now + 5000; }
     if (effect.kind === "ice") { effect.radius = 3.6; effect.expiresAt = now + 5000; }
-    if (effect.kind === "vacuum") { effect.radius = 4; effect.expiresAt = now + 2000; }
+    if (effect.kind === "vacuum") { effect.radius = 4; effect.expiresAt = now + VACUUM_ACTIVE_MS; }
     if (effect.kind === "soda") { effect.radius = 3; effect.expiresAt = now + 6000; effect.armedAt = now + 800; effect.phase = "arming"; }
     if (effect.kind === "sheep") { effect.radius = 4; effect.expiresAt = now + 6000; effect.phase = "chase"; }
     this.host.state.bonusEffects.set(effect.effectId, effect);

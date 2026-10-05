@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Граната">
+  <rect x="3" y="3" width="58" height="58" rx="12" fill="#203a3b" stroke="#d8ea70" stroke-width="3"/>
+  <circle cx="18" cy="16" r="6" fill="none" stroke="#d5e4ea" stroke-width="3"/>
+  <path d="m22 16 8 2" fill="none" stroke="#d5e4ea" stroke-width="3" stroke-linecap="round"/>
+  <path d="M25 24v-7h15v7" fill="#28313a" stroke="#17262d" stroke-width="2"/>
+  <path d="M24 23c-10 6-12 29 0 31 5 2 12 2 17 0 12-2 10-25 0-31Z" fill="#7a9859" stroke="#425737" stroke-width="2.5" stroke-linejoin="round"/>
+  <path d="M20 32h25m-28 9h30m-25 10h21M28 24l-2 29m10-29 3 29" fill="none" stroke="#425737" stroke-width="2" stroke-linecap="round"/>
+  <path d="M18 40h29" stroke="#28313a" stroke-width="4"/>
+  <path d="M26 13h17l9 32-5 2-8-27H26Z" fill="#d5e4ea" stroke="#708e92" stroke-width="2.5" stroke-linejoin="round"/>
+  <path d="m23 28-2 4" stroke="#b3d873" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

@@ -313,6 +313,10 @@ input:focus-visible {
   min-width: 0;
 }
 
+#hud-super-icon {
+  display: none;
+}
+
 #hud-super-hint {
   min-width: 0;
   color: var(--ui-text);
@@ -322,6 +326,73 @@ input:focus-visible {
 #hud-super-timer {
   color: var(--palette-warm);
   white-space: nowrap;
+}
+
+/* Collected items sit at the bottom edge. Their readable card is 20% smaller
+   than the previous pickup card; the unopened gift stays compact. */
+#hud-super[data-source="held"] {
+  top: auto;
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  left: calc(50% + (env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)) / 2);
+  grid-template-columns: 51.2px minmax(0, 1fr) auto;
+  width: min(480px, calc(100vw - 360px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
+  max-width: 480px;
+  gap: 3.2px 9.6px;
+  padding: 9.6px 11.2px;
+  border-width: 1.6px;
+  border-radius: 14.4px;
+  background: rgba(30, 42, 43, 0.96);
+  font-size: 19.2px;
+  line-height: 1.15;
+  overflow-wrap: normal;
+}
+
+#hud-super[data-source="held"] #hud-super-icon {
+  display: block;
+  grid-column: 1;
+  grid-row: 1 / 3;
+  width: 51.2px;
+  height: 51.2px;
+  object-fit: contain;
+}
+
+#hud-super[data-source="held"] #hud-super-name {
+  grid-column: 2;
+  grid-row: 1;
+  font-size: 20.8px;
+  white-space: nowrap;
+}
+
+#hud-super[data-source="held"] #hud-super-hint {
+  grid-column: 2 / 4;
+  grid-row: 2;
+  font-size: 17.6px;
+}
+
+#hud-super[data-source="held"] #hud-super-timer {
+  grid-column: 3;
+  grid-row: 1;
+  align-self: start;
+  font-size: 19.2px;
+}
+
+/* Leave a clear strip above the bottom card for charge and reload. These
+   rules stop applying as soon as the held item is consumed or expires. */
+#hud:has(#hud-super[data-source="held"]) ~ #aim #power-caption {
+  bottom: calc(135px + env(safe-area-inset-bottom, 0px));
+}
+
+#hud:has(#hud-super[data-source="held"]) ~ #aim #power-bar {
+  bottom: calc(118px + env(safe-area-inset-bottom, 0px));
+}
+
+#hud:has(#hud-super[data-source="held"]) ~ #reload-bar {
+  bottom: calc(92px + env(safe-area-inset-bottom, 0px));
+}
+
+#hud:has(#hud-super[data-source="held"]) ~ #reload-bar::before {
+  position: absolute;
+  bottom: 10px;
 }
 
 /* The middle third remains completely open, including the reticle. The
@@ -873,6 +944,28 @@ input:focus-visible {
     grid-row: 1;
   }
 
+  #hud-super[data-source="held"] {
+    width: calc((100vw - 24px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)) * 0.8);
+    max-width: 336px;
+    grid-template-columns: 44.8px minmax(0, 1fr) auto;
+    gap: 3.2px 6.4px;
+    padding: 3.2px 8px;
+    line-height: 1;
+  }
+
+  #hud-super[data-source="held"] #hud-super-icon {
+    width: 44.8px;
+    height: 44.8px;
+  }
+
+  #hud-super[data-source="held"] #hud-super-name {
+    font-size: 19.2px;
+  }
+
+  #hud-super[data-source="held"] #hud-super-hint {
+    font-size: 16px;
+  }
+
   #hud-score-block {
     top: calc(74px + env(safe-area-inset-top, 0px));
     right: calc(8px + env(safe-area-inset-right, 0px));
@@ -930,6 +1023,47 @@ input:focus-visible {
   }
 }
 
+/* In landscape the bottom card fits between the unchanged touch controls.
+   Charge and reload move just above it while the item is held. */
+@media (max-height: 540px) and (orientation: landscape) {
+  #hud-super[data-source="held"] {
+    left: calc(50% + 20px + (env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)) / 2);
+    grid-template-columns: 44.8px minmax(0, 1fr) auto;
+    width: min(480px, calc((100vw - 312px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)) * 0.8));
+    max-width: 480px;
+    gap: 3.2px 6.4px;
+    padding: 3.2px 8px;
+    line-height: 1;
+  }
+
+  #hud-super[data-source="held"] #hud-super-icon {
+    width: 44.8px;
+    height: 44.8px;
+  }
+
+  #hud-super[data-source="held"] #hud-super-name {
+    font-size: 19.2px;
+  }
+
+  #hud-super[data-source="held"] #hud-super-hint {
+    font-size: 16px;
+  }
+
+  #hud:has(#hud-super[data-source="held"]) ~ #aim #power-bar,
+  #hud:has(#hud-super[data-source="held"]) ~ #aim #power-caption,
+  #hud:has(#hud-super[data-source="held"]) ~ #reload-bar {
+    left: calc(50% + 20px + (env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)) / 2);
+  }
+}
+
+/* Whole item names and their timer remain readable in the narrowest gap. */
+@media (max-width: 620px) and (max-height: 540px) and (orientation: landscape) {
+  #hud-super[data-source="held"] #hud-super-name,
+  #hud-super[data-source="held"] #hud-super-timer {
+    font-size: 16px;
+  }
+}
+
 @media (max-height: 540px) {
   #hud-super {
     bottom: calc(148px + env(safe-area-inset-bottom, 0px));
@@ -958,6 +1092,33 @@ input:focus-visible {
 
   #fire-button {
     bottom: calc(37px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* Narrow portrait needs a bottom shelf: keep both touch controls at their
+   full size above the card, with the 120px bars above the throw button. */
+@media (max-width: 700px) and (orientation: portrait) {
+  #hud:has(#hud-super[data-source="held"]) ~ #joystick,
+  #hud:has(#hud-super[data-source="held"]) ~ #fire-button {
+    bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+  }
+
+  #hud:has(#hud-super[data-source="held"]) ~ #aim #power-bar,
+  #hud:has(#hud-super[data-source="held"]) ~ #aim #power-caption,
+  #hud:has(#hud-super[data-source="held"]) ~ #reload-bar {
+    left: calc(100% - 86px - env(safe-area-inset-right, 0px));
+  }
+
+  #hud:has(#hud-super[data-source="held"]) ~ #aim #power-caption {
+    bottom: calc(217px + env(safe-area-inset-bottom, 0px));
+  }
+
+  #hud:has(#hud-super[data-source="held"]) ~ #aim #power-bar {
+    bottom: calc(200px + env(safe-area-inset-bottom, 0px));
+  }
+
+  #hud:has(#hud-super[data-source="held"]) ~ #reload-bar {
+    bottom: calc(174px + env(safe-area-inset-bottom, 0px));
   }
 }
 

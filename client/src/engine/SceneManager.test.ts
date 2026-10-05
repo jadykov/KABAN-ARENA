@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AdsManager } from "../ads/AdsLoader";
+import { AdsManager, getShopfrontTransforms } from "../ads/AdsLoader";
 import { ArenaBuilder } from "../arena/Arena";
 import { PhysicsWorld } from "../physics/World";
 import {
@@ -2006,5 +2006,116 @@ describe("SceneManager out-of-band RMB tolerance (F3 fix)", () => {
     expect(manager.getCameraAngles().pitch).toBeCloseTo(10 * CAMERA_SENSITIVITY, 10);
     manager.update(FRAME, NO_MOVE, { dx: -20, dy: 0 });
     expect(manager.getCameraAngles().yaw).toBeCloseTo(20 * CAMERA_SENSITIVITY, 10);
+  });
+});
+
+describe("SceneManager shop wildlife snapshot integration", () => {
+  function setup(): { manager: SceneManager; scene: THREE.Scene; birds: THREE.InstancedMesh; rats: THREE.InstancedMesh } {
+    const scene = new THREE.Scene();
+    const manager = new SceneManager(scene, new THREE.PerspectiveCamera());
+    managers.push(manager);
+    manager.build();
+    return { manager, scene, birds: scene.getObjectByName("shop-birds") as THREE.InstancedMesh,
+      rats: scene.getObjectByName("shop-rats") as THREE.InstancedMesh };
+  }
+
+  function advance(manager: SceneManager, seconds: number): void {
+    for (let step = 0; step < Math.ceil(seconds * 10); step += 1) manager.update(0.1, NO_MOVE, NO_LOOK);
+  }
+
+  function visitor(x: number, z: number, overrides: Partial<NetPlayerSnapshot> = {}): NetPlayerSnapshot {
+    return decodeSnapshot({ players: new Map([["self", { x, y: 1.1, z, alive: true, ready: true, ...overrides }]]) }).players[0]!;
+  }
+
+  it("animates for spectators, reacts to live replicated bots, and clears immediately on round end or leave", () => {
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const { manager, birds, rats } = setup();
+      manager.setSpectating(true);
+      advance(manager, 15);
+      expect(birds.count).toBe(0);
+      manager.setWildlifeSnapshot([], true, null);
+      advance(manager, 14);
+      expect(birds.count).toBe(2);
+      const matrix = new THREE.Matrix4();
+      birds.getMatrixAt(0, matrix);
+      const landed = new THREE.Vector3().setFromMatrixPosition(matrix);
+      expect(landed.y).toBeCloseTo(3.025, 5);
+      manager.setWildlifeSnapshot([visitor(landed.x, landed.z, { isBot: true })], true, null);
+      manager.update(0.2, NO_MOVE, NO_LOOK);
+      birds.getMatrixAt(0, matrix);
+      expect(new THREE.Vector3().setFromMatrixPosition(matrix).y).toBeGreaterThan(landed.y + 0.3);
+      manager.setWildlifeSnapshot([], false, null);
+      expect(birds.count).toBe(0);
+      expect(rats.count).toBe(0);
+      manager.setDayProgress(90 / 180);
+      const front = getShopfrontTransforms()[0]!;
+      manager.setWildlifeSnapshot([visitor(front.x, front.z)], true, null);
+      advance(manager, 0.2);
+      expect(rats.count).toBe(1);
+      manager.setWildlifeSnapshot([], false, null);
+      expect(rats.count).toBe(0);
+      advance(manager, 40);
+      expect(rats.count).toBe(0);
+    } finally { random.mockRestore(); }
+  });
+
+  it("uses local prediction only for a live fighter while spectating uses the replicated position", () => {
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const { manager, birds } = setup();
+      manager.setSpectating(true);
+      manager.setWildlifeSnapshot([], true, null);
+      advance(manager, 14);
+      const matrix = new THREE.Matrix4();
+      birds.getMatrixAt(0, matrix);
+      const landed = new THREE.Vector3().setFromMatrixPosition(matrix);
+      manager.teleportSelf(landed.x, landed.z, 4.1);
+      const self = visitor(100, 100);
+      manager.setWildlifeSnapshot([self], true, self.sessionId);
+      manager.update(0.2, NO_MOVE, NO_LOOK);
+      birds.getMatrixAt(0, matrix);
+      expect(new THREE.Vector3().setFromMatrixPosition(matrix).y).toBeCloseTo(landed.y, 5);
+      manager.setSpectating(false);
+      manager.setWildlifeSnapshot([{ ...self, alive: false }], true, self.sessionId);
+      manager.update(0.2, NO_MOVE, NO_LOOK);
+      birds.getMatrixAt(0, matrix);
+      expect(new THREE.Vector3().setFromMatrixPosition(matrix).y).toBeCloseTo(landed.y, 5);
+      manager.setWildlifeSnapshot([self], true, self.sessionId);
+      manager.update(0.2, NO_MOVE, NO_LOOK);
+      birds.getMatrixAt(0, matrix);
+      expect(new THREE.Vector3().setFromMatrixPosition(matrix).y).toBeGreaterThan(landed.y + 0.3);
+    } finally { random.mockRestore(); }
+  });
+
+  it("clears a round rewind and reset, then rebuilds fresh pools with no stale participants", () => {
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const { manager, scene, birds } = setup();
+      manager.setSpectating(true);
+      manager.setDayProgress(14 / 180);
+      manager.setWildlifeSnapshot([], true, null);
+      advance(manager, 14);
+      expect(birds.count).toBe(2);
+      manager.setDayProgress(0);
+      manager.update(0.1, NO_MOVE, NO_LOOK);
+      expect(birds.count).toBe(0);
+      advance(manager, 14);
+      expect(birds.count).toBe(2);
+      manager.reset();
+      expect(birds.count).toBe(0);
+      advance(manager, 14);
+      expect(birds.count).toBe(0);
+      manager.setWildlifeSnapshot([], true, null);
+      advance(manager, 14);
+      expect(birds.count).toBe(2);
+      const oldWildlife = scene.getObjectByName("shop-wildlife")!;
+      manager.dispose();
+      expect(oldWildlife.children).toHaveLength(0);
+      manager.build();
+      expect(scene.getObjectByName("shop-wildlife")).not.toBe(oldWildlife);
+      advance(manager, 14);
+      expect((scene.getObjectByName("shop-birds") as THREE.InstancedMesh).count).toBe(0);
+    } finally { random.mockRestore(); }
   });
 });

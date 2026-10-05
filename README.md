@@ -7,7 +7,7 @@
 - Guest flow, no auth: pick nick + press Play; empty nick falls back to `Guest-XXXX`; late join mid-match till round end.
 - Every round lasts 3 minutes; the highest score at the end wins (`server/src/config.ts`, `server/src/rooms/ArenaRoom.ts`).
 - Performance priority over graphics: stable ~60fps target on mid phones (mid Android 2021, iPhones 14/15/16).
-- Art: stylized arena in a quiet suburban yard, with distant houses and trees, open wooden ladders, subtle irregular paving, four distinct retail shopfronts and low flowerbeds. A small wrapped gift with a bow conceals the random center bonus; trampoline rims and nearby surfaces glow at night. The shared slanted sun/moon arc and sparse soft daytime clouds remain.
+- Art: stylized arena in a quiet suburban yard, with distant houses and trees, open wooden ladders, subtle irregular paving, four distinct retail shopfronts and low flowerbeds. Rare daytime bird visits and nighttime rat runs add small decorative movements around the shops. A small wrapped gift with a bow conceals the random center bonus; trampoline rims and nearby surfaces glow at night. The shared slanted sun/moon arc and sparse soft daytime clouds remain.
 
 ## Stack
 
@@ -65,6 +65,7 @@
 - `client/src/ui/joystick.ts` — transparent look-through stick (`JOYSTICK_OPACITY 0.4`, `client/src/config.ts:20`); dual-stick: left move 140px + right aim 160px with expo (`client/src/config.ts:241-243`), plus floating right-half aim zone.
 - `client/src/arena/Arena.ts` — arena surfaces, 8 obstacle blocks, 4 shop platforms, open wooden ladder visuals over the unchanged solid ramp colliders, 4 decorative low flowerbeds and evening trampoline rim/ground/block overlays.
 - `client/src/arena/SuburbanEnvironment.ts` — world-fixed ground outside the fence, 8 distant houses and 14 trees; 5 batches, no colliders or new lights, quiet evening window glow.
+- `client/src/fx/ShopWildlife.ts` — pooled daytime roof birds and nocturnal facade rats, reacting to live participants; at most 3 birds or 2 rats, without colliders or new lights.
 - 2 swamp zones, 2 ice zones on the opposite diagonal, and 2 center-lane trampolines (`client/src/arena/Arena.ts`); repeated shapes use `InstancedMesh`.
 - `client/src/fx/AvatarVisuals.ts` — hand-held ball in anatomical right hand, 7 Mii-style face decals (128px canvas cache, session-id hash pick), two-tone clothing (shirt = identity color, pants = hash palette), South-Park hop (2.5-4 hops/s, mulberry32 lean/drift/yaw).
 - `client/src/fx/Balls.ts` — pooled ball rendering (`MAX_LIVE_BALLS 12`, per-slot trail sprites, shared glow texture), exponential interpolation (`BALL_LERP_RATE 20`, snap >6m) and the compact solid crystal/collar SUPER pickup with its existing server-owned lifecycle.
@@ -84,7 +85,7 @@
 - `server/src/state.ts` — `@type` schema: `PlayerState` (pos/rot/hp/score/alive/bot/ready/spectator/superBuff/reloadUntil/shield/speed/charge), `BallState`, `PickupState`, `ArenaState` (phase, balls/pickups maps, super-core fields, server clock).
 - `client/src/main.ts` — wiring: Engine + SceneManager + InputController + NetworkManager + joystick/HUD/aim; nick focus guard, Play/spectator flow, charge/fire/reload loop.
 - Tuning lives in `client/src/config.ts` (display mirrors) and `server/src/config.ts` (authoritative); charge/speed/gravity/muzzle numbers must stay identical on both sides.
-- Tests live next to sources (`*.test.ts`, vitest): client 36 files / server 13 files; perf-critical invariants are pinned (adaptive quality and pacing, pixelRatio clamp, 20 Hz input scheduling, charge/damage mapping, muzzle sync, ice friction band).
+- Tests live next to sources (`*.test.ts`, vitest): client 41 files / server 16 files; perf-critical invariants are pinned (adaptive quality and pacing, pixelRatio clamp, 20 Hz input scheduling, charge/damage mapping, muzzle sync, ice friction band).
 - Combat flow: client charges locally -> release builds fire payload (power01/yaw/pitch/super/throwerY) -> server validates reload gate + spawns authoritative ball -> `stepBalls` integrates, checks platform tops, ground, victims -> `applyHit` scores.
 - Thrower elevation: server movement is XZ-kinematic; body-center y is derived from platform tops + clamped client `throwerY` (`hits.ts:146-189`).
 - Self-hit arming: newborn balls ignore their owner within 1.0m / 0.3s (`server/src/config.ts:76-77`); max 12 live balls.
@@ -98,6 +99,8 @@ Stage 20 implements the ten chosen super bonuses locally. Stage 21 applies the o
 Stage 22 doubles bonus-created zone radii: herring/ice 3.6m, swamp/soda 3m, vacuum/sheep 4m; soda proximity trigger 2m. Stage 23 corrects temporary swamp tuning to retain 61% movement speed: its 39% slowdown is half the fixed map swamp's 78% slowdown (22% speed). The temporary patch keeps its 3m radius and 5-second lifetime. Bots are disabled at two participating humans, counting dead players awaiting respawn and excluding spectators; removing bots also removes their projectiles and effects. With one participant left, bots return without restarting the round. Validation and owner playtesting are tracked in `map.md` and `plan.md`; the owner requested commit/push and a local LOG entry for Stage 22 on 2026-10-04; VPS deployment has not been requested.
 
 Stage 23 also adds a grenade as the eleventh center bonus. A direct player hit deals the ordinary weak/strong shot damage plus one heart (37.5/50 HP total), without splitting or splash damage. The first environmental collision on a miss splits it into exactly three smaller grenades; each detonates at its first player or environmental collision for half a heart (12.5 HP) within 1m. Fragments receive no base-shot damage, do not bounce or split again, and share the original throw's scoring and cleanup.
+
+Stages 24–25 give the collected center item a short Russian name/hint and its own SVG avatar. The card sits at the bottom of the screen, reduced by approximately 20% from Stage 24, with touch controls and charge/reload indicators kept clear. Vacuum attraction lasts 5 seconds, with the existing 4m radius and 1m total pull cap. During daytime, 2–3 birds occasionally land on a shop roof and flee when a live participant approaches within 3m; they leave at dusk. At night, approaches within 3.5m of a facade can trigger 1–2 rats, with a global 15–30-second cooldown and rearming after participants leave the 5m area. Animals are decorative, use fixed pools, and clear on round end/reset or disconnect.
 
 On 2026-10-05 the owner reported that the playtest seemed successful, explicitly requested commit/push and a final local LOG entry, and ended the session. The next session starts with the owner's gameplay feedback. This records the local Stage 23 assessment; phone FPS and full-set/two-player acceptance were not separately confirmed. Stage 23 has not been deployed to the VPS.
 

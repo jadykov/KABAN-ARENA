@@ -408,24 +408,46 @@ describe("createHud top-left info list", () => {
 });
 
 describe("super bonus HUD", () => {
-  it("names all ten held items with their hint and a 20-second countdown", () => {
+  it("shows brief copy, the matching avatar and a 20-second countdown for all eleven held items", () => {
+    const pickupCopy = {
+      sheep: ["Овца", "Гонится · взрыв по всем"],
+      turkey: ["Индейка", "Перья на 2 с"],
+      freeze: ["Кирпич", "Заморозка на 1 с"],
+      boomerang: ["Колбаса", "Возвращается · отойди!"],
+      jelly: ["Холодец", "Подбрасывает вверх"],
+      herring: ["Селёдка", "Облако · отойди!"],
+      swamp: ["Болото", "Замедляет на 5 с"],
+      ice: ["Каток", "Скользкий лёд на 5 с"],
+      soda: ["Лимонад", "Мина · опасна всем"],
+      vacuum: ["Пылесос", "Притягивает на 5 с"],
+      grenade: ["Граната", "+1 ♥ · мимо: 3 взрыва"],
+    } as const;
     const parent = new FakeElement();
     const handle = createHud(asHtml(parent));
     try {
       expect(byId(handle, "hud-super").style.display).toBe("none");
+      expect(byId(handle, "hud-super-icon").tagName).toBe("img");
+      expect(byId(handle, "hud-super-icon").attributes.alt).toBe("");
+      expect(byId(handle, "hud-super-icon").attributes["aria-hidden"]).toBe("true");
       for (const bonus of SUPER_BONUSES) {
         handle.setSuperBonus(bonus.kind, 20);
-        expect(byId(handle, "hud-super-name").textContent).toBe(bonus.name);
-        expect(byId(handle, "hud-super-hint").textContent).toBe(bonus.hint);
+        expect(byId(handle, "hud-super-name").textContent).toBe(pickupCopy[bonus.kind][0]);
+        expect(byId(handle, "hud-super-hint").textContent).toBe(pickupCopy[bonus.kind][1]);
+        expect(byId(handle, "hud-super-icon").attributes.src).toBe(`/icons/super-${bonus.kind}.svg`);
+        expect(byId(handle, "hud-super").attributes["aria-label"]).toBe(bonus.name);
         expect(byId(handle, "hud-super-timer").textContent).toBe("20 с");
         expect(byId(handle, "hud-super").attributes["data-kind"]).toBe(bonus.kind);
         expect(byId(handle, "hud-super").attributes["aria-hidden"]).toBe("false");
       }
       handle.setSuperBonus("soda", 24);
       expect(byId(handle, "hud-super-timer").textContent).toBe("20 с");
+      clearWrites(handle);
       handle.setSuperBonus("soda", 4.01);
       expect(byId(handle, "hud-super-timer").textContent).toBe("5 с");
       expect(byId(handle, "hud-super-timer").attributes["aria-label"]).toBe("Осталось 5 с");
+      expect(byId(handle, "hud-super-icon").writes).toEqual([]);
+      expect(byId(handle, "hud-super-name").writes).toEqual([]);
+      expect(byId(handle, "hud-super-hint").writes).toEqual([]);
     } finally {
       handle.dispose();
     }
@@ -439,7 +461,9 @@ describe("super bonus HUD", () => {
         expect(byId(handle, "hud-super").style.display).toBe("");
         expect(byId(handle, "hud-super-name").textContent).toBe("Подарок в центре");
         expect(byId(handle, "hud-super-hint").textContent).toBe("");
+        expect(byId(handle, "hud-super-icon").attributes.src).toBe("/icons/super-gift.svg");
         expect(byId(handle, "hud-super").attributes["data-kind"]).toBe("");
+        expect(byId(handle, "hud-super").attributes["data-source"]).toBe("centre");
         expect(byId(handle, "hud-super").style.borderColor ?? "").toBe("");
         expect(byId(handle, "hud-super-timer").textContent).toBe("15 с");
       }
@@ -458,7 +482,8 @@ describe("super bonus HUD", () => {
       expect(byId(handle, "hud-super-timer").textContent).toBe("15 с");
       expect(byId(handle, "hud-super").attributes["data-source"]).toBe("centre");
       handle.setSuperBonus("freeze", 19.2);
-      expect(byId(handle, "hud-super-name").textContent).toBe("Ледяной кирпич");
+      expect(byId(handle, "hud-super-name").textContent).toBe("Кирпич");
+      expect(byId(handle, "hud-super-icon").attributes.src).toBe("/icons/super-freeze.svg");
       expect(byId(handle, "hud-super").attributes["data-source"]).toBe("held");
       clearWrites(handle);
       handle.setCentreBonus("sheep", 8.2);
@@ -467,12 +492,17 @@ describe("super bonus HUD", () => {
       expect(byId(handle, "hud-super-name").textContent).toBe("Подарок в центре");
       expect(byId(handle, "hud-super-timer").textContent).toBe("9 с");
       expect(byId(handle, "hud-super-hint").textContent).toBe("");
+      expect(byId(handle, "hud-super-icon").attributes.src).toBe("/icons/super-gift.svg");
+      expect(byId(handle, "hud-super").attributes["data-kind"]).toBe("");
+      expect(byId(handle, "hud-super").attributes["aria-label"]).toBe("Подарок в центре");
       expect(byId(handle, "hud-super").style.borderColor).toBe("");
       handle.setCentreBonus(null, 0);
       expect(byId(handle, "hud-super").style.display).toBe("none");
       expect(byId(handle, "hud-super-name").textContent).toBe("");
       expect(byId(handle, "hud-super-hint").textContent).toBe("");
       expect(byId(handle, "hud-super-timer").textContent).toBe("");
+      expect(byId(handle, "hud-super").attributes["data-source"]).toBe("");
+      expect(byId(handle, "hud-super").attributes["aria-label"]).toBe("");
     } finally {
       handle.dispose();
     }
@@ -495,6 +525,8 @@ describe("super bonus HUD", () => {
         handle.setSuperBonus(kind, remainingS);
         expect(byId(handle, "hud-super").style.display).toBe("none");
         expect(byId(handle, "hud-super-timer").textContent).toBe("");
+        expect(byId(handle, "hud-super-icon").attributes.src).toBe("/icons/super-gift.svg");
+        expect(byId(handle, "hud-super").attributes["data-kind"]).toBe("");
       }
       for (const remainingS of [0, -1, Number.NaN, Infinity]) {
         handle.setCentreBonus("", 0.001);

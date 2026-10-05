@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Колбаса-бумеранг">
+  <rect x="3" y="3" width="58" height="58" rx="12" fill="#203a3b" stroke="#d8ea70" stroke-width="3"/>
+  <path d="M18 43V32c0-19 28-19 28 0v11" fill="none" stroke="#6e352c" stroke-width="16" stroke-linecap="round"/>
+  <path d="M18 43V32c0-19 28-19 28 0v11" fill="none" stroke="#cf6154" stroke-width="11" stroke-linecap="round"/>
+  <path d="M19 29c2-8 9-11 15-9" fill="none" stroke="#f6a17f" stroke-width="3" stroke-linecap="round"/>
+  <ellipse cx="18" cy="44" rx="5.5" ry="3.5" fill="#995236" stroke="#6e352c" stroke-width="2"/>
+  <ellipse cx="46" cy="44" rx="5.5" ry="3.5" fill="#995236" stroke="#6e352c" stroke-width="2"/>
+  <path d="m18 47-4 6h8Zm28 0-4 6h8Z" fill="#fff7e7" stroke="#bdc8aa" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>

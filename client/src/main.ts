@@ -635,6 +635,7 @@ async function boot(): Promise<void> {
       sceneManager.setChargeZoom01(0);
       sceneManager.setChargeTranslucent(false);
       sceneManager.setBattleSnapshot([], null);
+      sceneManager.setWildlifeSnapshot([], false, null);
       sceneManager.clearBonuses();
       aimOverlay.setCharge01(0);
       aimOverlay.setTrajectory(null);
@@ -666,6 +667,7 @@ async function boot(): Promise<void> {
       ? 1 - snapshot.remainingMs / (ROUND_SECONDS * 1000)
       : snapshot.phase === "ended" ? 1 : 0;
     sceneManager.setDayProgress(Math.max(0, Math.min(1, dayProgress)));
+    sceneManager.setWildlifeSnapshot(snapshot.players, snapshot.phase === "playing", net.ownSessionId);
     hud.setCounters(countFighters(snapshot.players), countSpectators(snapshot.players));
     const selfId = net.ownSessionId;
     const self = snapshot.players.find((player) => player.sessionId === selfId);

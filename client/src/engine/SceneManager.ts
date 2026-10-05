@@ -93,6 +93,7 @@ import { SuburbanEnvironment } from "../arena/SuburbanEnvironment";
 import { BallsPool, SuperCore } from "../fx/Balls";
 import { CameraShake, HitFlash } from "../fx/CameraShake";
 import { Fireflies } from "../fx/Fireflies";
+import { ShopWildlife } from "../fx/ShopWildlife";
 import {
   AirborneGate,
   applyClothing,
@@ -569,6 +570,10 @@ export class SceneManager {
   // (1 draw call, no lights — see fx/Fireflies). Owned here so build /
   // update / dispose stay in one place with the other pooled visuals.
   private fireflies: Fireflies | null = null;
+  private wildlife: ShopWildlife | null = null;
+  private wildlifePlayers: readonly NetPlayerSnapshot[] = [];
+  private wildlifePlaying = false;
+  private wildlifeLocalId: string | null = null;
   private charge01 = 0;
   // Charging locomotion flag (bug C): main.ts feeds isCharging here every
   // frame; while true the local move target speed scales by CHARGE_MOVE_MULT
@@ -916,6 +921,8 @@ export class SceneManager {
     this.fireflies.setAmbientHz(this.ambientHz);
     this.fireflies.setVisibility(eveningLightsAt(this.roundProgress));
     this.fireflies.update(0, this.camera);
+    this.wildlife = new ShopWildlife();
+    this.scene.add(this.wildlife.object);
 
     this.scene.add(this.pickups.object);
     if (this.particlesDisposed) {
@@ -1061,6 +1068,13 @@ export class SceneManager {
   public setBattleSnapshot(balls: readonly NetBallSnapshot[], superSnapshot: NetSuperSnapshot | null): void {
     this.latestBalls = balls;
     this.latestSuper = superSnapshot ?? null;
+  }
+
+  public setWildlifeSnapshot(players: readonly NetPlayerSnapshot[], playing: boolean, localId: string | null): void {
+    if (!playing && this.wildlifePlaying) this.wildlife?.reset();
+    this.wildlifePlayers = players;
+    this.wildlifePlaying = playing;
+    this.wildlifeLocalId = localId;
   }
 
   public getServerNow(): number {
@@ -1483,6 +1497,9 @@ export class SceneManager {
     // Fireflies drift in play and spectate only after the final-minute
     // lighting gate. The hidden swarm skips its matrix update entirely.
     this.fireflies?.update(deltaSeconds, this.camera);
+    this.wildlife?.update(deltaSeconds, this.roundProgress * ROUND_SECONDS,
+      this.wildlifePlaying, this.wildlifePlayers, this.wildlifeLocalId,
+      this.spectating ? null : this.avatar?.position ?? null);
   }
 
   private updatePhysics(deltaSeconds: number, worldMove: THREE.Vector3): void {
@@ -2271,6 +2288,8 @@ export class SceneManager {
     this.cameraDistance = CAMERA_FOLLOW_DISTANCE;
     this.latestBalls = [];
     this.latestSuper = null;
+    this.setWildlifeSnapshot([], false, null);
+    this.wildlife?.reset();
     this.clearBonuses();
     this.hasAim = false;
     this.sparkTimer = 0;
@@ -2350,6 +2369,11 @@ export class SceneManager {
       this.fireflies.dispose();
       this.fireflies = null;
     }
+    this.wildlife?.dispose();
+    this.wildlife = null;
+    this.wildlifePlayers = [];
+    this.wildlifePlaying = false;
+    this.wildlifeLocalId = null;
     this.charge01 = 0;
     this.latestBalls = [];
     this.latestSuper = null;

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Шар-пылесос">
+  <rect x="3" y="3" width="58" height="58" rx="12" fill="#203a3b" stroke="#d8ea70" stroke-width="3"/>
+  <circle cx="19" cy="47" r="6" fill="#28313a" stroke="#708e92" stroke-width="2"/>
+  <circle cx="39" cy="47" r="6" fill="#28313a" stroke="#708e92" stroke-width="2"/>
+  <ellipse cx="29" cy="36" rx="19" ry="13" fill="#ad85dd" stroke="#655285" stroke-width="2.5"/>
+  <path d="M20 26v-6h18v6" fill="none" stroke="#d5e4ea" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M44 34c12-1 13-16 5-19-8-3-15 3-12 9 2 4 13 5 13 13v10" fill="none" stroke="#28313a" stroke-width="7" stroke-linecap="round"/>
+  <path d="M44 34c12-1 13-16 5-19-8-3-15 3-12 9 2 4 13 5 13 13v10" fill="none" stroke="#708e92" stroke-width="2" stroke-linecap="round"/>
+  <path d="m41 47 15-1 1 8H41Z" fill="#d5e4ea" stroke="#708e92" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M17 34c3-3 7-4 11-4" fill="none" stroke="#d5b8f5" stroke-width="2.5" stroke-linecap="round"/>
+  <circle cx="28" cy="26" r="2.5" fill="#b3d873"/>
+</svg>
