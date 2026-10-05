@@ -14,6 +14,7 @@ import {
   BALL_TEXTURE_SIZE,
   BallsPool,
   ENV_PUFF_COLOR,
+  GRENADE_FRAGMENT_SCALE,
   MAX_CACHED_BALL_SKINS,
   MUZZLE_FLASH_LIFE_S,
   SUPER_BALL_COLOR,
@@ -109,7 +110,7 @@ function lightnessOf(hex: number): number {
   return (Math.max(r, g, b) + Math.min(r, g, b)) / 2;
 }
 
-describe("ten typed bonus items", () => {
+describe("eleven typed bonus items", () => {
   it("keeps the same generic gift and colors even when a legacy snapshot includes a known kind", () => {
     const scene = new THREE.Scene();
     const core = new SuperCore(scene);
@@ -159,6 +160,64 @@ describe("ten typed bonus items", () => {
       for (const kind of SUPER_BONUS_KINDS) expect(slot?.getObjectByName(`bonus-model-${kind}`)?.visible).toBe(false);
     } finally { pool.dispose(); }
     expect(scene.children).toHaveLength(0);
+  });
+
+  it("renders all three smaller grenades at the projectile cap, preserving their scale through animation", () => {
+    const scene = new THREE.Scene(); const pool = new BallsPool(scene);
+    try {
+      const normal = Array.from({ length: MAX_LIVE_BALLS - 3 }, (_, index) => makeBallAt(`normal-${index}`, index));
+      const fragments = Array.from({ length: 3 }, (_, index) => ({ ...makeBallAt(`fragment-${index}`, 20 + index), bonusKind: "grenade" as const, grenadeFragment: true }));
+      pool.render([...normal, ...fragments]);
+      pool.update(0.1);
+      const groups = ballGroups(scene).filter((group) => group.visible);
+      expect(groups).toHaveLength(MAX_LIVE_BALLS);
+      for (const group of groups.slice(-3)) {
+        expect(group.scale.toArray()).toEqual([GRENADE_FRAGMENT_SCALE, GRENADE_FRAGMENT_SCALE, GRENADE_FRAGMENT_SCALE]);
+        const model = group.getObjectByName("bonus-model-grenade")!;
+        expect(model.visible).toBe(true);
+        expect(model.scale.toArray()).toEqual([1, 1, 1]);
+        expect(group.children[0]?.visible).toBe(false);
+      }
+    } finally { pool.dispose(); }
+  });
+
+  it("reuses fragment models and restores main, other-bonus and ordinary scale", () => {
+    const scene = new THREE.Scene(); const pool = new BallsPool(scene);
+    try {
+      const slot = ballGroups(scene)[0]!;
+      const grenade = { ...makeBall("grenade", true), bonusKind: "grenade" as const, grenadeFragment: true };
+      pool.render([grenade]); pool.update(0.1);
+      const model = slot.getObjectByName("bonus-model-grenade")!;
+      const pieces = model.children;
+      expect(slot.scale.x).toBe(0.5);
+      pool.render([{ ...grenade, grenadeFragment: false }]); pool.update(0.1);
+      expect(slot.scale.x).toBe(1);
+      expect(slot.getObjectByName("bonus-model-grenade")).toBe(model);
+      expect(model.children).toBe(pieces);
+      pool.render([]);
+      pool.render([{ ...makeBall("jelly", true), bonusKind: "jelly", grenadeFragment: true }]); pool.update(0.1);
+      expect(slot.scale.x).toBe(1);
+      expect(model.visible).toBe(false);
+      pool.render([]);
+      pool.render([{ ...makeBall("normal", false), grenadeFragment: true }]); pool.update(0.1);
+      expect(slot.scale.x).toBe(1);
+      expect(slot.children[0]?.visible).toBe(true);
+      pool.render([]);
+      pool.render([grenade]); pool.update(0.1);
+      expect(slot.getObjectByName("bonus-model-grenade")).toBe(model);
+      expect(slot.scale.x).toBe(0.5);
+    } finally { pool.dispose(); }
+  });
+
+  it.each([false, true])("does not infer a grenade explosion from a vanished projectile (fragment=%s)", (grenadeFragment) => {
+    const scene = new THREE.Scene(); const pool = new BallsPool(scene);
+    try {
+      pool.render([{ ...makeBall("grenade", true), bonusKind: "grenade", grenadeFragment }]);
+      pool.update(0.1);
+      pool.render([]); pool.update(0.01);
+      expect(ballGroups(scene).every((group) => !group.visible)).toBe(true);
+      expect(puffSprites(scene).every((sprite) => !sprite.visible)).toBe(true);
+    } finally { pool.dispose(); }
   });
 });
 

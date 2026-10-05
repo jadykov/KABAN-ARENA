@@ -1,5 +1,5 @@
 import { Room, type Client } from "colyseus";
-import { activeTemporarySurface, getSuperBonus, isSuperBonusKind, TEMPORARY_SWAMP_SPEED_MULT } from "../../../shared/super-bonuses.mjs";
+import { activeTemporarySurface, getSuperBonus, GRENADE_FRAGMENT_COUNT, isSuperBonusKind, TEMPORARY_SWAMP_SPEED_MULT } from "../../../shared/super-bonuses.mjs";
 import { SuperBonusSystem, bonusLineOfSight } from "../super-bonuses.js";
 import { PICKUP_VISUAL_Y } from "../../../shared/arena-layout.mjs";
 import {
@@ -1042,22 +1042,9 @@ export class ArenaRoom extends Room<ArenaState> {
     ball.rolling = false;
     ball.settleMs = 0;
     ball.restY = 0;
-    this.state.balls.set(ball.ballId, ball);
     // Perf cap: max 12 live balls server-side, oldest despawns first.
-    if (this.state.balls.size > MAX_LIVE_BALLS) {
-      let oldestId: string | null = null;
-      let oldestAge = -1;
-      this.state.balls.forEach((entry: BallState, key: string): void => {
-        if (entry.ageMs > oldestAge) {
-          oldestAge = entry.ageMs;
-          oldestId = key;
-        }
-      });
-      if (oldestId !== null && oldestId !== ball.ballId) {
-        this.state.balls.delete(oldestId);
-        this.bonuses.forgetBall(oldestId);
-      }
-    }
+    this.reserveBallSlots(1);
+    this.state.balls.set(ball.ballId, ball);
     shooter.superKind = "";
     shooter.superUntil = 0;
     shooter.superBuff = false;
@@ -1066,6 +1053,71 @@ export class ArenaRoom extends Room<ArenaState> {
     // calls spawnBall, while denied shots return before reaching this path.
     shooter.chargeUntil = 0;
     return ball;
+  }
+
+  private reserveBallSlots(count: number): void {
+    while (this.state.balls.size + count > MAX_LIVE_BALLS) {
+      let oldestId: string | null = null;
+      let oldestAge = -1;
+      this.state.balls.forEach((entry: BallState, key: string): void => {
+        if (entry.ageMs > oldestAge) {
+          oldestAge = entry.ageMs;
+          oldestId = key;
+        }
+      });
+      if (oldestId !== null) {
+        this.state.balls.delete(oldestId);
+        this.bonuses.forgetBall(oldestId);
+      } else break;
+    }
+  }
+
+  private grenadeContact(ball: BallState, now: number, nx: number, ny: number, nz: number): void {
+    if (ball.grenadeFragment) { this.bonuses.grenadeBurst(ball, now); return; }
+    // Replace the original atomically. Reserve all three slots before any
+    // child is inserted; a full pool still produces exactly three children.
+    this.state.balls.delete(ball.ballId);
+    this.reserveBallSlots(GRENADE_FRAGMENT_COUNT);
+    let normalLength = Math.hypot(nx, ny, nz);
+    if (!(normalLength > 0)) { nx = 0; ny = 1; nz = 0; normalLength = 1; }
+    nx /= normalLength; ny /= normalLength; nz /= normalLength;
+    const heading = Math.atan2(Math.abs(ny) > 0.5 ? ball.vz : nz, Math.abs(ny) > 0.5 ? ball.vx : nx);
+    for (let i = 0; i < GRENADE_FRAGMENT_COUNT; i += 1) {
+      const angle = heading + (i - 1) * 0.7;
+      const dx = Math.cos(angle); const dz = Math.sin(angle);
+      const fragment = new BallState();
+      fragment.ballId = `${ball.ballId}:fragment${i + 1}`;
+      fragment.ownerId = ball.ownerId;
+      fragment.bonusKind = "grenade";
+      fragment.grenadeFragment = true;
+      fragment.grenadeParentId = ball.ballId;
+      fragment.super = true;
+      fragment.x = ball.x + nx * 0.2 + dx * 0.04;
+      fragment.y = ball.y + ny * 0.2;
+      fragment.z = ball.z + nz * 0.2 + dz * 0.04;
+      fragment.vx = dx * 4.4;
+      fragment.vy = ny < -0.5 ? -2 : 2;
+      fragment.vz = dz * 4.4;
+      fragment.originX = fragment.x; fragment.originY = fragment.y; fragment.originZ = fragment.z;
+      this.bonuses.register(fragment);
+      this.state.balls.set(fragment.ballId, fragment);
+    }
+  }
+
+  private grenadeRampContact(ball: BallState, now: number, previousX: number, previousY: number, previousZ: number): boolean {
+    for (const ramp of SERVER_PLATFORMS) {
+      const top = rampHeightAt(ramp, ball.x, ball.z);
+      if (top <= 0) continue;
+      const previousTop = rampHeightAt(ramp, previousX, previousZ);
+      const crossesTop = previousTop > 0 && previousY >= previousTop && ball.y <= top;
+      const crossesUnderside = previousTop > 0 && previousY < previousTop - 0.25 && ball.y >= top - 0.25;
+      if (!crossesTop && !crossesUnderside && (ball.y > top || ball.y < top - 0.25)) continue;
+      const underside = crossesUnderside || (previousTop > 0 && previousY < previousTop - 0.25);
+      ball.y = top + (underside ? -0.29 : 0.04);
+      this.grenadeContact(ball, now, 0, underside ? -1 : 1, 0);
+      return true;
+    }
+    return false;
   }
 
   // Authoritative ball step (Stage 4d.4): gravity arc, substepped flight
@@ -1100,9 +1152,13 @@ export class ArenaRoom extends Room<ArenaState> {
   // closures are the same pre-existing per-tick shapes as before.
   private stepBalls(now: number, dt: number): void {
     const dead: string[] = [];
-    this.state.balls.forEach((ball: BallState, ballId: string): void => {
+    // New fragments are visible in this patch but are first simulated on the
+    // next tick. A snapshot also avoids advancing siblings inserted mid-loop.
+    [...this.state.balls].forEach(([ballId, ball]): void => {
+      if (!this.state.balls.has(ballId)) return;
       const prevAge = ball.ageMs;
       ball.ageMs += dt * 1000;
+      if (ball.bonusKind === "grenade" && ball.ageMs >= (ball.grenadeFragment ? 4000 : 8000)) { dead.push(ballId); return; }
       if (prevAge < PATCH_RATE_MS) {
         return;
       }
@@ -1168,6 +1224,7 @@ export class ArenaRoom extends Room<ArenaState> {
       }
       const subDt = dt / subCount;
       for (let sub = 0; sub < subCount; sub += 1) {
+        const previousX = ball.x; const previousY = ball.y; const previousZ = ball.z;
         const moveX = ball.vx * subDt;
         const moveY = ball.vy * subDt;
         const moveZ = ball.vz * subDt;
@@ -1176,12 +1233,26 @@ export class ArenaRoom extends Room<ArenaState> {
         ball.z += moveZ;
         ball.distM += Math.sqrt(moveX * moveX + moveY * moveY + moveZ * moveZ);
         if (this.collideBoundaryWalls(ball)) {
-          if (ball.bonusKind) this.bonuses.install(ball, now);
+          if (ball.bonusKind === "grenade") {
+            const nx = Math.abs(ball.x) === ARENA_HALF_SIZE ? -Math.sign(ball.x) : 0;
+            const nz = Math.abs(ball.z) === ARENA_HALF_SIZE ? -Math.sign(ball.z) : 0;
+            ball.x += nx * 0.04; ball.z += nz * 0.04;
+            this.grenadeContact(ball, now, nx, 0, nz);
+          } else if (ball.bonusKind) this.bonuses.install(ball, now);
           dead.push(ballId);
           return;
         }
         const contact = describeBallSurface(ball.x, ball.y, ball.z, ball.vx, ball.vz, this.scratchContact);
         if (contact.kind === "vertical") {
+          if (ball.bonusKind === "grenade") {
+            const nx = contact.axis === "x" ? Math.sign(contact.face - ball.x) || -Math.sign(ball.vx) || 1 : 0;
+            const nz = contact.axis === "z" ? Math.sign(contact.face - ball.z) || -Math.sign(ball.vz) || 1 : 0;
+            if (contact.axis === "x") ball.x = contact.face + nx * 0.04;
+            else ball.z = contact.face + nz * 0.04;
+            this.grenadeContact(ball, now, nx, 0, nz);
+            dead.push(ballId);
+            return;
+          }
           if (ball.bonusKind) {
             const clearance = ball.bonusKind === "sheep" ? 0.3 : 0.04;
             const x = contact.axis === "x" ? contact.face - Math.sign(ball.vx) * clearance : ball.x;
@@ -1203,6 +1274,12 @@ export class ArenaRoom extends Room<ArenaState> {
           }
           ball.ricochet = true;
         } else if (contact.kind === "up") {
+          if (ball.bonusKind === "grenade") {
+            ball.y = contact.restY - BALL_RADIUS + 0.04;
+            this.grenadeContact(ball, now, 0, 1, 0);
+            dead.push(ballId);
+            return;
+          }
           if (ball.bonusKind) {
             this.bonuses.install(ball, now, ball.x, Math.max(0, contact.restY - BALL_RADIUS), ball.z);
             dead.push(ballId);
@@ -1221,10 +1298,20 @@ export class ArenaRoom extends Room<ArenaState> {
           }
           return;
         }
+        if (ball.bonusKind === "grenade" && this.grenadeRampContact(ball, now, previousX, previousY, previousZ)) {
+          dead.push(ballId);
+          return;
+        }
         if (this.bonuses.disarmAt(ball)) { dead.push(ballId); return; }
         const victim = ball.bonusHit ? null : this.findBallVictim(ball);
         if (victim !== null) {
           if (ball.bonusKind) {
+            if (ball.bonusKind === "grenade") {
+              if (!ball.grenadeFragment) this.bonuses.directHit(ball, victim, now);
+              this.bonuses.grenadeBurst(ball, now);
+              dead.push(ballId);
+              return;
+            }
             this.bonuses.directHit(ball, victim, now);
             if (ball.bonusKind === "boomerang") { ball.bonusHit = true; continue; }
             this.bonuses.install(ball, now);
@@ -1520,7 +1607,7 @@ export class ArenaRoom extends Room<ArenaState> {
         return;
       }
       if (ball.bonusKind && this.bonuses.alreadyHit(ball, player)) return;
-      if (!canDamage(player, this.currentTime())) {
+      if (!canDamage(player, this.currentTime()) && ball.bonusKind !== "grenade") {
         return;
       }
       // Self-damage arming: point-blank spawn does not insta-suicide.
@@ -1536,7 +1623,8 @@ export class ArenaRoom extends Room<ArenaState> {
       const bodyY = Number.isFinite(player.y) ? player.y : BODY_CENTER_Y;
       const dy = bodyY - ball.y;
       const dz = player.z - ball.z;
-      if (dx * dx + dy * dy + dz * dz <= BALL_HIT_RADIUS * BALL_HIT_RADIUS) {
+      const hitRadius = ball.grenadeFragment ? PLAYER_BODY_RADIUS + BALL_RADIUS * 0.5 : BALL_HIT_RADIUS;
+      if (dx * dx + dy * dy + dz * dz <= hitRadius * hitRadius) {
         victim = player;
       }
     });

@@ -44,6 +44,25 @@ describe("super bonus wire compatibility", () => {
   it("a malformed effect map leaves player and projectile data available", () => {
     expect(decodeSnapshot({ players: new Map([["self", { alive: true }]]), bonusEffects: { forEach: (): never => { throw new Error("bad patch"); } } }).players).toHaveLength(1);
   });
+
+  it("decodes grenade ownership, fragments and explicit elevated bursts with safe legacy defaults", () => {
+    const snapshot = decodeSnapshot({
+      players: new Map([["self", { superKind: "grenade", superUntil: 21000 }]]),
+      superActive: true, superKind: "grenade",
+      balls: new Map<string, unknown>([
+        ["legacy", {}],
+        ["main", { bonusKind: "grenade" }],
+        ["fragment", { bonusKind: "grenade", grenadeFragment: true }],
+        ["bad", { bonusKind: "grenade", grenadeFragment: "true" }],
+      ]),
+      bonusEffects: new Map([["blast", { kind: "grenade", phase: "burst", x: 2, y: 4, z: 3, radius: 1, createdAt: 1000, expiresAt: 1250 }]]),
+    });
+    expect(snapshot.players[0]?.superKind).toBe("grenade");
+    expect(snapshot.super?.kind).toBe("grenade");
+    expect(snapshot.balls.map((ball) => ball.grenadeFragment)).toEqual([false, false, true, false]);
+    expect(snapshot.balls[2]?.bonusKind).toBe("grenade");
+    expect(snapshot.bonusEffects?.[0]).toMatchObject({ effectId: "blast", kind: "grenade", phase: "burst", x: 2, y: 4, z: 3, radius: 1, expiresAt: 1250 });
+  });
 });
 
 describe("server-timed local bonus control", () => {
@@ -89,6 +108,8 @@ describe("super bonus shot preview", () => {
     expect(damageForPower(0.8, true, "turkey")).toBe(37.5);
     expect(damageForPower(0.799, true, "turkey")).toBe(25);
     expect(damageForPower(0.8, true, "boomerang")).toBe(50);
+    expect(damageForPower(0.8, true, "grenade")).toBe(50);
+    expect(damageForPower(0.799, true, "grenade")).toBe(37.5);
     for (const kind of ["sheep", "herring", "swamp", "ice", "soda", "vacuum"] as const) {
       expect(damageForPower(0.8, true, kind)).toBe(25);
       expect(damageForPower(0.799, true, kind)).toBe(12.5);

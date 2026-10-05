@@ -52,7 +52,7 @@ describe("held bonus silhouettes", () => {
     return mesh;
   }
 
-  it("holds all ten items in the existing hand pose and reuses cached models", () => {
+  it("holds all eleven items in the existing hand pose and reuses cached models", () => {
     const handle = attachHandBall(new THREE.Group(), PLAYER_COLOR);
     try {
       for (const kind of SUPER_BONUS_KINDS) {
@@ -64,12 +64,12 @@ describe("held bonus silhouettes", () => {
         expect(handle.group.position.z).toBe(HANDBALL_OFFSET_Z);
       }
       const holder = handle.group.getObjectByName("held-bonus-model");
-      expect(holder?.children).toHaveLength(10);
+      expect(holder?.children).toHaveLength(11);
       for (let i = 0; i < 60; i += 1) {
         handle.setBonusKind("sheep");
         handle.update(1 / 60);
       }
-      expect(holder?.children).toHaveLength(10);
+      expect(holder?.children).toHaveLength(11);
       handle.setBonusKind("");
       expect(holder?.visible).toBe(false);
       expect(ballMeshOf(handle).visible).toBe(true);

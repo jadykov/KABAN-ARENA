@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import type { NetBonusEffectSnapshot, NetPlayerSnapshot } from "../net/protocol";
-import { BONUS_BURST_LIFE_S, BONUS_DECAL_OFFSET, MAX_BONUS_VISUALS, SuperBonusVisuals } from "./SuperBonusVisuals";
+import { BONUS_BURST_LIFE_S, BONUS_DECAL_OFFSET, MAX_BONUS_BURSTS, MAX_BONUS_VISUALS, SuperBonusVisuals } from "./SuperBonusVisuals";
 
 function effect(overrides: Partial<NetBonusEffectSnapshot> = {}): NetBonusEffectSnapshot {
   return { effectId: "zone", throwId: "throw", ownerId: "owner", kind: "ice", phase: "active", x: 2, y: 4, z: 3, radius: 1.8, createdAt: 1000, expiresAt: 6000, armedAt: 0, triggerAt: 0, vx: 0, vy: 0, vz: 0, ...overrides };
@@ -34,6 +34,67 @@ function horizontalRadius(mesh: THREE.Mesh, center: THREE.Vector3): number {
 }
 
 describe("authoritative bonus effects", () => {
+  it.each([0.6, 1])("renders an explicit grenade burst once at its actual elevated point and radius %s", (radius) => {
+    const scene = new THREE.Scene(); const visuals = new SuperBonusVisuals(scene);
+    try {
+      const blast = effect({ kind: "grenade", phase: "burst", radius, createdAt: 1000, expiresAt: 1250 });
+      visuals.sync([blast], [], 1000);
+      const bursts = (): THREE.Object3D[] => root(scene).children.filter((object) => object.name === "bonus-explosion" && object.visible);
+      expect(bursts()).toHaveLength(1);
+      const burst = bursts()[0]!;
+      expect(burst.position.toArray()).toEqual([blast.x, blast.y, blast.z]);
+      expect(activeEffects(scene)).toHaveLength(0);
+      visuals.update(0.1, 1100);
+      const before = burst.scale.x;
+      visuals.sync([blast, blast], [], 1100);
+      expect(bursts()).toHaveLength(1);
+      expect(burst.scale.x).toBe(before);
+      visuals.sync([], [], 1150);
+      visuals.sync([blast], [], 1200);
+      expect(bursts()).toHaveLength(1);
+      expect(burst.scale.x).toBe(before);
+      visuals.update(0.1, 1200);
+      visuals.update(BONUS_BURST_LIFE_S - 0.2, 1320);
+      expect(bursts()).toHaveLength(0);
+      expect(burst.scale.x).toBeCloseTo(radius);
+      visuals.sync([blast], [], 1320);
+      expect(bursts()).toHaveLength(0);
+    } finally { visuals.dispose(); }
+  });
+
+  it("renders all three confirmed fragment bursts using the fixed pool and clears them on reset", () => {
+    const scene = new THREE.Scene(); const visuals = new SuperBonusVisuals(scene);
+    try {
+      const fragments = Array.from({ length: 3 }, (_, index) => effect({ effectId: `fragment-${index}`, kind: "grenade", phase: "burst", radius: 1, x: index, createdAt: 1000, expiresAt: 1250 }));
+      const pool = root(scene).children.filter((object) => object.name === "bonus-explosion");
+      expect(pool).toHaveLength(MAX_BONUS_BURSTS);
+      const children = root(scene).children.length;
+      visuals.sync(fragments, [], 1000);
+      expect(pool.filter((object) => object.visible)).toHaveLength(3);
+      expect(pool.filter((object) => object.visible).map((object) => object.userData["effectId"])).toEqual(["fragment-0", "fragment-1", "fragment-2"]);
+      visuals.sync(fragments, [], 1100);
+      expect(pool.filter((object) => object.visible)).toHaveLength(3);
+      expect(root(scene).children).toHaveLength(children);
+      visuals.reset();
+      expect(root(scene).children.every((object) => !object.visible)).toBe(true);
+      visuals.sync(fragments, [], 1000);
+      expect(pool.filter((object) => object.visible)).toHaveLength(3);
+      expect(root(scene).children).toHaveLength(children);
+    } finally { visuals.dispose(); }
+  });
+
+  it("never creates a grenade burst from expired, unsupported, or silently removed effects", () => {
+    const scene = new THREE.Scene(); const visuals = new SuperBonusVisuals(scene);
+    try {
+      visuals.sync([effect({ kind: "grenade", phase: "warning", triggerAt: 1200 })], [], 1000);
+      visuals.sync([], [], 1200);
+      visuals.sync([effect({ kind: "grenade", phase: "burst", expiresAt: 1250 })], [], 1250);
+      visuals.update(0.1, 1300);
+      expect(root(scene).children.every((object) => !object.visible)).toBe(true);
+      expect(activeEffects(scene)).toHaveLength(0);
+    } finally { visuals.dispose(); }
+  });
+
   it.each([["herring", 3.6], ["swamp", 3], ["ice", 3.6], ["vacuum", 4], ["soda", 3], ["sheep", 4]] as const)("%s draws its fill and contour at the expanded authoritative radius", (kind, radius) => {
     const scene = new THREE.Scene(); const visuals = new SuperBonusVisuals(scene);
     try {

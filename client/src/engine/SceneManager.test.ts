@@ -30,6 +30,7 @@ import {
   IDLE_FOLLOW_PITCH,
   MIRROR_PITCH_MAX,
   MIRROR_PITCH_MIN,
+  MOVE_SPEED,
   NEBULA_COUNT,
   PARTICLE_BURST_COUNT,
   RECOIL_FULL_M,
@@ -1465,8 +1466,8 @@ describe("SceneManager super bonus prediction", () => {
       const effects = [zone({ effectId: "old", kind: "ice", createdAt: 900 }), zone()];
       manager.syncBonuses(player(), effects, [], 1000);
       for (let i = 0; i < 10; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
-      expect(manager.getPlayerVelocity()?.x).toBeGreaterThan(3);
-      expect(manager.getPlayerVelocity()?.x).toBeLessThan(3.7);
+      expect(manager.getPlayerVelocity()?.x).toBeGreaterThan(2.5);
+      expect(manager.getPlayerVelocity()?.x).toBeLessThan(2.8);
       now = 6000;
       for (let i = 0; i < 15; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
       expect(manager.getPlayerVelocity()?.x).toBeGreaterThan(2.7);
@@ -1482,7 +1483,7 @@ describe("SceneManager super bonus prediction", () => {
     } finally { clock.mockRestore(); }
   });
 
-  it("predicts the weaker bonus swamp in the expanded region while fixed map swamp keeps its original penalty", async () => {
+  it("predicts half the fixed swamp slowdown in the expanded bonus region and free movement outside", async () => {
     const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
     try {
       const manager = await createManager();
@@ -1491,14 +1492,14 @@ describe("SceneManager super bonus prediction", () => {
       manager.syncBonuses(player(), [effect], [], 1000);
       manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
       const bonusSpeed = manager.getPlayerVelocity()!.x;
-      expect(bonusSpeed).toBeGreaterThan(3.2); expect(bonusSpeed).toBeLessThan(3.7);
+      expect(bonusSpeed).toBeGreaterThan(2.5); expect(bonusSpeed).toBeLessThan(2.8);
       expect(manager.getAvatarPosition().x).toBeGreaterThan(2.25);
 
       manager.debugSetPlayerState({ x: -14.5, y: 1.1, z: 0 }, { x: 0, y: 0, z: 0 });
       manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
       const mapSpeed = manager.getPlayerVelocity()!.x;
       expect(mapSpeed).toBeGreaterThan(0.85); expect(mapSpeed).toBeLessThan(1.05);
-      expect(bonusSpeed / mapSpeed).toBeCloseTo(0.8 / 0.22, 5);
+      expect(bonusSpeed / mapSpeed).toBeCloseTo(0.61 / 0.22, 5);
 
       manager.debugSetPlayerState({ x: 3.01, y: 1.1, z: 8 }, { x: 0, y: 0, z: 0 });
       for (let i = 0; i < 15; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
@@ -1509,6 +1510,15 @@ describe("SceneManager super bonus prediction", () => {
       for (let i = 0; i < 15; i += 1) manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
       expect(manager.getPlayerVelocity()!.x).toBeCloseTo(outsideSpeed, 6);
       expect(manager.getAvatarPosition().x).toBeCloseTo(outsideX, 6);
+      // Start the free-motion control at its full target speed: a character
+      // still accelerating from rest is not the baseline for a speed penalty.
+      // All samples then receive the same Rapier damping/contact response.
+      manager.debugSetPlayerState({ x: 2.25, y: 1.1, z: 8 }, { x: MOVE_SPEED, y: 0, z: 0 });
+      manager.update(FRAME, { x: 1, y: 0 }, NO_LOOK);
+      const freeSpeed = manager.getPlayerVelocity()!.x;
+      expect(bonusSpeed / freeSpeed).toBeCloseTo(0.61, 5);
+      expect(mapSpeed / freeSpeed).toBeCloseTo(0.22, 5);
+      expect(freeSpeed - bonusSpeed).toBeCloseTo((freeSpeed - mapSpeed) / 2, 5);
     } finally { clock.mockRestore(); }
   });
 });

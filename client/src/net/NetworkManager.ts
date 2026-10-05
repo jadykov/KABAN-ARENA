@@ -120,6 +120,7 @@ interface WireBall {
   power01?: unknown;
   super?: unknown;
   bonusKind?: unknown;
+  grenadeFragment?: unknown;
   ricochet?: unknown;
   resting?: unknown;
   rolling?: unknown;
@@ -218,6 +219,7 @@ export function decodeSnapshot(state: unknown, selfId: string | null = null): Ro
         power01: toNumber(ball.power01, 0.5),
         super: toBoolean(ball.super),
         bonusKind: isSuperBonusKind(ball.bonusKind) ? ball.bonusKind : "",
+        grenadeFragment: toBoolean(ball.grenadeFragment),
         color: ownerColorForSession(ownerId, selfId),
         ricochet: toBoolean(ball.ricochet),
         resting: toBoolean(ball.resting),

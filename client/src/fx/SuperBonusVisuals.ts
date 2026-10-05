@@ -4,6 +4,7 @@ import type { NetBonusEffectSnapshot, NetPlayerSnapshot } from "../net/protocol"
 import { SuperBonusModels } from "./SuperBonusModels";
 
 export const MAX_BONUS_VISUALS = 24;
+export const MAX_BONUS_BURSTS = 24;
 export const MAX_BONUS_PLAYER_VISUALS = 24;
 export const BONUS_DECAL_OFFSET = 0.065;
 export const BONUS_BURST_LIFE_S = 0.32;
@@ -92,13 +93,16 @@ export class SuperBonusVisuals {
   private readonly bursts: Burst[] = [];
   private readonly seen = new Set<string>();
   private readonly seenPlayers = new Set<string>();
+  // A replicated short-lived burst can arrive in several patches, or briefly
+  // disappear. Keep its ID until its deadline so it renders exactly once.
+  private readonly confirmedBursts = new Map<string, number>();
   private disposed = false;
 
   public constructor(private readonly scene: THREE.Scene) {
     this.root.name = "super-bonus-effects";
     scene.add(this.root);
     for (let i = 0; i < MAX_BONUS_VISUALS; i += 1) this.slots.push({ id: null, snapshot: null, variants: new Map(), visual: null });
-    for (let i = 0; i < 4; i += 1) {
+    for (let i = 0; i < MAX_BONUS_BURSTS; i += 1) {
       const group = new THREE.Group();
       group.name = "bonus-explosion";
       const ring = new THREE.Mesh(this.rim, this.burstMaterial);
@@ -224,7 +228,8 @@ export class SuperBonusVisuals {
     burst.age = 0;
     burst.radius = Math.max(0.25, Math.min(4, snapshot.radius));
     burst.group.visible = true;
-    burst.group.position.set(snapshot.x, snapshot.y + BONUS_DECAL_OFFSET, snapshot.z);
+    burst.group.position.set(snapshot.x, snapshot.y + (snapshot.kind === "grenade" ? 0 : BONUS_DECAL_OFFSET), snapshot.z);
+    burst.group.userData["effectId"] = snapshot.effectId;
     burst.group.scale.setScalar(0.2);
   }
 
@@ -244,10 +249,12 @@ export class SuperBonusVisuals {
 
   public sync(effects: readonly NetBonusEffectSnapshot[], players: readonly NetPlayerSnapshot[], serverNow: number): void {
     if (this.disposed || !Number.isFinite(serverNow)) return;
+    for (const [id, expiresAt] of this.confirmedBursts) if (expiresAt <= serverNow) this.confirmedBursts.delete(id);
     this.seen.clear();
     for (const effect of effects) {
       if (this.seen.size >= MAX_BONUS_VISUALS) break;
       if (!isSuperBonusKind(effect.kind) || !effect.effectId || ![effect.x, effect.y, effect.z, effect.radius, effect.expiresAt].every(Number.isFinite) || effect.expiresAt <= serverNow) continue;
+      if (effect.kind === "grenade" && effect.phase !== "burst") continue;
       this.seen.add(effect.effectId);
     }
     for (const slot of this.slots) {
@@ -256,10 +263,26 @@ export class SuperBonusVisuals {
     for (const effect of effects) {
       if (!this.seen.has(effect.effectId)) continue;
       if (!isSuperBonusKind(effect.kind) || ![effect.x, effect.y, effect.z, effect.radius, effect.expiresAt].every(Number.isFinite) || effect.expiresAt <= serverNow) continue;
+      if (effect.kind === "grenade" && effect.phase !== "burst") continue;
       let slot = this.slots.find((candidate) => candidate.id === effect.effectId);
       slot ??= this.slots.find((candidate) => candidate.id === null);
       if (slot === undefined) continue;
       if (slot.visual !== null) slot.visual.group.visible = false;
+      if (effect.kind === "grenade") {
+        slot.id = effect.effectId;
+        slot.snapshot = { ...effect };
+        slot.visual = null;
+        if (!this.confirmedBursts.has(effect.effectId)) {
+          this.burstAt(effect);
+          this.confirmedBursts.set(effect.effectId, effect.expiresAt);
+          // Bound memory even if a malformed stream supplies extreme deadlines.
+          if (this.confirmedBursts.size > MAX_BONUS_VISUALS * 4) {
+            const oldest = this.confirmedBursts.keys().next().value as string | undefined;
+            if (oldest !== undefined) this.confirmedBursts.delete(oldest);
+          }
+        }
+        continue;
+      }
       let visual = slot.variants.get(effect.kind);
       if (visual === undefined) {
         visual = this.createEffect(effect.kind);
@@ -411,6 +434,7 @@ export class SuperBonusVisuals {
 
   public update(dt: number, serverNow: number): void {
     if (this.disposed || !Number.isFinite(serverNow)) return;
+    for (const [id, expiresAt] of this.confirmedBursts) if (expiresAt <= serverNow) this.confirmedBursts.delete(id);
     for (const slot of this.slots) {
       if (slot.snapshot !== null && slot.snapshot.expiresAt <= serverNow) this.release(slot, serverNow, false);
     }
@@ -434,6 +458,7 @@ export class SuperBonusVisuals {
     }
     this.seen.clear();
     this.seenPlayers.clear();
+    this.confirmedBursts.clear();
   }
 
   public dispose(): void {

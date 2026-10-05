@@ -10,11 +10,11 @@ function meshes(group: THREE.Group): THREE.Mesh[] {
 }
 
 describe("shared primitive bonus models", () => {
-  it("gives all ten items distinct compact silhouettes with useful landmarks at night", () => {
+  it("gives all eleven items distinct compact silhouettes with useful landmarks at night", () => {
     const library = new SuperBonusModels();
     try {
       const signatures = new Set<string>();
-      const landmarks = ["fleece", "beak", "ice-brick", "sausage-horseshoe", "jelly-mould", "herring-tin", "mud-package", "thermos", "soda-bottle", "vacuum-nozzle"];
+      const landmarks = ["fleece", "beak", "ice-brick", "sausage-horseshoe", "jelly-mould", "herring-tin", "mud-package", "thermos", "soda-bottle", "vacuum-nozzle", "grenade-shell"];
       SUPER_BONUS_KINDS.forEach((kind, index) => {
         const group = library.create(kind);
         const pieces = meshes(group);
@@ -36,10 +36,29 @@ describe("shared primitive bonus models", () => {
         group.traverse((object) => { if (object instanceof THREE.Light) lights += 1; });
         expect(lights).toBe(0);
       });
-      expect(signatures.size).toBe(10);
+      expect(signatures.size).toBe(11);
     } finally {
       library.dispose();
     }
+  });
+
+  it("makes the grenade readable from its green shell, metal cap and pin with shared solid materials", () => {
+    const library = new SuperBonusModels();
+    try {
+      const grenade = library.create("grenade");
+      const pieces = meshes(grenade);
+      expect(pieces).toHaveLength(3);
+      const shell = pieces.find((mesh) => mesh.name.includes("grenade-shell"))!;
+      expect((shell.material as THREE.MeshStandardMaterial).color.getHex()).toBe(0x7a9859);
+      const metal = pieces.find((mesh) => mesh.name.includes("grenade-metal-cap"))!;
+      expect(metal.name).toContain("grenade-pin");
+      expect(metal.name).toContain("grenade-lever");
+      expect((metal.material as THREE.MeshStandardMaterial).metalness).toBeGreaterThan(0);
+      for (const mesh of pieces) {
+        expect((mesh.material as THREE.MeshStandardMaterial).transparent).toBe(false);
+        expect((mesh.material as THREE.MeshStandardMaterial).emissiveIntensity).toBeGreaterThanOrEqual(0.3);
+      }
+    } finally { library.dispose(); }
   });
 
   it("shares GPU resources across models and disposes each owned resource once", () => {

@@ -9,13 +9,15 @@ function surface(effectId: string, kind: string, overrides: Partial<TemporarySur
 }
 
 describe("selected central items", () => {
-  it("includes exactly the owner's ten and rejects catalogue alternatives", () => {
-    expect(SUPER_BONUSES.map(({ id }) => id)).toEqual(["01", "02", "05", "08", "14", "16", "17", "18", "23", "26"]);
-    expect(new Set(SUPER_BONUSES.map(({ kind }) => kind)).size).toBe(10);
+  it("includes the owner's eleven including the grenade and rejects catalogue alternatives", () => {
+    expect(SUPER_BONUSES.map(({ id }) => id)).toEqual(["01", "02", "05", "08", "14", "16", "17", "18", "23", "26", "31"]);
+    expect(new Set(SUPER_BONUSES.map(({ kind }) => kind)).size).toBe(11);
     expect(isSuperBonusKind("sheep")).toBe(true);
     expect(isSuperBonusKind("pineapple")).toBe(false);
     expect(isSuperBonusKind(undefined)).toBe(false);
     expect(getSuperBonus("turkey")?.name).toBe("Индейка-каска");
+    expect(isSuperBonusKind("grenade")).toBe(true);
+    expect(getSuperBonus("grenade")?.name).toBe("Граната");
   });
   it("keeps all later-effect damage out of the extra direct hit component", () => {
     for (const kind of ["sheep", "herring", "soda", "swamp", "ice", "vacuum"]) {
@@ -27,6 +29,8 @@ describe("selected central items", () => {
     expect(directBonusDamage("jelly", 1)).toBe(12.5);
     expect(directBonusDamage("boomerang", 0.7999)).toBe(12.5);
     expect(directBonusDamage("boomerang", 0.8)).toBe(25);
+    expect(directBonusDamage("grenade", 0.5)).toBe(25);
+    expect(directBonusDamage("grenade", 1)).toBe(25);
     expect(directBonusDamage("unknown", 1)).toBe(0);
   });
 });

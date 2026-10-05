@@ -267,6 +267,8 @@ export interface NetBallSnapshot {
   super: boolean;
   color: number;
   bonusKind?: SuperBonusKind | "";
+  // Optional for old snapshots: only the grenade's smaller projectiles set it.
+  grenadeFragment?: boolean;
   ricochet?: boolean;
   resting?: boolean;
   rolling?: boolean;

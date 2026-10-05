@@ -1,5 +1,6 @@
 import {
   CONTROL_IMMUNITY_MS, directBonusDamage, FREEZE_MS, MAX_SHEEP,
+  GRENADE_BURST_MS, GRENADE_FRAGMENT_DAMAGE, GRENADE_FRAGMENT_RADIUS,
   SUPER_BONUS_KINDS, SUPER_BONUS_SLOT_MS, TEMPORARY_SWAMP_SPEED_MULT, TURKEY_MS,
   type SuperBonusKind,
 } from "../../shared/super-bonuses.mjs";
@@ -143,6 +144,7 @@ export function bonusSupportBelow(x: number, y: number, z: number): number | nul
 
 export class SuperBonusSystem {
   private readonly ledgers = new Map<string, ThrowLedger>();
+  private readonly parentThrows = new Map<string, string>();
   private readonly runtime = new Map<string, EffectRuntime>();
   private bag: SuperBonusKind[] = [];
   private lastKind: SuperBonusKind | "" = "";
@@ -206,9 +208,15 @@ export class SuperBonusSystem {
     if (player.controlImmuneUntil && now >= player.controlImmuneUntil) player.controlImmuneUntil = 0;
   }
   public register(ball: BallState): void {
-    this.ledgers.set(ball.ballId, { direct: new Set(), scored: new Set(), killed: new Set(), cloudDamage: new Map() });
+    const throwId = ball.grenadeParentId || ball.ballId;
+    if (ball.grenadeParentId) this.parentThrows.set(ball.ballId, throwId);
+    this.ledger(throwId);
   }
-  public forgetBall(ballId: string): void { this.releaseLedger(ballId); }
+  public forgetBall(ballId: string): void {
+    const throwId = this.parentThrows.get(ballId) ?? ballId;
+    this.parentThrows.delete(ballId);
+    this.releaseLedger(throwId);
+  }
   private ledger(throwId: string): ThrowLedger {
     let ledger = this.ledgers.get(throwId);
     if (ledger === undefined) {
@@ -218,20 +226,25 @@ export class SuperBonusSystem {
     return ledger;
   }
   private releaseLedger(throwId: string): void {
-    if (this.host.state.balls.has(throwId)) return;
+    for (const ball of this.host.state.balls.values()) if ((ball.grenadeParentId || ball.ballId) === throwId) return;
     for (const effect of this.host.state.bonusEffects.values()) if (effect.throwId === throwId) return;
     this.ledgers.delete(throwId);
+    for (const [ballId, parentId] of this.parentThrows) if (parentId === throwId) this.parentThrows.delete(ballId);
   }
   public clear(): void {
     this.host.state.bonusEffects.clear();
     this.runtime.clear();
     this.ledgers.clear();
+    this.parentThrows.clear();
     this.host.state.players.forEach((player) => this.clearPlayer(player));
     this.host.state.superKind = "";
     this.host.state.superActive = false;
   }
   public removeOwner(ownerId: string): void {
-    for (const [id, ball] of this.host.state.balls) if (ball.ownerId === ownerId && ball.bonusKind) this.host.state.balls.delete(id);
+    for (const [id, ball] of this.host.state.balls) if (ball.ownerId === ownerId && ball.bonusKind) {
+      this.host.state.balls.delete(id);
+      this.forgetBall(id);
+    }
     for (const [id, effect] of this.host.state.bonusEffects) if (effect.ownerId === ownerId) this.removeEffect(id);
     for (const id of this.ledgers.keys()) this.releaseLedger(id);
   }
@@ -280,6 +293,31 @@ export class SuperBonusSystem {
     }
   }
   public alreadyHit(ball: BallState, player: PlayerState): boolean { return this.ledgers.get(ball.ballId)?.direct.has(player.sessionId) ?? false; }
+
+  // A main contact is a visual burst only. A child contact deals exactly
+  // half a heart once, with no ordinary projectile damage and no timer.
+  public grenadeBurst(ball: BallState, now: number): void {
+    const effect = new BonusEffectState();
+    effect.effectId = `${ball.ballId}:burst`;
+    effect.throwId = ball.grenadeParentId || ball.ballId;
+    effect.ownerId = ball.ownerId;
+    effect.kind = "grenade";
+    effect.phase = "burst";
+    effect.x = ball.x; effect.y = ball.y; effect.z = ball.z;
+    effect.radius = ball.grenadeFragment ? GRENADE_FRAGMENT_RADIUS : 0.6;
+    effect.createdAt = now;
+    effect.expiresAt = now + GRENADE_BURST_MS;
+    this.host.state.bonusEffects.set(effect.effectId, effect);
+    if (!ball.grenadeFragment) return;
+    for (const player of this.host.state.players.values()) {
+      // Distance to the fighter's vertical body preserves the one-metre
+      // floor radius while excluding targets on a different support level.
+      const closestY = Math.max(player.y - BODY_CENTER_Y, Math.min(player.y + 0.6, effect.y));
+      if (Math.hypot(player.x - effect.x, closestY - effect.y, player.z - effect.z) > effect.radius
+        || !bonusLineOfSight(effect.x, effect.y, effect.z, player.x, player.y, player.z)) continue;
+      this.damage(effect.throwId, effect.ownerId, player, GRENADE_FRAGMENT_DAMAGE, now, effect.x, effect.y, effect.z);
+    }
+  }
 
   public install(ball: BallState, now: number, x = ball.x, y = ball.y, z = ball.z): void {
     if (!["sheep", "herring", "swamp", "ice", "soda", "vacuum"].includes(ball.bonusKind)) return;

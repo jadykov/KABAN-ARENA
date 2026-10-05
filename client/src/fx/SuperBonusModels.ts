@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { getSuperBonus, type SuperBonusKind } from "../../../shared/super-bonuses.mjs";
 
 type Shape = "sphere" | "box" | "cylinder" | "cone" | "ring" | "sausage";
-type Paint = "wool" | "dark" | "red" | "brown" | "orange" | "silver" | "blue" | "ice" | "green" | "mud" | "jelly" | "purple";
+type Paint = "wool" | "dark" | "red" | "brown" | "orange" | "silver" | "blue" | "ice" | "green" | "mud" | "jelly" | "purple" | "olive";
 type Triple = readonly [number, number, number];
 interface Part {
   shape: Shape;
@@ -18,6 +18,7 @@ const PAINTS: Record<Paint, number> = {
   wool: 0xfff7e7, dark: 0x28313a, red: 0xf1434b, brown: 0x995236,
   orange: 0xffa443, silver: 0xd5e4ea, blue: 0x349ac7, ice: 0xb3f0ff,
   green: 0xb3d873, mud: 0x657844, jelly: 0xf0bf67, purple: 0xad85dd,
+  olive: 0x7a9859,
 };
 
 const part = (name: string, shape: Shape, paint: Paint, position: Triple, scale: Triple, rotation?: Triple, moving = false): Part =>
@@ -105,6 +106,14 @@ function partsFor(kind: SuperBonusKind): Part[] {
       part("vacuum-hose", "sausage", "dark", [0, 0.06, -0.1], [0.6, 0.65, 0.6], [Math.PI / 2, 0, 0]),
       part("vacuum-nozzle", "box", "silver", [0.17, -0.2, -0.27], [0.24, 0.10, 0.17]),
       part("vacuum-light", "sphere", "green", [-0.12, 0.225, -0.06], [0.03, 0.02, 0.03]),
+    ];
+    case "grenade": return [
+      part("grenade-shell", "sphere", "olive", [0, -0.04, 0], [0.26, 0.32, 0.26]),
+      part("grenade-shell-band", "cylinder", "dark", [0, -0.03, 0], [0.265, 0.035, 0.265]),
+      part("grenade-neck", "cylinder", "dark", [0, 0.27, 0], [0.12, 0.10, 0.12]),
+      part("grenade-metal-cap", "box", "silver", [0, 0.34, 0], [0.23, 0.07, 0.13]),
+      part("grenade-lever", "box", "silver", [0.22, 0.12, 0], [0.055, 0.43, 0.10], [0, 0, 0.32]),
+      part("grenade-pin", "ring", "silver", [-0.17, 0.32, 0], [0.085, 0.085, 0.085]),
     ];
   }
 }

@@ -34,6 +34,7 @@ export const SUPER_INNER_COLOR = NEUTRAL_WHITE;
 export const BALL_NEUTRAL_BASE = BALL_BASE;
 // Fired SUPER ball visual scale (group scale multiplier vs a normal core).
 export const SUPER_BALL_SCALE = 2;
+export const GRENADE_FRAGMENT_SCALE = 0.5;
 // Ball snapshot smoothing: exponential lerp rate (1/s) toward the latest
 // authoritative target; teleports beyond SNAP snap immediately (respawn/warp).
 export const BALL_LERP_RATE = 20;
@@ -270,6 +271,7 @@ interface TrackedBall {
   z: number;
   super: boolean;
   color: number;
+  grenade: boolean;
 }
 
 // Reused across render() calls so no Set is allocated per frame.
@@ -485,7 +487,7 @@ export class BallsPool {
       this.slotIds[i] = null;
       const last = this.tracked.get(slotId);
       this.tracked.delete(slotId);
-      if (last !== undefined && !this.consumePlayerHit(slotId)) {
+      if (last !== undefined && !this.consumePlayerHit(slotId) && !last.grenade) {
         this.spawnEnvPuff(last.x, last.y, last.z, last.super);
       }
     }
@@ -517,6 +519,7 @@ export class BallsPool {
           z: ball.z,
           super: ball.super === true,
           color: ball.color,
+          grenade: ball.bonusKind === "grenade",
         });
         continue;
       }
@@ -551,7 +554,7 @@ export class BallsPool {
       // SUPER cores read the x2 buff at a glance: the whole group scales by
       // SUPER_BALL_SCALE; normal cores stay at scale 1 (reset on reuse so a
       // recycled SUPER slot never keeps a giant normal core).
-      group.scale.setScalar(bonusKind === undefined && isSuper ? SUPER_BALL_SCALE : 1);
+      group.scale.setScalar(bonusKind === "grenade" && ball.grenadeFragment === true ? GRENADE_FRAGMENT_SCALE : bonusKind === undefined && isSuper ? SUPER_BALL_SCALE : 1);
       const skin = this.skinFor(ball.color);
       const body = group.children[0] as THREE.Mesh | undefined;
       if (body !== undefined) {
@@ -573,14 +576,16 @@ export class BallsPool {
         }
       }
       this.slotKinds[slot] = bonusKind;
-      this.tracked.set(ball.ballId, { x: ball.x, y: ball.y, z: ball.z, super: isSuper, color: ball.color });
+      this.tracked.set(ball.ballId, { x: ball.x, y: ball.y, z: ball.z, super: isSuper, color: ball.color, grenade: bonusKind === "grenade" });
     }
     // Defensive: tracked ids that never got a slot (pool-exhausted edge)
     // still vanish quietly; player-hit marks are honored here too.
     for (const [ballId, last] of this.tracked) {
       if (!renderSeen.has(ballId)) {
         this.tracked.delete(ballId);
-        if (!this.consumePlayerHit(ballId)) {
+        // Grenade explosions come only from an explicit server burst; expiry,
+        // disconnect and the parent splitting must not invent an impact.
+        if (!this.consumePlayerHit(ballId) && !last.grenade) {
           this.spawnEnvPuff(last.x, last.y, last.z, last.super);
         }
       }
@@ -639,7 +644,7 @@ export class BallsPool {
             if (kind === "boomerang") model.rotation.z += this.animationTime * 15;
           }
         }
-        this.showTrailsForSlot(i, group.position, this.superFlags[i] === true, this.slotColors[i] ?? BALL_CAP_COLOR);
+        this.showTrailsForSlot(i, group.position, this.superFlags[i] === true, this.slotColors[i] ?? BALL_CAP_COLOR, kind === "grenade" ? group.scale.x : 1);
       }
       // No SUPER pulse: the flying SUPER core is one smooth sphere (same
       // silhouette as a normal core) — the chartreuse skin + white marking +
@@ -752,7 +757,7 @@ export class BallsPool {
   // trails would reintroduce the garishness the redesign removes). SUPER
   // trails stay chartreuse. The ownerColor parameter is kept for call-site
   // back-compat and is intentionally ignored for normal balls.
-  private showTrailsForSlot(slot: number, position: THREE.Vector3, isSuper: boolean, _ownerColor: number): void {
+  private showTrailsForSlot(slot: number, position: THREE.Vector3, isSuper: boolean, _ownerColor: number, projectileScale = 1): void {
     const tint = getSuperBonus(this.slotKinds[slot])?.color ?? (isSuper ? TRAIL_SUPER_COLOR : TRAIL_GOLD_COLOR);
     for (let k = 0; k < TRAILS_PER_BALL; k += 1) {
       const sprite = this.trails[slot * TRAILS_PER_BALL + k];
@@ -761,7 +766,7 @@ export class BallsPool {
       }
       sprite.visible = true;
       sprite.position.copy(position);
-      const scale = TRAIL_SCALES[k] ?? 0.3;
+      const scale = (TRAIL_SCALES[k] ?? 0.3) * projectileScale;
       sprite.scale.set(scale, scale, 1);
       const material = sprite.material as THREE.SpriteMaterial;
       material.color.set(tint);

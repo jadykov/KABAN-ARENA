@@ -79,6 +79,7 @@ export class BallState extends Schema {
   @type("number") power01 = 0.5;
   @type("boolean") super = false;
   @type("string") bonusKind = "";
+  @type("boolean") grenadeFragment = false;
   @type("number") ageMs = 0;
   @type("number") distM = 0;
   @type("boolean") ricochet = false;
@@ -91,6 +92,9 @@ export class BallState extends Schema {
   public originZ = 0;
   public returning = false;
   public bonusHit = false;
+  // Children share one scoring/kill ledger with their original throw. The
+  // parent ID is server-only; clients render the replicated fragment flag.
+  public grenadeParentId = "";
 }
 
 export class BonusEffectState extends Schema {

@@ -5,9 +5,13 @@ export const MAX_SHEEP = 2;
 export const FREEZE_MS = 1_000;
 export const TURKEY_MS = 2_000;
 export const CONTROL_IMMUNITY_MS = 2_000;
-// Bonus swamp halves its previous 40% speed penalty; fixed map swamp has
-// separate tuning and retains its stronger slowdown.
-export const TEMPORARY_SWAMP_SPEED_MULT = 0.8;
+// Fixed map swamp leaves 22% speed (78% slowdown). The bonus patch applies
+// half that slowdown (39%), so players and sheep retain 61% speed.
+export const TEMPORARY_SWAMP_SPEED_MULT = 0.61;
+export const GRENADE_FRAGMENT_COUNT = 3;
+export const GRENADE_FRAGMENT_DAMAGE = 12.5;
+export const GRENADE_FRAGMENT_RADIUS = 1;
+export const GRENADE_BURST_MS = 250;
 
 export const SUPER_BONUSES = Object.freeze([
   { id: "01", kind: "sheep", name: "Взрывная овца", hint: "Преследует ближайшего. Опасна и тебе!", color: 0xffe9cd, directWeak: 0, directStrong: 0 },
@@ -20,6 +24,7 @@ export const SUPER_BONUSES = Object.freeze([
   { id: "18", kind: "ice", name: "Карманный каток", hint: "На 5 секунд меняет поверхность на лёд", color: 0x6dbffc, directWeak: 0, directStrong: 0 },
   { id: "23", kind: "soda", name: "Газировка с сюрпризом", hint: "Ставит заметную мину. Опасна и тебе!", color: 0xf69538, directWeak: 0, directStrong: 0 },
   { id: "26", kind: "vacuum", name: "Шар-пылесос", hint: "На 2 секунды притягивает игроков поблизости", color: 0xad85dd, directWeak: 0, directStrong: 0 },
+  { id: "31", kind: "grenade", name: "Граната", hint: "Попадание: +1 сердце. Промах: 3 малых взрыва", color: 0x7a9859, directWeak: 25, directStrong: 25 },
 ].map((definition) => Object.freeze(definition)));
 
 export const SUPER_BONUS_KINDS = Object.freeze(SUPER_BONUSES.map(({ kind }) => kind));
