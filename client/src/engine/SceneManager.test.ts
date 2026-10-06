@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AdsManager, getShopfrontTransforms } from "../ads/AdsLoader";
+import { AdsManager } from "../ads/AdsLoader";
 import { ArenaBuilder } from "../arena/Arena";
 import { PhysicsWorld } from "../physics/World";
 import {
@@ -986,22 +986,22 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
     expect(clouds.material.map).toBeInstanceOf(THREE.DataTexture);
   });
 
-  it("turns shop porches on by real final-minute time and resets them for day", async () => {
+  it("starts the shop porch fade with night at 1:30 remaining and resets it for day", async () => {
     const porch = vi.spyOn(AdsManager.prototype, "setPorchLighting");
     try {
       const { manager } = await createManagerWithScene();
       expect(porch).toHaveBeenLastCalledWith(0);
       manager.setDayProgress(82.5 / 180);
       expect(porch).toHaveBeenLastCalledWith(0);
-      manager.setDayProgress(119.999 / 180);
+      manager.setDayProgress(89.999 / 180);
       expect(porch).toHaveBeenLastCalledWith(0);
-      manager.setDayProgress(2 / 3);
+      manager.setDayProgress(90 / 180);
       expect(porch).toHaveBeenLastCalledWith(0);
-      manager.setDayProgress(0.685);
+      manager.setDayProgress(90.001 / 180);
       const partial = porch.mock.lastCall?.[0] ?? 0;
       expect(partial).toBeGreaterThan(0);
       expect(partial).toBeLessThan(1);
-      manager.setDayProgress(0.72);
+      manager.setDayProgress(96.3 / 180);
       expect(porch).toHaveBeenLastCalledWith(1);
       manager.setDayProgress(1);
       expect(porch).toHaveBeenLastCalledWith(1);
@@ -1022,7 +1022,7 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
   it("restores lighting, sky and real-time firefly fades when time arrives before or after build", () => {
     const porch = vi.spyOn(AdsManager.prototype, "setPorchLighting");
     try {
-      for (const elapsed of [0, 20, 75, 80, 82.5, 89, 90, 119, 120, 123, 179, 180]) {
+      for (const elapsed of [0, 20, 75, 80, 82.5, 89, 90, 90.001, 93.15, 96.3, 120, 179, 180]) {
         const lateScene = new THREE.Scene();
         const late = new SceneManager(lateScene, new THREE.PerspectiveCamera());
         const readyScene = new THREE.Scene();
@@ -1047,11 +1047,11 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
           expect(before.material.opacity).toBe(after.material.opacity);
         }
         // This expected fade is based on actual elapsed time, not sky progress.
-        const fadeTime = Math.max(0, Math.min(1, (elapsed - 120) / 6.3));
+        const fadeTime = Math.max(0, Math.min(1, (elapsed - 90) / 6.3));
         const fade = fadeTime * fadeTime * (3 - 2 * fadeTime);
         expect(porch).toHaveBeenLastCalledWith(expect.closeTo(fade, 12));
         const swarm = lateScene.getObjectByName("fireflies") as THREE.InstancedMesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
-        expect(swarm.visible).toBe(elapsed > 120);
+        expect(swarm.visible).toBe(elapsed > 90);
         expect(swarm.material.opacity).toBeCloseTo(FIREFLY_OPACITY * fade, 12);
         if (elapsed <= 75) expectLightingClose(readLightingChannels(lateScene), originalLightingAt(20));
         if (elapsed >= 90) expectLightingClose(readLightingChannels(lateScene), originalLightingAt(167.5));
@@ -1088,18 +1088,18 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
       ["trampoline-night-rims", 0.92], ["trampoline-ground-spill", 0.14 * 1.30],
       ["trampoline-block-spill", 0.16 * 1.30], ["suburban-window-glow", 0.68],
     ] as const;
-    for (const elapsed of [0, 105, 119.999, 120, 121, 123.15, 126.3, 180]) {
+    for (const elapsed of [0, 75, 89.999, 90, 90.001, 91, 93.15, 96.3, 180]) {
       const scene = new THREE.Scene();
       const manager = new SceneManager(scene, new THREE.PerspectiveCamera());
       managers.push(manager);
       manager.setDayProgress(elapsed / 180);
       manager.build();
-      const time = Math.max(0, Math.min(1, (elapsed - 120) / 6.3));
+      const time = Math.max(0, Math.min(1, (elapsed - 90) / 6.3));
       const fade = time * time * (3 - 2 * time);
       for (const [name, maximum] of batches) {
         const mesh = scene.getObjectByName(name) as THREE.InstancedMesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
         expect(mesh).toBeInstanceOf(THREE.InstancedMesh);
-        expect(mesh.visible).toBe(elapsed > 120);
+        expect(mesh.visible).toBe(elapsed > 90);
         expect(mesh.material.opacity).toBeCloseTo(maximum * fade, 10);
       }
       let lights = 0;
@@ -1147,7 +1147,7 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
     expect(scene.getObjectByName("sky-gradient")).toBeUndefined();
   });
 
-  it("reveals 6 fireflies with the final-minute shop lights, then resets them", async () => {
+  it("reveals 6 fireflies with the shared 1:30 night lighting fade, then resets them", async () => {
     // 4d.3 feedback round: 8 -> 6, base glow halved, blink + behaviors.
     expect(FIREFLY_COUNT).toBe(6);
     expect(FIREFLY_OPACITY).toBe(0.45);
@@ -1177,19 +1177,19 @@ describe("SceneManager enclosure, nebulae and fireflies", () => {
     expect(material.depthWrite).toBe(false);
     expect(swarm.visible).toBe(false);
     expect(material.opacity).toBe(0);
-    manager.setDayProgress(115 / 180);
+    manager.setDayProgress(89 / 180);
     expect((scene.getObjectByName("moon") as THREE.Mesh).visible).toBe(true);
     expect((scene.getObjectByName("stars") as THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>).material.opacity).toBeGreaterThan(0);
     expect(swarm.visible).toBe(false);
-    manager.setDayProgress(119.999 / 180);
+    manager.setDayProgress(89.999 / 180);
     expect(swarm.visible).toBe(false);
-    manager.setDayProgress(2 / 3);
+    manager.setDayProgress(90 / 180);
     expect(swarm.visible).toBe(false);
-    manager.setDayProgress(0.685);
+    manager.setDayProgress(93.15 / 180);
     expect(swarm.visible).toBe(true);
     expect(material.opacity).toBeGreaterThan(0);
     expect(material.opacity).toBeLessThan(FIREFLY_OPACITY);
-    manager.setDayProgress(0.72);
+    manager.setDayProgress(96.3 / 180);
     expect(material.opacity).toBeCloseTo(FIREFLY_OPACITY, 10);
     // Run frames so the billboard/bob update writes instance matrices, then
     // verify every firefly hovers above head height (~2.1 capsule top) and
@@ -2009,6 +2009,73 @@ describe("SceneManager out-of-band RMB tolerance (F3 fix)", () => {
   });
 });
 
+describe("SceneManager sky aircraft lifecycle", () => {
+  function setup(elapsedBeforeBuild = 0): { manager: SceneManager; scene: THREE.Scene; plane: THREE.Mesh; trails: THREE.Mesh } {
+    const scene = new THREE.Scene();
+    const manager = new SceneManager(scene, new THREE.PerspectiveCamera());
+    managers.push(manager);
+    manager.setDayProgress(elapsedBeforeBuild / 180);
+    manager.build();
+    return { manager, scene, plane: scene.getObjectByName("sky-airplane") as THREE.Mesh,
+      trails: scene.getObjectByName("airplane-contrails") as THREE.Mesh };
+  }
+
+  it("follows authoritative time for late join, sunset, direct night jumps and the next round", () => {
+    const live = setup();
+    expect(live.plane.visible).toBe(false);
+    expect(live.trails.visible).toBe(false);
+    live.manager.setDayProgress(26 / 180);
+    expect(live.plane.visible).toBe(true);
+    expect(live.trails.visible).toBe(true);
+    const late = setup(26);
+    expect(late.plane.position.toArray()).toEqual(live.plane.position.toArray());
+    expect(late.plane.visible).toBe(true);
+    expect(late.trails.visible).toBe(true);
+    const before = live.plane.position.clone();
+    live.manager.setWildlifeSnapshot([], true, null);
+    live.manager.update(0.2, NO_MOVE, NO_LOOK);
+    expect(live.plane.position.equals(before)).toBe(true);
+    for (const elapsed of [90, 120, 180]) {
+      live.manager.setDayProgress(26 / 180);
+      live.manager.setDayProgress(elapsed / 180);
+      expect(live.plane.visible).toBe(false);
+      expect(live.trails.visible).toBe(false);
+      const nighttimeJoin = setup(elapsed);
+      expect(nighttimeJoin.plane.visible).toBe(false);
+      expect(nighttimeJoin.trails.visible).toBe(false);
+    }
+    live.manager.setDayProgress(0);
+    expect(live.plane.visible).toBe(false);
+    expect(live.trails.visible).toBe(false);
+    live.manager.setDayProgress(26 / 180);
+    expect(live.plane.position.toArray()).toEqual(late.plane.position.toArray());
+  });
+
+  it("hides on match reset, disposes the fixed meshes and rebuilds a fresh daytime pool", () => {
+    const { manager, scene, plane, trails } = setup(26);
+    const planeGeometry = vi.spyOn(plane.geometry, "dispose");
+    const planeMaterial = vi.spyOn(plane.material as THREE.Material, "dispose");
+    const trailGeometry = vi.spyOn(trails.geometry, "dispose");
+    const trailMaterial = vi.spyOn(trails.material as THREE.Material, "dispose");
+    const group = scene.getObjectByName("sky-aircraft")!;
+    manager.reset();
+    expect(plane.visible).toBe(false);
+    expect(trails.visible).toBe(false);
+    manager.setDayProgress(27 / 180);
+    expect(plane.visible).toBe(true);
+    manager.dispose();
+    for (const dispose of [planeGeometry, planeMaterial, trailGeometry, trailMaterial]) expect(dispose).toHaveBeenCalledOnce();
+    expect(group.children).toHaveLength(0);
+    expect(scene.getObjectByName("sky-aircraft")).toBeUndefined();
+    manager.build();
+    const next = scene.getObjectByName("sky-airplane") as THREE.Mesh;
+    expect(next).not.toBe(plane);
+    expect(next.visible).toBe(false);
+    manager.setDayProgress(26 / 180);
+    expect(next.visible).toBe(true);
+  });
+});
+
 describe("SceneManager shop wildlife snapshot integration", () => {
   function setup(): { manager: SceneManager; scene: THREE.Scene; birds: THREE.InstancedMesh; rats: THREE.InstancedMesh } {
     const scene = new THREE.Scene();
@@ -2036,11 +2103,11 @@ describe("SceneManager shop wildlife snapshot integration", () => {
       expect(birds.count).toBe(0);
       manager.setWildlifeSnapshot([], true, null);
       advance(manager, 14);
-      expect(birds.count).toBe(2);
+      expect(birds.count).toBe(1);
       const matrix = new THREE.Matrix4();
       birds.getMatrixAt(0, matrix);
       const landed = new THREE.Vector3().setFromMatrixPosition(matrix);
-      expect(landed.y).toBeCloseTo(3.025, 5);
+      expect(landed.y).toBeCloseTo(0.025, 5);
       manager.setWildlifeSnapshot([visitor(landed.x, landed.z, { isBot: true })], true, null);
       manager.update(0.2, NO_MOVE, NO_LOOK);
       birds.getMatrixAt(0, matrix);
@@ -2049,9 +2116,8 @@ describe("SceneManager shop wildlife snapshot integration", () => {
       expect(birds.count).toBe(0);
       expect(rats.count).toBe(0);
       manager.setDayProgress(90 / 180);
-      const front = getShopfrontTransforms()[0]!;
-      manager.setWildlifeSnapshot([visitor(front.x, front.z)], true, null);
-      advance(manager, 0.2);
+      manager.setWildlifeSnapshot([], true, null);
+      advance(manager, 1.2);
       expect(rats.count).toBe(1);
       manager.setWildlifeSnapshot([], false, null);
       expect(rats.count).toBe(0);
@@ -2096,19 +2162,19 @@ describe("SceneManager shop wildlife snapshot integration", () => {
       manager.setDayProgress(14 / 180);
       manager.setWildlifeSnapshot([], true, null);
       advance(manager, 14);
-      expect(birds.count).toBe(2);
+      expect(birds.count).toBe(1);
       manager.setDayProgress(0);
       manager.update(0.1, NO_MOVE, NO_LOOK);
       expect(birds.count).toBe(0);
       advance(manager, 14);
-      expect(birds.count).toBe(2);
+      expect(birds.count).toBe(1);
       manager.reset();
       expect(birds.count).toBe(0);
       advance(manager, 14);
       expect(birds.count).toBe(0);
       manager.setWildlifeSnapshot([], true, null);
       advance(manager, 14);
-      expect(birds.count).toBe(2);
+      expect(birds.count).toBe(1);
       const oldWildlife = scene.getObjectByName("shop-wildlife")!;
       manager.dispose();
       expect(oldWildlife.children).toHaveLength(0);

@@ -1,338 +1,428 @@
 import * as THREE from "three";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getShopfrontTransforms } from "../ads/AdsLoader";
-import { getObstacleLayout, getPlatforms, getRamps } from "../arena/Arena";
+import { ArenaBuilder } from "../arena/Arena";
+import { ARENA_HALF_SIZE, WALL_THICKNESS, WALL_VISUAL_HEIGHT } from "../config";
+import { ARENA_LAYOUT } from "../layout";
 import { ShopWildlife } from "./ShopWildlife";
+import { getBirdSurfaces, getRatRoutes, isRatSegmentClear, isWildlifeGroundClear } from "./WildlifeLayout";
 
 type Participant = Parameters<ShopWildlife["update"]>[3][number];
 const wildlife: ShopWildlife[] = [];
-const shops = getPlatforms();
-const fronts = getShopfrontTransforms();
 
 function create(random: () => number = () => 0): ShopWildlife {
   const result = new ShopWildlife(random);
   wildlife.push(result);
   return result;
 }
-
-function batch(result: ShopWildlife, name: string): THREE.InstancedMesh {
+function seeded(seed: number): () => number {
+  return () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
+}
+function batch(result: ShopWildlife, name = "shop-birds"): THREE.InstancedMesh {
   return result.object.getObjectByName(name) as THREE.InstancedMesh;
 }
-
 function position(mesh: THREE.InstancedMesh, index = 0): THREE.Vector3 {
   const matrix = new THREE.Matrix4();
   mesh.getMatrixAt(index, matrix);
   return new THREE.Vector3().setFromMatrixPosition(matrix);
 }
-
 function participant(x: number, z: number, overrides: Partial<Participant> = {}): Participant {
   return { sessionId: "remote", x, y: 1.1, z, alive: true, spectator: false, ...overrides };
 }
-
 function advance(result: ShopWildlife, duration: number, elapsed = 0, players: readonly Participant[] = []): void {
   const steps = Math.ceil(duration * 20);
-  for (let step = 0; step < steps; step += 1) {
-    result.update(0.05, elapsed + step * 0.05, true, players, null, null);
-  }
+  for (let step = 0; step < steps; step += 1) result.update(0.05, elapsed + step * 0.05, true, players, null, null);
 }
-
-function perch(result: ShopWildlife): THREE.InstancedMesh {
-  advance(result, 14);
-  const birds = batch(result, "shop-birds");
-  expect(birds.count).toBeGreaterThanOrEqual(2);
-  expect(position(birds).y).toBeCloseTo(3.025, 5);
-  return birds;
+function landed(random = 0): { result: ShopWildlife; birds: THREE.InstancedMesh; elapsed: number } {
+  const result = create(() => random);
+  const elapsed = 10 + random * 10 + 3.5;
+  advance(result, elapsed);
+  return { result, birds: batch(result), elapsed };
 }
+afterEach(() => { for (const result of wildlife.splice(0)) result.dispose(); });
 
-afterEach(() => {
-  for (const result of wildlife.splice(0)) result.dispose();
-});
-
-describe("rare daytime visits on the arena shop roofs", () => {
-  it("stays absent outside a playing round, then arrives after 10–20 seconds and lands on a real roof", () => {
-    const result = create(() => 0.5);
-    const birds = batch(result, "shop-birds");
-    for (let step = 0; step < 500; step += 1) result.update(0.1, 0, false, [], null, null);
+describe("varied daytime flocks around the arena", () => {
+  it.each([
+    { random: 0, count: 1, height: 0.025 },
+    { random: 0.5, count: 2, height: 3.025 },
+    { random: 0.8, count: 3, height: 2.025 },
+  ])("arrives after 10–20 seconds with $count birds and lands safely", ({ random, count, height }) => {
+    const result = create(() => random);
+    const birds = batch(result);
+    for (let step = 0; step < 100; step += 1) result.update(0.1, 0, false, [], null, null);
     expect(birds.visible).toBe(false);
-    advance(result, 14.8);
+    const first = 10 + random * 10;
+    advance(result, first - 0.1);
     expect(birds.count).toBe(0);
-    advance(result, 0.4, 14.8);
-    expect(birds.count).toBe(3);
-    expect(position(birds).y).toBeGreaterThan(6);
-    expect(batch(result, "shop-bird-wings").count).toBe(6);
-    advance(result, 4, 15.2);
-    const wings = batch(result, "shop-bird-wings");
-    const wingVertices = wings.geometry.getAttribute("position");
-    for (let index = 0; index < birds.count; index += 1) {
-      const point = position(birds, index);
-      const roof = shops.find((shop) => Math.abs(point.x - shop.x) < shop.hx && Math.abs(point.z - shop.z) < shop.hz);
-      expect(roof).toBeDefined();
-      expect(point.y).toBeCloseTo(roof!.topY + 0.025, 5);
-      for (const wingIndex of [index * 2, index * 2 + 1]) {
-        const matrix = new THREE.Matrix4();
-        wings.getMatrixAt(wingIndex, matrix);
-        for (let vertex = 0; vertex < wingVertices.count; vertex += 1) {
-          const tip = new THREE.Vector3().fromBufferAttribute(wingVertices, vertex).applyMatrix4(matrix);
-          expect(tip.y).toBeGreaterThan(roof!.topY + 0.02);
+    advance(result, 3.5, first - 0.1);
+    expect(birds.count).toBe(count);
+    expect(batch(result, "shop-bird-wings").count).toBe(count * 2);
+    for (let index = 0; index < count; index += 1) expect(position(birds, index).y).toBeCloseTo(height, 5);
+  });
+
+  it("supports ground, all shop roofs, all four cargo tops, and the actual upper fence rail", () => {
+    const surfaces = getBirdSurfaces();
+    expect(new Set(surfaces.map((surface) => surface.kind))).toEqual(new Set(["ground", "fence", "roof", "cargo"]));
+    expect(surfaces.filter((surface) => surface.kind === "roof")).toHaveLength(4);
+    expect(surfaces.filter((surface) => surface.kind === "cargo")).toHaveLength(4);
+    for (const surface of surfaces.filter((entry) => entry.kind === "cargo")) {
+      expect(ARENA_LAYOUT.obstacles.some((box) => box.x === surface.x && box.z === surface.z && box.topY === 2)).toBe(true);
+    }
+    const { birds } = landed(0.3);
+    const rail = ARENA_HALF_SIZE + WALL_THICKNESS / 2;
+    expect(birds.count).toBe(1);
+    const body = new THREE.Matrix4();
+    birds.getMatrixAt(0, body);
+    const root = position(birds);
+    expect(root.y).toBeCloseTo(WALL_VISUAL_HEIGHT + 0.025, 5);
+    for (const side of [-1, 1]) {
+      const foot = new THREE.Vector3(side * 0.04, 0.013, 0.04).applyMatrix4(body);
+      const onX = Math.abs(Math.abs(foot.x) - rail) < 0.01;
+      const onZ = Math.abs(Math.abs(foot.z) - rail) < 0.01;
+      expect(onX || onZ).toBe(true);
+    }
+  });
+
+  it("lets independent groups overlap while retaining six birds and at most three locations", () => {
+    let foundThreePlaces = false;
+    let foundSix = false;
+    const counts = new Set<number>();
+    for (let seed = 1; seed <= 20; seed += 1) {
+      const result = create(seeded(seed));
+      const birds = batch(result);
+      for (let step = 0; step < 1450; step += 1) {
+        result.update(0.05, step * 0.05, true, [], null, null);
+        expect(birds.count).toBeLessThanOrEqual(6);
+        if (birds.count === 6) foundSix = true;
+        counts.add(birds.count);
+        const places: THREE.Vector3[] = [];
+        for (let index = 0; index < birds.count; index += 1) {
+          const point = position(birds, index);
+          if (![0.025, 2.025, 3.025, 3.525].some((y) => Math.abs(point.y - y) < 1e-5)) continue;
+          if (!places.some((other) => Math.hypot(point.x - other.x, point.z - other.z) < 2)) places.push(point);
+        }
+        if (places.length >= 3) foundThreePlaces = true;
+      }
+    }
+    expect(counts).toEqual(new Set([0, 1, 2, 3, 4, 5, 6]));
+    expect(foundSix).toBe(true);
+    expect(foundThreePlaces).toBe(true);
+  });
+
+  it("varies actual perches and keeps all settled body footprints off forbidden surfaces", () => {
+    const kinds = new Set<string>();
+    const positions = new Set<string>();
+    let checked = 0;
+    for (let seed = 30; seed < 45; seed += 1) {
+      const result = create(seeded(seed));
+      const birds = batch(result);
+      for (let step = 0; step < 700; step += 1) {
+        result.update(0.1, step * 0.1, true, [], null, null);
+        for (let index = 0; index < birds.count; index += 1) {
+          const point = position(birds, index);
+          const surface = getBirdSurfaces().find((candidate) => Math.abs(point.y - candidate.y - 0.025) < 1e-5
+            && Math.abs(point.x - candidate.x) < Math.max(candidate.hx, 0.05) + 0.1
+            && Math.abs(point.z - candidate.z) < Math.max(candidate.hz, 0.05) + 0.1);
+          if (surface === undefined) continue;
+          kinds.add(surface.kind);
+          positions.add(`${point.x.toFixed(2)},${point.z.toFixed(2)}`);
+          checked += 1;
+          if (surface.kind === "ground") expect(isWildlifeGroundClear(point.x, point.z)).toBe(true);
+          if (surface.kind === "roof" || surface.kind === "cargo") {
+            expect(Math.abs(point.x - surface.x)).toBeLessThanOrEqual(surface.hx - 0.31);
+            expect(Math.abs(point.z - surface.z)).toBeLessThanOrEqual(surface.hz - 0.31);
+          }
+          for (const spawn of ARENA_LAYOUT.spawns) expect(Math.hypot(point.x - spawn.x, point.z - spawn.z)).toBeGreaterThan(1.22);
         }
       }
     }
-    const settled = position(birds);
-    advance(result, 2, 19.2);
-    expect(position(birds).distanceTo(settled)).toBeLessThan(0.00001);
+    expect(checked).toBeGreaterThan(100);
+    expect(positions.size).toBeGreaterThan(35);
+    expect(kinds).toEqual(new Set(["ground", "fence", "roof", "cargo"]));
   });
 
-  it("uses one group globally and gives each completed visit at least a 20-second quiet interval", () => {
-    const result = create();
-    const birds = batch(result, "shop-birds");
-    let lastGone = Number.NEGATIVE_INFINITY;
-    let previousCount = 0;
-    let arrivals = 0;
-    for (let step = 0; step < 1500; step += 1) {
-      const elapsed = step * 0.05;
-      result.update(0.05, elapsed, true, [], null, null);
-      expect(birds.count).toBeLessThanOrEqual(3);
-      expect(batch(result, "shop-rats").count).toBe(0);
-      if (birds.count > 0 && previousCount === 0) {
-        arrivals += 1;
-        expect(elapsed - lastGone).toBeGreaterThanOrEqual(19.95);
+  it("visits every roof/cargo/fence side and supports both complete feet on real cargo lids", () => {
+    const builder = new ArenaBuilder();
+    const scene = new THREE.Scene();
+    builder.buildVisuals(scene);
+    scene.updateMatrixWorld(true);
+    const storage = [scene.getObjectByName("storage-timber")!, scene.getObjectByName("storage-packaging")!];
+    const surfaces = getBirdSurfaces();
+    const roofIds = new Set<string>();
+    const cargoIds = new Set<string>();
+    const fenceSides = new Set<string>();
+    const checkedCargo = new Set<string>();
+    const ray = new THREE.Raycaster();
+    const down = new THREE.Vector3(0, -1, 0);
+    let footChecks = 0;
+    try {
+      // These are actual gaps found by the independent browser tester.
+      for (const gap of [new THREE.Vector3(-4.770489, 2.2, -4.735946), new THREE.Vector3(-4.595896, 2.2, 4.793002)]) {
+        ray.set(gap, down);
+        expect(ray.intersectObjects(storage, false)[0]!.point.y).toBeLessThan(1.9);
       }
-      if (birds.count === 0 && previousCount > 0) lastGone = elapsed;
-      previousCount = birds.count;
+      for (let seed = 1; seed <= 64; seed += 1) {
+        const result = create(seeded(seed * 7919));
+        const birds = batch(result);
+        for (let step = 0; step < 240; step += 1) {
+          result.update(0.1, step * 0.1, true, [], null, null);
+          for (let index = 0; index < birds.count; index += 1) {
+            const point = position(birds, index);
+            const surface = surfaces.find((candidate) => Math.abs(point.y - candidate.y - 0.025) < 1e-5
+              && Math.abs(point.x - candidate.x) < Math.max(candidate.hx, 0.05) + 0.1
+              && Math.abs(point.z - candidate.z) < Math.max(candidate.hz, 0.05) + 0.1);
+            if (surface === undefined) continue;
+            if (surface.kind === "roof") roofIds.add(`${surface.x}:${surface.z}`);
+            if (surface.kind === "fence") fenceSides.add(surface.hx === 0 ? `x:${Math.sign(surface.x)}` : `z:${Math.sign(surface.z)}`);
+            if (surface.kind !== "cargo") continue;
+            cargoIds.add(`${surface.x}:${surface.z}`);
+            const key = `${seed}:${point.x.toFixed(3)}:${point.z.toFixed(3)}`;
+            if (checkedCargo.has(key)) continue;
+            checkedCargo.add(key);
+            const matrix = new THREE.Matrix4();
+            birds.getMatrixAt(index, matrix);
+            for (const side of [-1, 1]) {
+              // Include corners as well as centres, verifying the whole foot.
+              for (const corner of [[0, 0], [-0.03, -0.0375], [-0.03, 0.0375], [0.03, -0.0375], [0.03, 0.0375]]) {
+                const foot = new THREE.Vector3(side * 0.04 + corner[0]!, 0.013, 0.04 + corner[1]!).applyMatrix4(matrix);
+                ray.set(new THREE.Vector3(foot.x, surface.y + 0.2, foot.z), down);
+                const hit = ray.intersectObjects(storage, false)[0];
+                expect(hit).toBeDefined();
+                expect(hit!.point.y).toBeCloseTo(surface.y, 4);
+                footChecks += 1;
+              }
+            }
+          }
+        }
+      }
+      expect(roofIds.size).toBe(4);
+      expect(cargoIds.size).toBe(4);
+      expect(fenceSides.size).toBe(4);
+      expect(footChecks).toBeGreaterThan(100);
+    } finally {
+      builder.dispose(scene);
     }
-    expect(arrivals).toBe(2);
   });
 
-  it("does not land a group on any roof already occupied or approached by a live fighter", () => {
-    const result = create();
-    const players = shops.map((shop, index) => participant(shop.x, shop.z, { sessionId: `fighter-${index}` }));
-    advance(result, 20, 0, players);
-    expect(batch(result, "shop-birds").count).toBe(0);
-    advance(result, 8, 20);
-    expect(batch(result, "shop-birds").count).toBe(2);
-  });
+  it.each([{ alive: false, spectator: false }, { alive: true, spectator: true }])(
+    "ignores ineligible visitors %o and flees from a live remote/bot", (flags) => {
+      const { result, birds, elapsed } = landed();
+      const point = position(birds);
+      result.update(0.1, elapsed, true, [participant(point.x, point.z, flags)], null, null);
+      expect(position(birds).y).toBeCloseTo(point.y, 5);
+      result.update(0.4, elapsed + 0.1, true, [participant(point.x, point.z, { sessionId: "bot-2" })], null, null);
+      expect(position(birds).y).toBeGreaterThan(point.y + 0.5);
+    });
 
-  it.each([
-    { alive: false, spectator: false },
-    { alive: true, spectator: true },
-  ])("ignores an ineligible visitor (%o), but flees from a live remote/bot at the roof", (flags) => {
-    const result = create();
-    const birds = perch(result);
-    const landed = position(birds);
-    advance(result, 0.2, 14, [participant(landed.x, landed.z, flags)]);
-    expect(position(birds).y).toBeCloseTo(landed.y, 5);
-    advance(result, 0.4, 14.2, [participant(landed.x, landed.z, { sessionId: "bot-2" })]);
-    expect(position(birds).y).toBeGreaterThan(landed.y + 0.5);
-    expect(Math.hypot(position(birds).x - landed.x, position(birds).z - landed.z)).toBeGreaterThan(0.5);
-    advance(result, 3, 14.6);
-    expect(birds.count).toBe(0);
-  });
-
-  it("uses the predicted local position for prompt flight, while requiring the local fighter to be alive", () => {
-    const result = create();
-    const birds = perch(result);
-    const landed = position(birds);
+  it("scares at 3 metres and uses predicted local movement only for a living fighter", () => {
+    const { result, birds, elapsed } = landed();
+    const point = position(birds);
+    result.update(0.05, elapsed, true, [participant(point.x - 3.2, point.z)], null, null);
+    expect(position(birds).y).toBeCloseTo(point.y, 5);
     const self = participant(100, 100, { sessionId: "self", alive: false });
-    result.update(0.1, 14, true, [self], "self", landed);
-    expect(position(birds).y).toBeCloseTo(landed.y, 5);
-    result.update(0.2, 14.1, true, [{ ...self, alive: true }], "self", landed);
-    expect(position(birds).y).toBeGreaterThan(landed.y + 0.3);
+    result.update(0.1, elapsed + 0.05, true, [self], "self", point);
+    expect(position(birds).y).toBeCloseTo(point.y, 5);
+    result.update(0.3, elapsed + 0.15, true, [{ ...self, alive: true }], "self", point);
+    expect(position(birds).y).toBeGreaterThan(point.y + 0.5);
   });
 
-  it("uses a 3-metre horizontal scare radius and scatters in distinct directions", () => {
-    const result = create();
-    const birds = perch(result);
-    const landed = position(birds);
-    result.update(0.05, 14, true, [participant(landed.x - 3.2, landed.z)], null, null);
-    expect(position(birds).y).toBeCloseTo(landed.y, 5);
-    result.update(0.4, 14.05, true, [participant(landed.x - 2.9, landed.z)], null, null);
-    expect(position(birds).x).toBeGreaterThan(landed.x + 0.5);
-    const first = position(birds, 0);
-    const second = position(birds, 1);
-    expect(first.distanceTo(second)).toBeGreaterThan(0.7);
+  it("clears even the tallest fence before any frightened bird spreads sideways", () => {
+    for (const random of [0, 0.3, 0.5, 0.8]) {
+      const { result, birds, elapsed } = landed(random);
+      const point = position(birds);
+      let lateralFlight = false;
+      for (let step = 0; step < 35; step += 1) {
+        result.update(0.05, elapsed + step * 0.05, true,
+          step === 0 ? [participant(point.x, point.z)] : [], null, null);
+        const lifted = position(birds);
+        const horizontal = Math.hypot(lifted.x - point.x, lifted.z - point.z);
+        if (horizontal > 0.001) {
+          lateralFlight = true;
+          expect(lifted.y).toBeGreaterThan(WALL_VISUAL_HEIGHT + 0.4);
+        }
+        if (step === 1) {
+          expect(horizontal).toBeLessThan(0.001);
+          expect(lifted.y).toBeGreaterThan(point.y + 1);
+        }
+      }
+      expect(lateralFlight).toBe(true);
+    }
   });
 
-  it("ends roof visits at dusk and keeps birds absent throughout night, including a skipped dusk snapshot", () => {
+  it("avoids landing near live fighters, but ignores dead/spectator spawn positions", () => {
+    const occupied = getBirdSurfaces().map((surface, index) => participant(surface.x, surface.z, { sessionId: `bot-${index}` }));
     const result = create();
-    const birds = perch(result);
+    advance(result, 20, 0, occupied);
+    expect(batch(result).count).toBe(0);
+    advance(result, 10, 20, occupied.map((player) => ({ ...player, alive: false })));
+    expect(batch(result).count).toBeGreaterThan(0);
+  });
+
+  it("folds every wing above the supporting surface, including low cargo and ground", () => {
+    for (const random of [0, 0.3, 0.5, 0.8]) {
+      const { result, birds } = landed(random);
+      const wings = batch(result, "shop-bird-wings");
+      const vertices = wings.geometry.getAttribute("position");
+      for (let bird = 0; bird < birds.count; bird += 1) {
+        const floor = position(birds, bird).y - 0.025;
+        for (const wing of [bird * 2, bird * 2 + 1]) {
+          const matrix = new THREE.Matrix4();
+          wings.getMatrixAt(wing, matrix);
+          for (let vertex = 0; vertex < vertices.count; vertex += 1) {
+            expect(new THREE.Vector3().fromBufferAttribute(vertices, vertex).applyMatrix4(matrix).y).toBeGreaterThan(floor + 0.02);
+          }
+        }
+      }
+    }
+  });
+
+  it("flies away at dusk and is completely hidden at night, including late snapshots", () => {
+    const { result, birds, elapsed } = landed();
     result.update(0.2, 75, true, [], null, null);
-    expect(position(birds).y).toBeGreaterThan(3.3);
-    advance(result, 6, 75.2);
+    expect(position(birds).y).toBeGreaterThan(0.5);
+    advance(result, 10, 75.2);
     expect(birds.count).toBe(0);
-    advance(result, 40, 81.2);
-    expect(birds.count).toBe(0);
-
     result.reset();
-    perch(result);
+    advance(result, elapsed);
     result.update(0.05, 90, true, [], null, null);
     expect(birds.count).toBe(0);
+    advance(result, 30, 90.05);
+    expect(birds.count).toBe(0);
   });
 });
 
-describe("occasional nocturnal rats on approach", () => {
-  it("starts at the actual night boundary before shop lamps switch on, and limits a group to 1–2 rats", () => {
-    const result = create(() => 0.5);
-    const rats = batch(result, "shop-rats");
-    const front = fronts[0]!;
-    const visitor = participant(front.x, front.z);
-    advance(result, 2, 87.8, [visitor]);
-    expect(rats.count).toBe(0);
-    advance(result, 0.4, 90, [visitor]);
-    expect(rats.count).toBe(2);
-    expect(position(rats).y).toBeLessThan(0.08);
-    expect(position(rats, 0).distanceTo(position(rats, 1))).toBeGreaterThan(0.2);
-    advance(result, 3, 90.4, [visitor]);
-    expect(rats.count).toBe(0);
-    advance(result, 40, 93.4, [visitor]);
-    expect(rats.count).toBe(0);
-  });
-
-  it("uses a 3.5m approach radius and requires leaving the 5m rearm radius before another run", () => {
-    const result = create();
-    const rats = batch(result, "shop-rats");
-    const front = fronts[0]!;
-    const nx = Math.sin(front.rotationY);
-    const nz = Math.cos(front.rotationY);
-    const visitorAt = (distance: number): Participant[] => [participant(front.x + nx * distance, front.z + nz * distance)];
-    advance(result, 0.1, 90, visitorAt(3.6));
-    expect(rats.count).toBe(0);
-    advance(result, 0.2, 90.1, visitorAt(3.5));
-    expect(rats.count).toBe(1);
-    advance(result, 30, 90.3, visitorAt(3.5));
-    expect(rats.count).toBe(0);
-    advance(result, 0.2, 120.3, visitorAt(4.9));
-    advance(result, 0.2, 120.5, visitorAt(3));
-    expect(rats.count).toBe(0);
-    advance(result, 0.2, 120.7, visitorAt(5.1));
-    advance(result, 0.2, 120.9, visitorAt(3));
-    expect(rats.count).toBe(1);
-  });
-
-  it("enforces one global cooldown across shops and consumes failed/random approach opportunities", () => {
-    let roll = 0.95;
-    const result = create(() => roll);
-    const rats = batch(result, "shop-rats");
-    const first = fronts[0]!;
-    const second = fronts[1]!;
-    advance(result, 0.1, 90, [participant(first.x, first.z)]);
-    expect(rats.count).toBe(0);
-    roll = 0;
-    advance(result, 0.2, 90.1);
-    advance(result, 0.2, 90.3, [participant(second.x, second.z)]);
-    expect(rats.count).toBe(0);
-    advance(result, 30, 90.5);
-    advance(result, 0.2, 120.5, [participant(second.x, second.z)]);
-    expect(rats.count).toBe(1);
-    advance(result, 2, 120.7);
-    advance(result, 0.2, 122.7, [participant(first.x, first.z)]);
-    expect(rats.count).toBe(0);
-    advance(result, 30, 122.9, [participant(first.x, first.z)]);
-    expect(rats.count).toBe(0);
-  });
-
-  it.each([
-    { alive: false, spectator: false },
-    { alive: true, spectator: true },
-  ])("ignores dead/spectator approach (%o)", (flags) => {
-    const result = create();
-    const front = fronts[0]!;
-    advance(result, 2, 90, [participant(front.x, front.z, flags)]);
-    expect(batch(result, "shop-rats").count).toBe(0);
-    advance(result, 0.2, 92, [participant(front.x, front.z)]);
-    expect(batch(result, "shop-rats").count).toBe(1);
-  });
-
-  it("keeps every current facade sprint outside shop/obstacle/ramp volumes and inside the arena", () => {
-    for (const front of fronts) {
-      const result = create();
-      const rats = batch(result, "shop-rats");
-      const visitor = participant(front.x, front.z);
-      let observed = 0;
-      for (let step = 0; step < 40; step += 1) {
-        result.update(0.04, 90 + step * 0.04, true, [visitor], null, null);
-        if (rats.count === 0) continue;
-        observed += 1;
-        const point = position(rats);
-        expect(Math.abs(point.x)).toBeLessThan(17);
-        expect(Math.abs(point.z)).toBeLessThan(17);
-        for (const block of [...shops, ...getObstacleLayout()]) {
-          const inside = Math.abs(point.x - block.x) < block.hx + 0.1 && Math.abs(point.z - block.z) < block.hz + 0.1;
-          expect(inside).toBe(false);
-        }
-        for (const ramp of getRamps()) {
-          const hx = ramp.axis === "x" ? ramp.halfWidth : ramp.halfLength;
-          const hz = ramp.axis === "x" ? ramp.halfLength : ramp.halfWidth;
-          expect(Math.abs(point.x - ramp.x) < hx + 0.1 && Math.abs(point.z - ramp.z) < hz + 0.1).toBe(false);
-        }
-      }
-      expect(observed).toBeGreaterThan(20);
+describe("autonomous nocturnal journeys between stores", () => {
+  it("precomputes diverse safe routes between every pair of real shop fronts", () => {
+    const routes = getRatRoutes();
+    expect(routes).toHaveLength(36);
+    expect(new Set(routes.map((route) => `${route.source}:${route.destination}`)).size).toBe(12);
+    for (const route of routes) {
+      expect(route.source).not.toBe(route.destination);
+      expect(route.length).toBeGreaterThan(15);
+      expect(route.distances.at(-1)).toBe(route.length);
+      for (let index = 1; index < route.points.length; index += 1) expect(isRatSegmentClear(route.points[index - 1]!, route.points[index]!)).toBe(true);
     }
   });
+
+  it.each([{ random: 0, count: 1 }, { random: 0.5, count: 2 }])(
+    "runs $count rats after night starts without a nearby player", ({ random, count }) => {
+      const result = create(() => random);
+      const rats = batch(result, "shop-rats");
+      advance(result, 10, 79.9);
+      expect(rats.count).toBe(0);
+      advance(result, 1 + random * 3 + 2, 90);
+      expect(rats.count).toBe(count);
+      const start = position(rats);
+      advance(result, 3, 94 + random * 3);
+      expect(position(rats).distanceTo(start)).toBeGreaterThan(5);
+      expect(position(rats).y).toBeLessThan(0.05);
+    });
+
+  it("covers the arena between stores with varying pairs, routes, and quiet intervals", () => {
+    const result = create(seeded(123));
+    const rats = batch(result, "shop-rats");
+    const episodes: Array<{ at: number; start: THREE.Vector3 }> = [];
+    const counts = new Set<number>();
+    let previous = 0;
+    let traveledFar = false;
+    for (let step = 0; step < 1700; step += 1) {
+      result.update(0.05, 90 + step * 0.05, true, [], null, null);
+      expect(rats.count).toBeLessThanOrEqual(2);
+      counts.add(rats.count);
+      if (rats.count > 0 && previous === 0) episodes.push({ at: step * 0.05, start: position(rats) });
+      for (let index = 0; index < rats.count; index += 1) {
+        const point = position(rats, index);
+        expect(isWildlifeGroundClear(point.x, point.z, 0.45)).toBe(true);
+        if (episodes.length > 0 && point.distanceTo(episodes.at(-1)!.start) > 12) traveledFar = true;
+      }
+      previous = rats.count;
+    }
+    expect(episodes.length).toBeGreaterThanOrEqual(3);
+    expect(counts).toEqual(new Set([0, 1, 2]));
+    expect(traveledFar).toBe(true);
+    expect(new Set(episodes.map((episode) => `${episode.start.x.toFixed(1)}:${episode.start.z.toFixed(1)}`)).size).toBeGreaterThan(1);
+    const intervals = episodes.slice(1).map((episode, index) => Math.round((episode.at - episodes[index]!.at) * 10));
+    expect(new Set(intervals).size).toBeGreaterThan(1);
+  });
+
+  it("uses separate journeys for a pair and stays clear of every solid/ramp/pad/spawn all along them", () => {
+    const result = create(() => 0.5);
+    const rats = batch(result, "shop-rats");
+    let pair = false;
+    for (let step = 0; step < 450; step += 1) {
+      result.update(0.05, 90 + step * 0.05, true, [], null, null);
+      for (let index = 0; index < rats.count; index += 1) {
+        const point = position(rats, index);
+        expect(isWildlifeGroundClear(point.x, point.z, 0.45)).toBe(true);
+      }
+      if (rats.count === 2) {
+        pair = true;
+        expect(position(rats, 0).distanceTo(position(rats, 1))).toBeGreaterThan(0.2);
+      }
+    }
+    expect(pair).toBe(true);
+  });
 });
 
-describe("pooled geometry and lifecycle", () => {
-  it("uses three shared-material batches, bounded capacity, positive instance scales, and no shadows/lights", () => {
-    const result = create(() => 0.5);
+describe("bounded geometry and round lifecycle", () => {
+  it("keeps three shared-material batches, bounded buffers, positive scales, and no extra lights/shadows", () => {
+    const result = create(seeded(99));
     const meshes = result.object.children as THREE.InstancedMesh[];
-    const originalGeometry = meshes.map((mesh) => mesh.geometry);
+    const geometry = meshes.map((mesh) => mesh.geometry);
     expect(meshes).toHaveLength(3);
     expect(new Set(meshes.map((mesh) => mesh.material)).size).toBe(1);
+    expect(meshes.map((mesh) => mesh.instanceMatrix.count)).toEqual([6, 12, 2]);
     for (const mesh of meshes) {
       expect(mesh).toBeInstanceOf(THREE.InstancedMesh);
-      expect(mesh.castShadow).toBe(false);
-      expect(mesh.receiveShadow).toBe(false);
+      expect(mesh.castShadow || mesh.receiveShadow).toBe(false);
       expect(mesh.geometry.getAttribute("color").count).toBe(mesh.geometry.getAttribute("position").count);
     }
-    advance(result, 20);
-    expect(meshes.filter((mesh) => mesh.visible)).toHaveLength(2);
-    const wings = batch(result, "shop-bird-wings");
-    for (let index = 0; index < wings.count; index += 1) {
-      const matrix = new THREE.Matrix4();
-      wings.getMatrixAt(index, matrix);
-      expect(matrix.determinant()).toBeGreaterThan(0);
+    for (let round = 0; round < 5; round += 1) {
+      result.reset();
+      advance(result, 70);
+      advance(result, 30, 90);
+      for (const mesh of meshes) {
+        for (let index = 0; index < mesh.count; index += 1) {
+          const matrix = new THREE.Matrix4();
+          mesh.getMatrixAt(index, matrix);
+          expect(matrix.determinant()).toBeGreaterThan(0);
+        }
+      }
+      expect(result.object.children).toEqual(meshes);
+      expect(meshes.map((mesh) => mesh.geometry)).toEqual(geometry);
     }
-    advance(result, 70, 20);
-    const front = fronts[0]!;
-    advance(result, 0.4, 90, [participant(front.x, front.z)]);
-    expect(meshes.filter((mesh) => mesh.visible)).toHaveLength(1);
-    expect(result.object.children).toEqual(meshes);
-    expect(meshes.map((mesh) => mesh.geometry)).toEqual(originalGeometry);
   });
 
-  it("clears groups on round end/reset and elapsed rewind, and resets rat approach rearming", () => {
-    const result = create();
-    const birds = perch(result);
+  it("clears every group on round end, reset, and elapsed rewind and resumes fresh timing", () => {
+    const { result, birds } = landed();
     result.update(0.1, 180, false, [], null, null);
     expect(birds.count).toBe(0);
     advance(result, 5);
     expect(birds.count).toBe(0);
     advance(result, 9, 5);
-    expect(birds.count).toBe(2);
+    expect(birds.count).toBe(1);
     result.update(0.1, 0, true, [], null, null);
     expect(birds.count).toBe(0);
-    const front = fronts[0]!;
-    advance(result, 0.2, 90, [participant(front.x, front.z)]);
+    advance(result, 3, 90);
     expect(batch(result, "shop-rats").count).toBe(1);
     result.reset();
     expect(batch(result, "shop-rats").count).toBe(0);
-    advance(result, 0.2, 90, [participant(front.x, front.z)]);
-    expect(batch(result, "shop-rats").count).toBe(1);
+    advance(result, 0.5, 90);
+    expect(batch(result, "shop-rats").count).toBe(0);
   });
 
-  it("disposes each owned geometry/material and instance buffer once, detaches, and cannot animate afterward", () => {
+  it("disposes every owned geometry/material/instance buffer once and cannot animate afterward", () => {
     const result = create();
     const scene = new THREE.Scene();
     scene.add(result.object);
     const meshes = result.object.children as THREE.InstancedMesh[];
-    const geometrySpies = meshes.map((mesh) => vi.spyOn(mesh.geometry, "dispose"));
-    const instanceSpies = meshes.map((mesh) => vi.spyOn(mesh, "dispose"));
-    const materialSpy = vi.spyOn(meshes[0]!.material as THREE.Material, "dispose");
-    perch(result);
+    const spies = meshes.flatMap((mesh) => [vi.spyOn(mesh.geometry, "dispose"), vi.spyOn(mesh, "dispose")]);
+    spies.push(vi.spyOn(meshes[0]!.material as THREE.Material, "dispose"));
+    advance(result, 20);
     result.dispose();
     result.dispose();
+    advance(result, 30);
     expect(scene.children).toHaveLength(0);
     expect(result.object.children).toHaveLength(0);
-    advance(result, 30);
-    for (const spy of [...geometrySpies, ...instanceSpies, materialSpy]) expect(spy).toHaveBeenCalledTimes(1);
+    for (const spy of spies) expect(spy).toHaveBeenCalledTimes(1);
   });
 });

@@ -94,6 +94,7 @@ import { BallsPool, SuperCore } from "../fx/Balls";
 import { CameraShake, HitFlash } from "../fx/CameraShake";
 import { Fireflies } from "../fx/Fireflies";
 import { ShopWildlife } from "../fx/ShopWildlife";
+import { SkyAircraft } from "../fx/SkyAircraft";
 import {
   AirborneGate,
   applyClothing,
@@ -571,6 +572,7 @@ export class SceneManager {
   // update / dispose stay in one place with the other pooled visuals.
   private fireflies: Fireflies | null = null;
   private wildlife: ShopWildlife | null = null;
+  private skyAircraft: SkyAircraft | null = null;
   private wildlifePlayers: readonly NetPlayerSnapshot[] = [];
   private wildlifePlaying = false;
   private wildlifeLocalId: string | null = null;
@@ -729,6 +731,7 @@ export class SceneManager {
     if (this.appliedRoundProgress === this.roundProgress) return;
     this.appliedRoundProgress = this.built ? this.roundProgress : Number.NaN;
     const elapsed = this.roundProgress * ROUND_SECONDS;
+    this.skyAircraft?.setElapsed(elapsed);
     let from = ROUND_DAY_LIGHTING;
     let to = ROUND_SUNSET_LIGHTING;
     let blend = smooth01((elapsed - ROUND_LIGHTING_TRANSITION_START_S)
@@ -875,6 +878,8 @@ export class SceneManager {
     this.arena.buildVisuals(this.scene);
     this.environment.build(this.scene);
     this.buildSky(this.scene);
+    this.skyAircraft = new SkyAircraft();
+    this.scene.add(this.skyAircraft.object);
     this.ads.buildVisuals(this.scene);
     this.setDayProgress(this.roundProgress);
     void this.ads.load().catch(() => {
@@ -1494,7 +1499,7 @@ export class SceneManager {
       }
       this.superCore.update(deltaSeconds);
     }
-    // Fireflies drift in play and spectate only after the final-minute
+    // Fireflies drift in play and spectate only after the shared night
     // lighting gate. The hidden swarm skips its matrix update entirely.
     this.fireflies?.update(deltaSeconds, this.camera);
     this.wildlife?.update(deltaSeconds, this.roundProgress * ROUND_SECONDS,
@@ -2290,6 +2295,7 @@ export class SceneManager {
     this.latestSuper = null;
     this.setWildlifeSnapshot([], false, null);
     this.wildlife?.reset();
+    this.skyAircraft?.reset();
     this.clearBonuses();
     this.hasAim = false;
     this.sparkTimer = 0;
@@ -2371,6 +2377,8 @@ export class SceneManager {
     }
     this.wildlife?.dispose();
     this.wildlife = null;
+    this.skyAircraft?.dispose();
+    this.skyAircraft = null;
     this.wildlifePlayers = [];
     this.wildlifePlaying = false;
     this.wildlifeLocalId = null;

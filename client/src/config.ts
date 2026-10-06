@@ -129,9 +129,9 @@ export const ROUND_LIGHTING_TRANSITION_END_S = ROUND_SECONDS - 90;
 export const ROUND_LIGHTING_SUNSET_AT_S = (ROUND_LIGHTING_TRANSITION_START_S
   + ROUND_LIGHTING_TRANSITION_END_S) / 2;
 export const ROUND_SKY_TRANSITION_START_PROGRESS = 0.43;
-// Porch/firefly onset uses real elapsed time, independently of the faster sky.
-// Keep the existing 6.3-second smooth fade after the last minute begins.
-export const ROUND_EVENING_LIGHTS_START_S = ROUND_SECONDS - 60;
+// All evening dressing starts with full night at 1:30 remaining. Keep the
+// existing 6.3-second fade, using the same authoritative round clock.
+export const ROUND_EVENING_LIGHTS_START_S = ROUND_LIGHTING_TRANSITION_END_S;
 export const ROUND_EVENING_LIGHTS_FADE_S = ROUND_SECONDS * 0.035;
 export const START_SCORE = 0;
 // Event feed (owner 4d.4: top-right, brief, semi-transparent, never in the
